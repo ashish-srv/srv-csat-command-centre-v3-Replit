@@ -12,13 +12,12 @@ to become the root of a separate GitHub repository for Replit.
 | Replit build/start configuration | Added |
 | Current n8n workflows 01–12 | Copied into `n8n/workflows/` |
 | PostgreSQL schema baseline | Added under `database/migrations/` |
-| Direct Replit PostgreSQL store | **Not implemented yet** |
+| Direct Replit PostgreSQL store | Implemented with parameterized queries |
 | Existing Supabase production data import | **Not performed yet** |
 
 Do not switch the live WhatsApp webhook or publish this as the production CSAT
-application yet. The copied application still uses `SupabaseStore`, which talks
-to Supabase through PostgREST. The next migration phase must implement the same
-store contract with direct PostgreSQL queries using Replit's `DATABASE_URL`.
+application yet. First apply the tracked migrations to the Replit development
+database, configure development secrets, and complete end-to-end testing.
 
 ## Repository layout
 
@@ -40,6 +39,7 @@ docs/                   Existing architecture and operational documentation
 - Production build: `npm run build`
 - Production server: `npm start`
 - Validation: `npm run check && npm test`
+- Database migration: `npm run db:migrate`
 
 The production server listens on Replit's `PORT` and binds to `0.0.0.0`. It
 serves `/api/*` through the existing API handler and all other routes through
@@ -47,12 +47,10 @@ the built React single-page application.
 
 ## Remaining work before production
 
-1. Export and version the exact live Supabase schema. The local baseline does
-   not include every field/table added during later development.
-2. Add the PostgreSQL driver and implement `PostgresStore` for the full store
-   contract used by `src/server/api-handler.js`.
-3. Run the schema and seed/import scripts against the Replit development
-   database and pass the complete automated test suite.
+1. Push this PostgreSQL adapter and the current migrations to the Replit GitHub
+   repository, then pull/sync them into the imported Replit App.
+2. Run `npm ci`, `npm run db:migrate`, `npm run check`, and `npm test` in Replit.
+3. Configure development secrets and validate the preview with test data.
 4. Import a final, consistent copy of existing Supabase data into Replit's
    production database during a short write freeze.
 5. Set production secrets in Replit. Never commit `.env`.
@@ -60,4 +58,3 @@ the built React single-page application.
    tests, and activate workflows only after the end-to-end checks pass.
 
 See `MIGRATION-STATUS.md` for the repository decision and cutover sequence.
-

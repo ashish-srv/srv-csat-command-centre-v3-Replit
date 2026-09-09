@@ -32,10 +32,10 @@ The latest import-ready n8n workflow bundle was copied from the generated
 
 ## Safe cutover sequence
 
-1. Finish `PostgresStore` and database migrations.
+1. Finish `PostgresStore` and database migrations. **Completed locally.**
 2. Create the new private GitHub repository and push this folder as its root.
 3. Import that repository into Replit.
-4. Provision the Replit development database and run migrations.
+4. Provision the Replit development database and run migrations. **Database provisioned; migration run pending.**
 5. Add development secrets and validate Preview.
 6. Publish a private Reserved VM deployment with a production database.
 7. Import the existing CSAT data and reconcile row counts and relationships.
@@ -44,4 +44,3 @@ The latest import-ready n8n workflow bundle was copied from the generated
    the inbound route, and reactivate the workflows.
 10. Keep the old deployment and Supabase database read-only for a defined
     rollback period before retiring them.
-

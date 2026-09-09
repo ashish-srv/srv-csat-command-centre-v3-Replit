@@ -2643,7 +2643,7 @@ async function handleApiRequest(request) {
     return json(200, {
       ok: true,
       version: "v2",
-      provider: process.env.DATA_PROVIDER || "supabase",
+      provider: process.env.DATA_PROVIDER || "postgres",
       time: new Date().toISOString()
     });
   }
@@ -2663,7 +2663,7 @@ async function handleApiRequest(request) {
   if (method === "POST" && pathname === "/api/auth/login") {
     const expected = appLoginPassword();
     if (!expected) {
-      return error(503, "Application login is not configured", "Set APP_LOGIN_PASSWORD to at least 8 characters in Netlify environment variables, then redeploy.");
+      return error(503, "Application login is not configured", "Set APP_LOGIN_PASSWORD to at least 8 characters in Replit Secrets, then restart the app.");
     }
     if (!safeEqual(body.password, expected)) return error(401, "Incorrect password");
     const token = createAppSessionToken();
@@ -2685,7 +2685,7 @@ async function handleApiRequest(request) {
   // WhatsApp replies or scheduled n8n jobs.
   if (!isMachineApiPath(pathname)) {
     if (!appLoginPassword()) {
-      return error(503, "Application login is not configured", "Set APP_LOGIN_PASSWORD to at least 8 characters in Netlify environment variables, then redeploy.");
+      return error(503, "Application login is not configured", "Set APP_LOGIN_PASSWORD to at least 8 characters in Replit Secrets, then restart the app.");
     }
     if (!isAppAuthenticated(request.headers)) return error(401, "Authentication required");
   }

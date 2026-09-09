@@ -369,7 +369,8 @@ function aggregateCycle(sessions, allPocs) {
 }
 
 class SupabaseStore {
-  constructor() {
+  constructor(options = {}) {
+    if (options.skipEnv) return;
     this.url = requireEnv("SUPABASE_URL").replace(/\/$/, "");
     this.key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
   }

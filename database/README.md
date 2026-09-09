@@ -15,11 +15,16 @@ live CSAT database.
    weighting and safely backfills existing active POCs.
 5. `005-client-poc-birthdate.sql` — adds the optional birthday field used by
    current POC management and workbook imports.
+6. `006-current-application-schema.sql` — adds analysis/prediction fields, the
+   observations table and the two required POC tags.
 
-The application has evolved after the original v2 schema was created. Before
-running migrations against Replit production, export the exact current
-Supabase schema and reconcile later additions such as prediction fields,
-observations, appreciations, session-closing fields and automation metadata.
+Run all tracked migrations in order with `npm run db:migrate`. The runner records
+checksums in `csat_schema_migrations` and refuses to accept an edited migration
+that was already applied.
+
+Before importing historical production data, compare the exported Supabase
+schema and row counts with this schema. Do not run a production cutover until
+that reconciliation is complete.
 
 Keep schema migrations in this directory under version control. Keep real
 client/POC rows and database dumps outside Git because they contain production
