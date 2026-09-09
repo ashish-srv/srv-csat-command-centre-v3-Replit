@@ -4,10 +4,10 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Dev-only. Vite blocks unrecognised hostnames, which stops a Cloudflare
-    // tunnel from reaching the dev server. Production is served from dist/
-    // and never uses this.
-    allowedHosts: [".trycloudflare.com"]
+    // Dev-only. A leading dot permits the domain and all of its subdomains,
+    // so Replit's generated preview hostname may change without a code edit.
+    // Production is served from dist/ and never uses this Vite server.
+    allowedHosts: [".replit.dev", ".trycloudflare.com"]
   },
   build: {
     outDir: "dist",
