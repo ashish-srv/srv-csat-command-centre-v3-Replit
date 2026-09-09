@@ -2701,6 +2701,74 @@ async function scenario(name, fn) {
     assert.ok(issueDelete < sessionDelete && sessionDelete < cycleDelete);
   });
 
+  await scenario("Supabase project deletion removes restricted children before the project", async () => {
+    const cleanupStore = Object.create(SupabaseStore.prototype);
+    const requests = [];
+    cleanupStore.request = async (table, options = {}) => {
+      requests.push({ table, options });
+      if (table === "feedback_sessions" && !options.method) {
+        return [{ id: "sess_a" }, { id: "sess_b" }];
+      }
+      if (options.method === "DELETE") {
+        const counts = {
+          issue_events: 2,
+          issues: 1,
+          observations: 3,
+          service_feedback: 2,
+          messages: 4,
+          feedback_sessions: 2,
+          feedback_cycles: 1,
+          client_pocs: 1,
+          project_services: 2,
+          projects: 1
+        };
+        return Array.from({ length: counts[table] || 0 }, (_, index) => ({ id: `${table}_${index}` }));
+      }
+      throw new Error(`Unexpected ${options.method || "GET"} ${table}`);
+    };
+
+    const result = await cleanupStore.deleteProjects(["prj_cleanup"]);
+    assert.deepStrictEqual(result, {
+      projectsDeleted: 1,
+      pocsDeleted: 1,
+      servicesDeleted: 2,
+      cyclesDeleted: 1,
+      sessionsDeleted: 2,
+      messagesDeleted: 4,
+      serviceFeedbackDeleted: 2,
+      observationsDeleted: 3,
+      issuesDeleted: 1,
+      issueEventsDeleted: 2
+    });
+    const observationDelete = requests.findIndex((request) => request.table === "observations");
+    const sessionDelete = requests.findIndex((request) => request.table === "feedback_sessions" && request.options.method === "DELETE");
+    const projectDelete = requests.findIndex((request) => request.table === "projects" && request.options.method === "DELETE");
+    assert.ok(observationDelete >= 0 && observationDelete < sessionDelete);
+    assert.ok(sessionDelete < projectDelete);
+    assert.match(requests.find((request) => request.table === "messages").options.query, /^session_id=in\.\(sess_a,sess_b\)&select=id$/);
+  });
+
+  await scenario("Supabase whole-client deletion cleans its projects before the client", async () => {
+    const cleanupStore = Object.create(SupabaseStore.prototype);
+    const calls = [];
+    cleanupStore.request = async (table, options = {}) => {
+      calls.push({ table, options });
+      if (table === "projects" && !options.method) return [{ id: "prj_a" }, { id: "prj_b" }];
+      if (table === "clients" && options.method === "DELETE") return [{ id: "cl_a" }];
+      throw new Error(`Unexpected ${options.method || "GET"} ${table}`);
+    };
+    cleanupStore.deleteProjects = async (ids) => {
+      calls.push({ table: "deleteProjects", ids });
+      return { projectsDeleted: ids.length, observationsDeleted: 3 };
+    };
+
+    const result = await cleanupStore.deleteClients(["cl_a"]);
+    assert.deepStrictEqual(result, { clientsDeleted: 1, projectsDeleted: 2, observationsDeleted: 3 });
+    assert.deepStrictEqual(calls.find((call) => call.table === "deleteProjects").ids, ["prj_a", "prj_b"]);
+    assert.ok(calls.findIndex((call) => call.table === "deleteProjects")
+      < calls.findIndex((call) => call.table === "clients" && call.options.method === "DELETE"));
+  });
+
   await scenario("cycle deletion rollups use remaining history without changing feedback schedule fields", async () => {
     const rollupStore = Object.create(SupabaseStore.prototype);
     const patches = [];

@@ -2534,24 +2534,112 @@ class SupabaseStore {
 
   async deleteProjects(projectIds = []) {
     const ids = [...new Set(projectIds.filter(Boolean))];
-    if (!ids.length) return { projectsDeleted: 0 };
+    if (!ids.length) return {
+      projectsDeleted: 0,
+      pocsDeleted: 0,
+      servicesDeleted: 0,
+      cyclesDeleted: 0,
+      sessionsDeleted: 0,
+      messagesDeleted: 0,
+      serviceFeedbackDeleted: 0,
+      observationsDeleted: 0,
+      issuesDeleted: 0,
+      issueEventsDeleted: 0
+    };
+
+    const encodedIds = ids.map((id) => encodeURIComponent(id));
+    const projectFilter = `project_id=in.(${encodedIds.join(",")})`;
+    const counts = {
+      projectsDeleted: 0,
+      pocsDeleted: 0,
+      servicesDeleted: 0,
+      cyclesDeleted: 0,
+      sessionsDeleted: 0,
+      messagesDeleted: 0,
+      serviceFeedbackDeleted: 0,
+      observationsDeleted: 0,
+      issuesDeleted: 0,
+      issueEventsDeleted: 0
+    };
+
+    // Do not depend on each database installation having identical ON DELETE
+    // rules. Older databases used RESTRICT for observations.project_id, which
+    // made a whole-client delete fail while trying to cascade through projects.
+    // Removing every child explicitly also keeps project deletion retry-safe if
+    // a network failure interrupts one of these idempotent requests.
+    const sessions = await this.request("feedback_sessions", {
+      query: `${projectFilter}&select=id`
+    });
+    const sessionIds = sessions.map((row) => row.id).filter(Boolean);
+
+    const projectOwnedTables = [
+      ["issue_events", "issueEventsDeleted"],
+      ["issues", "issuesDeleted"],
+      ["observations", "observationsDeleted"],
+      ["service_feedback", "serviceFeedbackDeleted"]
+    ];
+    for (const [table, countKey] of projectOwnedTables) {
+      const deletedRows = await this.request(table, {
+        method: "DELETE",
+        query: `${projectFilter}&select=id`,
+        prefer: "return=representation"
+      });
+      counts[countKey] += Array.isArray(deletedRows) ? deletedRows.length : 0;
+    }
+
+    // Messages have no project_id of their own, so delete them through the
+    // sessions collected before removing those sessions.
+    for (let index = 0; index < sessionIds.length; index += 100) {
+      const batch = sessionIds.slice(index, index + 100).map((id) => encodeURIComponent(id));
+      const deletedMessages = await this.request("messages", {
+        method: "DELETE",
+        query: `session_id=in.(${batch.join(",")})&select=id`,
+        prefer: "return=representation"
+      });
+      counts.messagesDeleted += Array.isArray(deletedMessages) ? deletedMessages.length : 0;
+    }
+
+    const remainingProjectTables = [
+      ["feedback_sessions", "sessionsDeleted"],
+      ["feedback_cycles", "cyclesDeleted"],
+      ["client_pocs", "pocsDeleted"],
+      ["project_services", "servicesDeleted"]
+    ];
+    for (const [table, countKey] of remainingProjectTables) {
+      const deletedRows = await this.request(table, {
+        method: "DELETE",
+        query: `${projectFilter}&select=id`,
+        prefer: "return=representation"
+      });
+      counts[countKey] += Array.isArray(deletedRows) ? deletedRows.length : 0;
+    }
+
     const deleted = await this.request("projects", {
       method: "DELETE",
-      query: `id=in.(${ids.map((id) => encodeURIComponent(id)).join(",")})&select=id`,
+      query: `id=in.(${encodedIds.join(",")})&select=id`,
       prefer: "return=representation"
     });
-    return { projectsDeleted: Array.isArray(deleted) ? deleted.length : ids.length };
+    counts.projectsDeleted = Array.isArray(deleted) ? deleted.length : ids.length;
+    return counts;
   }
 
   async deleteClients(clientIds = []) {
     const ids = [...new Set(clientIds.filter(Boolean))];
     if (!ids.length) return { clientsDeleted: 0 };
+    const encodedIds = ids.map((id) => encodeURIComponent(id));
+    const projects = await this.request("projects", {
+      query: `client_id=in.(${encodedIds.join(",")})&select=id`
+    });
+    const projectCleanup = await this.deleteProjects(projects.map((project) => project.id));
     const deleted = await this.request("clients", {
       method: "DELETE",
-      query: `id=in.(${ids.map((id) => encodeURIComponent(id)).join(",")})&select=id`,
+      query: `id=in.(${encodedIds.join(",")})&select=id`,
       prefer: "return=representation"
     });
-    return { clientsDeleted: Array.isArray(deleted) ? deleted.length : ids.length };
+    return {
+      clientsDeleted: Array.isArray(deleted) ? deleted.length : ids.length,
+      ...projectCleanup
+    };
   }
 
   async projectKeyExists(key, exceptId = null) {
