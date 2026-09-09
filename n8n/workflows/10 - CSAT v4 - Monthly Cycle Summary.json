@@ -1,0 +1,207 @@
+{
+  "name": "10. CSAT v4 - Monthly Cycle Summary",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-cycle-completed",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": {
+            "values": {
+              "responseCode": 200
+            }
+          },
+          "responseData": "{\"ok\":true,\"accepted\":true}"
+        },
+        "authentication": "headerAuth"
+      },
+      "id": "f9f53828-fbae-43b7-be10-964934a9bf24",
+      "name": "Cycle Completed Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "53898be5-7115-4f3b-aadf-15bda2341032",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e57f3397-0e0f-410e-ba8b-e083c51293f4",
+              "name": "CSAT_HANDOFF_EMAIL",
+              "value": "ashish.kate@srvmedia.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "52233733-b59b-478c-83fc-77999e8e7a2d",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        288,
+        0
+      ],
+      "notes": "CSAT_HANDOFF_EMAIL always receives a copy, so a cycle with no service owner still reaches somebody."
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\n\nconst project = body.project || {};\nconst cycle = body.cycle || {};\nconst issues = body.issues || [];\nconst appreciations = body.appreciations || [];\nconst observations = body.observations || [];\nconst clientQuestions = body.clientQuestions || [];\n\nconst line = (value) => value == null ? '' : String(value);\nconst score = cycle.csatScore == null ? 'not rated' : `${cycle.csatScore}/10`;\n\nconst byOwner = new Map();\nfor (const issue of issues) {\n  const key = issue.owner ? issue.owner.name : 'Unassigned';\n  if (!byOwner.has(key)) byOwner.set(key, []);\n  byOwner.get(key).push(issue);\n}\n\nconst parts = [];\nparts.push(`${project.name || 'Project'} — feedback cycle complete`);\nparts.push('');\nparts.push(`Client:      ${project.clientName || '-'}`);\nparts.push(`Cycle:       ${cycle.cycleType === 'project_end' ? 'Project-end' : 'Monthly'} feedback`);\nparts.push(`Overall:     ${score}`);\nparts.push('');\n\nif (issues.length) {\n  parts.push(`WHAT NEEDS ATTENTION (${issues.length})`);\n  parts.push('');\n  for (const [owner, list] of byOwner) {\n    parts.push(`  ${owner}${list[0].manager ? ` (manager: ${list[0].manager.name})` : ''}`);\n    for (const issue of list) {\n      parts.push(`   - [${line(issue.severity).toUpperCase()}] ${issue.serviceName}: ${issue.title}`);\n      if (issue.rootCause) parts.push(`     ${issue.rootCause}`);\n      if (issue.raisedBy) parts.push(`     raised by ${issue.raisedBy}`);\n    }\n    parts.push('');\n  }\n} else {\n  parts.push('WHAT NEEDS ATTENTION');\n  parts.push('  Nothing was raised this cycle.');\n  parts.push('');\n}\n\nif (appreciations.length) {\n  parts.push(`WHAT THE CLIENT PRAISED (${appreciations.length})`);\n  for (const item of appreciations) {\n    parts.push(`   - ${item.subject}${item.owner ? ` (${item.owner.name})` : ''}: ${item.detail}`);\n  }\n  parts.push('');\n}\n\nif (observations.length) {\n  parts.push(`OTHER POINTS RAISED (${observations.length})`);\n  for (const item of observations) {\n    parts.push(`   - ${item.topic}: ${item.detail}`);\n  }\n  parts.push('');\n}\n\nif (clientQuestions.length) {\n  parts.push(`CLIENT QUESTIONS / FOLLOW-UP NEEDED (${clientQuestions.length})`);\n  for (const item of clientQuestions) {\n    parts.push(`   - ${line(item.text || item)}`);\n  }\n  parts.push('');\n}\n\nparts.push(`Open the conversation: ${line(body.resumeUrl)}`);\nparts.push('');\nparts.push('This is the single summary for the cycle.');\n\nconst recipients = [...new Set([\n  ...(body.recipients || []),\n  $('Config').first().json.CSAT_HANDOFF_EMAIL\n].filter(Boolean))];\n\nreturn [{\n  json: {\n    to: recipients.join(','),\n    subject: `CSAT: ${project.name || 'Project'} — ${issues.length} to action, ${appreciations.length} appreciation${appreciations.length === 1 ? '' : 's'}, ${clientQuestions.length} question${clientQuestions.length === 1 ? '' : 's'}`,\n    text: parts.join('\\n'),\n    issueCount: issues.length,\n    appreciationCount: appreciations.length,\n    questionCount: clientQuestions.length,\n    recipientCount: recipients.length\n  }\n}];"
+      },
+      "id": "0c4d28b4-8187-4038-8f1d-b5e7c814976a",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        0
+      ],
+      "notes": "One message per project: issues grouped by service owner, appreciations, and points that belong to nobody."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3894b15b-a299-4502-9116-a9ac9c1c51c8",
+              "leftValue": "={{ $json.to }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "90ba789c-dff6-4e53-a90a-e3fdc4384f8a",
+      "name": "Anyone To Tell?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        848,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "internalcommunications@srvmedia.com",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "text": "={{ $json.text }}",
+        "options": {}
+      },
+      "id": "cf550079-e65b-445d-8693-d0e73b63001a",
+      "name": "Send Cycle Summary",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ],
+      "webhookId": "60c2ffef-6cec-49cc-b2be-fdbfc9f6144f",
+      "credentials": {
+        "smtp": {
+          "id": "NDpf2LfKVWN5zViN",
+          "name": "SMTP (Ashish)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "2f4774b4-7211-480c-9e30-b7a1eb15151d",
+      "name": "No Summary Recipients",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        0,
+        224
+      ],
+      "parameters": {}
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cycle Completed Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary": {
+      "main": [
+        [
+          {
+            "node": "Anyone To Tell?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anyone To Tell?": {
+      "main": [
+        [
+          {
+            "node": "Send Cycle Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Summary Recipients",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

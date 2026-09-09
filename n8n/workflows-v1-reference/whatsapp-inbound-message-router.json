@@ -1,0 +1,101 @@
+{
+  "name": "CSAT - WhatsApp Inbound Message Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "whatsapp-provider-webhook",
+      "name": "WhatsApp Provider Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.CSAT_APP_URL + '/api/whatsapp/sessions/' + $json.sessionId + '/reply'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-csat-webhook-secret",
+              "value": "={{$env.CSAT_WEBHOOK_SECRET}}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { from: $json.from, fromName: $json.fromName, providerMessageId: $json.messageId, text: $json.text } }}",
+        "options": {}
+      },
+      "id": "call-csat-engine",
+      "name": "Call CSAT Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [540, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.WHATSAPP_SEND_MESSAGE_URL}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "={{'Bearer ' + $env.WHATSAPP_ACCESS_TOKEN}}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { to: $('WhatsApp Provider Webhook').item.json.from, text: $json.whatsappReplyText } }}",
+        "options": {}
+      },
+      "id": "send-whatsapp-reply",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [860, 260]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, sent: true } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1160, 260]
+    }
+  ],
+  "connections": {
+    "WhatsApp Provider Webhook": {
+      "main": [[{ "node": "Call CSAT Engine", "type": "main", "index": 0 }]]
+    },
+    "Call CSAT Engine": {
+      "main": [[{ "node": "Send WhatsApp Reply", "type": "main", "index": 0 }]]
+    },
+    "Send WhatsApp Reply": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "notes": "Normalize your WhatsApp provider payload before Call CSAT Engine. It must provide sessionId, from, fromName, messageId, and text."
+}

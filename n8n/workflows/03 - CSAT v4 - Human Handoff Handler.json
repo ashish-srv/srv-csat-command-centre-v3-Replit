@@ -1,0 +1,120 @@
+{
+  "name": "3. CSAT v4 - Human Handoff Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-human-handoff",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": {
+            "values": {
+              "responseCode": 200
+            }
+          },
+          "responseData": "{\"ok\":true,\"accepted\":true}"
+        },
+        "authentication": "headerAuth"
+      },
+      "id": "622ef9d3-a436-45b8-84f4-a97e02e098d0",
+      "name": "Human Handoff Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "7fae65e6-eab9-4ae7-81d7-b4ac917c55f4",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6283d1b5-12ce-45b2-aa87-fc7cd25dd679",
+              "name": "CSAT_HANDOFF_EMAIL",
+              "value": "ashish.kate@srvmedia.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "d4de139d-0115-486e-86c0-74d367c7c70a",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        288,
+        0
+      ],
+      "notes": "Edit the three values here. They are not secrets. The webhook secret and Meta token live in credentials."
+    },
+    {
+      "parameters": {
+        "fromEmail": "directoroffice@srvmedia.com",
+        "toEmail": "={{ $('Config').first().json.CSAT_HANDOFF_EMAIL }}",
+        "subject": "={{ 'CSAT ' + ($json.body.eventType || 'handoff').replace(/_/g, ' ') + ': ' + ($json.body.project?.name || 'Unknown project') }}",
+        "text": "={{ 'Event: ' + $json.body.eventType + '\\nGuardrail: ' + ($json.body.guardrail || 'n/a') + '\\nProject: ' + ($json.body.project?.name || '-') + '\\nClient POC: ' + ($json.body.poc?.name || '-') + ' (' + ($json.body.poc?.contactWhatsapp || 'no number') + ')\\nConversation state: ' + ($json.body.state || '-') + '\\n\\nWhat the client said:\\n' + ($json.body.clientText || '-') + '\\n\\nOpen the conversation:\\n' + ($json.body.resumeUrl || '-') + '\\n\\nThis message was NOT captured as feedback. A person needs to respond.' }}",
+        "options": {}
+      },
+      "id": "2dcce632-fbd7-4e98-a23b-15ebf58f13f2",
+      "name": "Notify Team",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        560,
+        0
+      ],
+      "webhookId": "2174fab3-e54c-4aa1-b53a-c43c5b39bba1",
+      "credentials": {
+        "smtp": {
+          "id": "NDpf2LfKVWN5zViN",
+          "name": "SMTP (Ashish)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Human Handoff Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Notify Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

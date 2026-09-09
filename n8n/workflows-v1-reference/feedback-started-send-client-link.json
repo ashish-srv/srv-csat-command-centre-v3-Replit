@@ -1,0 +1,55 @@
+{
+  "name": "CSAT - Feedback Started Send Client Link",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-feedback-started",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "feedback-started-webhook",
+      "name": "Feedback Started Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 260]
+    },
+    {
+      "parameters": {
+        "fromEmail": "csat@srvmedia.example",
+        "toEmail": "={{$json.client.contactEmail}}",
+        "subject": "={{$json.session.sessionType === 'project_end' ? 'Overall project feedback for SRV' : 'SRV 45-day pulse check'}}",
+        "text": "={{$json.session.sessionType === 'project_end' ? 'Hi ' + ($json.client.salutation || $json.client.poc) + ',\\n\\nAs the project is reaching completion, please share your overall feedback for SRV here:\\n' + $json.resumeUrl : 'Hi ' + ($json.client.salutation || $json.client.poc) + ',\\n\\nIt is time for the 45-day SRV pulse check. Please share quick feedback here:\\n' + $json.resumeUrl}}",
+        "options": {}
+      },
+      "id": "send-client-link",
+      "name": "Send Client Link",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [560, 260]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, handled: true, workflow: 'feedback-started-send-client-link' } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [840, 260]
+    }
+  ],
+  "connections": {
+    "Feedback Started Webhook": {
+      "main": [[{ "node": "Send Client Link", "type": "main", "index": 0 }]]
+    },
+    "Send Client Link": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

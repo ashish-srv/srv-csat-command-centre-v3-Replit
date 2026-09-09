@@ -1,0 +1,641 @@
+{
+  "name": "1. CSAT v4 - WhatsApp Inbound Message Router (Hardened)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "06c80808-5b59-4c84-8262-2ae4e72e9cc7",
+      "name": "WhatsApp Provider Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "5f7e7f04-435e-4cc5-a969-727c2497c932"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "39b0e170-805b-4c04-b3b9-d8a1e7999626",
+              "name": "CSAT_APP_URL",
+              "value": "https://YOUR-REPLIT-APP.replit.app",
+              "type": "string"
+            },
+            {
+              "id": "cc80b874-def1-4f14-b048-99e539de5c2a",
+              "name": "WHATSAPP_GRAPH_URL",
+              "value": "https://graph.facebook.com/v23.0/1143136358892896/messages",
+              "type": "string"
+            },
+            {
+              "id": "1eac7b4f-4737-4cf8-b28e-311b22499405",
+              "name": "CSAT_HANDOFF_EMAIL",
+              "value": "ashish.kate@srvmedia.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "1682b16e-20ca-4c0e-84da-5a00d268ea69",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        288,
+        0
+      ],
+      "notes": "Edit the three values here. They are not secrets. The webhook secret and Meta token live in credentials."
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "csat-whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "5026d56b-bc79-4d39-9028-0730c8a5b09d",
+      "name": "WhatsApp Verify Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        352
+      ],
+      "webhookId": "7e80e5e2-4aaf-49a7-9dce-af9a5d1eb4f9"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query[\"hub.challenge\"] }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "2e893070-453d-485f-a939-37c2bffac3bf",
+      "name": "Respond With Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        288,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "badfb620-92b0-4462-8e0d-8f5f6ede68cc",
+              "leftValue": "={{ $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "75b254a7-272e-421e-a92a-9c22b5fadc3c",
+      "name": "Is Client Text Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.CSAT_APP_URL }}/api/whatsapp/inbound",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { from: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].from, fromName: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.contacts?.[0]?.profile?.name, providerMessageId: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].id, text: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].text.body } }}",
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "f393197f-d3d3-4331-bd6e-cfddfd1a8c36",
+      "name": "Call CSAT Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        848,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0ca2118b-0522-465c-8401-3c1faeb0d73c",
+              "leftValue": "={{ $json.sendToWhatsapp }}",
+              "rightValue": "={{ true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "447bcbca-c9bc-405d-ab1d-59ded03c864c",
+      "name": "Should Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].from, type: \"text\", text: { body: $json.whatsappReplyText } } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "ae839e42-7c43-4a58-829f-3ab575ef46e1",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1408,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "a82440b6-5bb6-4ef3-86b9-e1d3c05d0c9e",
+      "name": "Meta POST Security Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        304,
+        112
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "2568a6e1-b64d-48bf-80d6-7848950c6703",
+              "name": "META_APP_SECRET",
+              "value": "REPLACE_WITH_META_APP_SECRET",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "fd24a76e-1762-481c-a1b2-3ea93c4d75ab",
+      "name": "Calculate Meta Signature",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        560,
+        112
+      ],
+      "parameters": {
+        "action": "hmac",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "type": "SHA256",
+        "dataPropertyName": "calculatedSignature",
+        "secret": "={{ $('Meta POST Security Config').first().json.META_APP_SECRET }}",
+        "encoding": "hex"
+      }
+    },
+    {
+      "id": "410120d3-905d-46c8-b959-909ac4de05c8",
+      "name": "Valid Meta Signature?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        816,
+        112
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f2c27034-b68c-4339-8306-d4f4b0f45e31",
+              "leftValue": "={{ $('WhatsApp Provider Webhook').item.json.headers['x-hub-signature-256'] }}",
+              "rightValue": "={{ 'sha256=' + $json.calculatedSignature }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f8ef1939-8157-49e1-a915-587929d83105",
+      "name": "Accept Meta Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1072,
+        32
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, accepted: true } }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "a57faf06-292f-41ed-851c-8a16da50670a",
+      "name": "Reject Invalid Signature",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1072,
+        208
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, error: 'invalid_meta_signature' } }}",
+        "options": {
+          "responseCode": 403
+        }
+      }
+    },
+    {
+      "id": "88819efa-6cbf-438e-a6c4-2984562e16a4",
+      "name": "Meta GET Security Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        304,
+        -208
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a2284c63-3916-42af-b91d-bd0f46f5c97a",
+              "name": "META_VERIFY_TOKEN",
+              "value": "REPLACE_WITH_META_VERIFY_TOKEN",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "5d8eb0dc-cbcc-4b58-90dc-e11746c7c4ec",
+      "name": "Valid Meta Verify Token?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        -208
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "58636c5c-0175-4a00-a01a-7550bb58d5b0",
+              "leftValue": "={{ $json.query['hub.mode'] }}",
+              "rightValue": "subscribe",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "bc11d8d8-c3be-47e5-8e34-e4cde9fc6790",
+              "leftValue": "={{ $json.query['hub.verify_token'] }}",
+              "rightValue": "={{ $json.META_VERIFY_TOKEN }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0f9abc6-13db-4a0f-aa57-100e826b75db",
+      "name": "Reject Invalid Verify Token",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        816,
+        -96
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, error: 'invalid_meta_verify_token' } }}",
+        "options": {
+          "responseCode": 403
+        }
+      }
+    },
+    {
+      "id": "f033e523-9394-40f9-8463-9d1b2b1b2ae6",
+      "name": "Ignore Non-text Event",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        256
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "b96b6b52-ed5f-45a3-ab31-4d5fbbb11135",
+      "name": "No Reply Needed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2704,
+        256
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "33027876-6456-4600-ab92-0f4d061df679",
+      "name": "SET META SECRETS BEFORE ACTIVATING",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -400
+      ],
+      "parameters": {
+        "width": 592,
+        "height": 176,
+        "content": "## Required before activation\nSet `META_APP_SECRET` in **Meta POST Security Config** and the same Meta verify token in **Meta GET Security Config** that you use in Meta Developers. The workflow intentionally rejects traffic while placeholders remain."
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "WhatsApp Provider Webhook": {
+      "main": [
+        [
+          {
+            "node": "Meta POST Security Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Is Client Text Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Verify Webhook": {
+      "main": [
+        [
+          {
+            "node": "Meta GET Security Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Client Text Message?": {
+      "main": [
+        [
+          {
+            "node": "Call CSAT Engine",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Non-text Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call CSAT Engine": {
+      "main": [
+        [
+          {
+            "node": "Should Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Reply?": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Reply Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta POST Security Config": {
+      "main": [
+        [
+          {
+            "node": "Calculate Meta Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Meta Signature": {
+      "main": [
+        [
+          {
+            "node": "Valid Meta Signature?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Meta Signature?": {
+      "main": [
+        [
+          {
+            "node": "Accept Meta Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject Invalid Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept Meta Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta GET Security Config": {
+      "main": [
+        [
+          {
+            "node": "Valid Meta Verify Token?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Meta Verify Token?": {
+      "main": [
+        [
+          {
+            "node": "Respond With Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject Invalid Verify Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

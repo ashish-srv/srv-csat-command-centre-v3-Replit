@@ -1,0 +1,201 @@
+{
+  "name": "12. CSAT v4 - Partial Feedback Session Closing",
+  "nodes": [
+    {
+      "id": "b3a8bc80-9096-4e0e-a196-a325a2fd4824",
+      "name": "Session Closing Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        64
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-feedback-session-closed",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "id": "8cc204d8-c24b-4752-80e0-86605814f72e",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -496,
+        64
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d3f0b070-d137-4147-b8d0-3efbd200a7c0",
+              "name": "WHATSAPP_GRAPH_URL",
+              "value": "https://graph.facebook.com/v23.0/1143136358892896/messages",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "f80ce0c2-031c-409e-a00f-ff09100de8e0",
+      "name": "POC Has WhatsApp?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -256,
+        64
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c39a7b12-eeda-47fa-8bdb-a600c0cd4ace",
+              "leftValue": "={{ $json.body.poc?.contactWhatsapp }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b28e07ed-a31a-44ad-b2e1-d143a63def2d",
+      "name": "Send Closing Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        16,
+        -32
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $json.body.poc.contactWhatsapp, type: \"template\", template: { name: \"srv_feedback_session_closed\", language: { code: \"en\" }, components: [ { type: \"body\", parameters: [ { type: \"text\", text: $json.body.poc.salutation || $json.body.poc.name } ] } ] } } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "e6cc0096-700b-45a9-81cc-9704c21ba095",
+      "name": "No WhatsApp Number",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        16,
+        176
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "4c783a60-bcbe-47f9-b290-37da25550c46",
+      "name": "CLOSURE DELIVERY NOTE",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        -272
+      ],
+      "parameters": {
+        "width": 752,
+        "height": 176,
+        "content": "## Partial-session closing notice\nThis workflow is called only after a partial respondent has used all three reminders and the final 24-hour grace period has expired. It sends the approved `srv_feedback_session_closed` template. The webhook waits for the Meta send node so the application closes the session only after Meta accepts the message."
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Session Closing Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "POC Has WhatsApp?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POC Has WhatsApp?": {
+      "main": [
+        [
+          {
+            "node": "Send Closing Template",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No WhatsApp Number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

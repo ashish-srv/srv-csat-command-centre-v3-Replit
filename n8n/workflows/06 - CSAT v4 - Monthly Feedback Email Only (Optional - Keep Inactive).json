@@ -1,0 +1,175 @@
+{
+  "name": "6. CSAT v4 - Monthly Feedback Email Only (Optional - Keep Inactive)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-feedback-started-email-only",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": {
+            "values": {
+              "responseCode": 200
+            }
+          },
+          "responseData": "{\"ok\":true,\"accepted\":true}"
+        },
+        "authentication": "headerAuth"
+      },
+      "id": "92b7ce6e-a6ec-41fd-af69-347a4c72775d",
+      "name": "Feedback Started Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "b5b943cb-82b0-4fa5-b82c-0307fa62cf39",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": []
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "bd8e2eef-8e5f-4884-b725-f7e38cc771f4",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        288,
+        0
+      ],
+      "notes": "Edit the three values here. They are not secrets. The webhook secret and Meta token live in credentials."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0bf7a82a-264c-4052-9959-2af26340cf8e",
+              "leftValue": "={{ $json.body.poc?.contactEmail }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "df4c7a8c-7a4f-4122-b620-dcdd415a30e8",
+      "name": "POC Has Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "directoroffice@srvmedia.com",
+        "toEmail": "={{ $json.body.poc.contactEmail }}",
+        "subject": "={{ $json.body.session.sessionType === 'project_end' ? 'Overall project feedback for SRV' : 'SRV monthly feedback' }}",
+        "text": "={{ 'Hi ' + ($json.body.poc.salutation || $json.body.poc.name) + ',\\n\\n' + ($json.body.session.sessionType === 'project_end' ? 'As ' + $json.body.project.name + ' reaches completion, please share your overall feedback for SRV here:' : 'It is time for your monthly SRV feedback for ' + $json.body.project.name + '. Please share your quick feedback here:') + '\\n' + $json.body.resumeUrl }}",
+        "options": {}
+      },
+      "id": "e3fee074-9268-4f67-8de0-11c80196774f",
+      "name": "Send Client Link",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        848,
+        0
+      ],
+      "webhookId": "bc59430c-74c5-4a21-a23d-648da9060624",
+      "credentials": {
+        "smtp": {
+          "id": "NDpf2LfKVWN5zViN",
+          "name": "SMTP (Ashish)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "1a913b06-bb75-4467-94fd-1e82314f36b1",
+      "name": "No Email Address",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        32
+      ],
+      "parameters": {}
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Feedback Started Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "POC Has Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POC Has Email?": {
+      "main": [
+        [
+          {
+            "node": "Send Client Link",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Email Address",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

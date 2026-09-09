@@ -1,0 +1,9 @@
+run = "npm run dev"
+entrypoint = "server.js"
+
+[deployment]
+build = "npm ci && npm run build"
+run = "npm start"
+
+[gitHubImport]
+requiredFiles = [".replit", "package.json"]

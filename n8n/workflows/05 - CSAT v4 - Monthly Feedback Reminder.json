@@ -1,0 +1,404 @@
+{
+  "name": "5. CSAT v4 - Monthly Feedback Reminder",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-whatsapp-reminder",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": {
+            "values": {
+              "responseCode": 200
+            }
+          },
+          "responseData": "{\"ok\":true,\"accepted\":true}"
+        },
+        "authentication": "headerAuth"
+      },
+      "id": "f72666a2-b860-4ab3-8271-660f338019a1",
+      "name": "Reminder Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1408,
+        128
+      ],
+      "webhookId": "28879d4b-584b-4a07-b78a-a14b59e7ca5f",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "2e26c8ef-4274-4b79-947b-811a083cfb71",
+              "name": "WHATSAPP_GRAPH_URL",
+              "value": "https://graph.facebook.com/v23.0/1143136358892896/messages",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "e85eca8f-054a-4c45-a668-038d5d621951",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1120,
+        128
+      ],
+      "notes": "Edit these three values. Secrets live in credentials."
+    },
+    {
+      "parameters": {
+        "jsCode": "const map = {\n  open_feedback: 'your monthly feedback on our services',\n  issue_reason: 'a little more detail on what should improve',\n  service_rating: 'anything else about the service you mentioned',\n  service_followup: 'anything else about the service you mentioned',\n  overall_rating: 'your overall SRV rating out of 10',\n  nps_recommendation: 'how likely you are to recommend SRV'\n};\n\nfor (const item of $input.all()) {\n  const body = item.json.body || {};\n  const fields = body.session?.conversationState?.missingFields || [];\n  const readable = fields.map((f) => map[f] || f.replace(/_/g, ' '));\n\n  let text;\n  if (!readable.length) text = 'just a quick confirmation';\n  else if (readable.length === 1) text = readable[0];\n  else text = readable.slice(0, -1).join(', ') + ' and ' + readable[readable.length - 1];\n\n  item.json.missingText = text;\n}\n\nreturn $input.all();"
+      },
+      "id": "1242f33f-0412-49b8-8ba8-a79efb83cac0",
+      "name": "Describe What Is Missing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -848,
+        128
+      ],
+      "notes": "srv_complete_feedback_reminder says 'we just need: {{2}}' - this builds that phrase."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b6012c17-37de-4dc4-9820-e31d9b49fb63",
+              "leftValue": "={{ $json.body.poc?.contactWhatsapp }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "47054d24-e303-4c0b-8fc4-92a3b8606c02",
+      "name": "POC Has WhatsApp?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -560,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "29c5e81e-693a-4e62-8045-96fc6339f395",
+              "leftValue": "={{ $json.body.reminderKind }}",
+              "rightValue": "complete_partial_feedback",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c4d1597c-42fd-49b9-b368-b93248cbe03d",
+      "name": "Partial Feedback?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -288,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $json.body.poc.contactWhatsapp, type: \"template\", template: { name: \"srv_complete_feedback_reminder\", language: { code: \"en\" }, components: [ { type: \"body\", parameters: [ { type: \"text\", text: $json.body.poc.salutation || $json.body.poc.name }, { type: \"text\", text: $json.missingText } ] } ] } } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "7c8c5e60-9395-4271-8e89-8af661786ee2",
+      "name": "Send Complete-Feedback Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      },
+      "notes": "srv_complete_feedback_reminder takes 2 variables: {{1}} salutation, {{2}} what is missing.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $json.body.poc.contactWhatsapp, type: \"template\", template: { name: \"srv_feedback_reminder\", language: { code: \"en\" }, components: [ { type: \"body\", parameters: [ { type: \"text\", text: $json.body.poc.salutation || $json.body.poc.name } ] } ] } } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "f1c24b94-e4cc-4232-9565-4c99ed4b2b75",
+      "name": "Send First-Response Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        240
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      },
+      "notes": "srv_feedback_reminder takes ONE variable. Sending two makes Meta reject the send.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "62753ec5-83df-4830-8c25-c9d86a3e4671",
+      "name": "Final Rating Reminder?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -288,
+        64
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bf8a838c-b1f1-47d4-bbde-9ee3fbb68690",
+              "leftValue": "={{ String($json.body.finalRatingReminder) }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "8f3b239d-e1e2-4add-a833-dbdcf07ad5e7",
+      "name": "Send Final Rating Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        -144
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $json.body.poc.contactWhatsapp, type: \"template\", template: { name: \"srv_final_rating_reminder\", language: { code: \"en\" }, components: [ { type: \"body\", parameters: [ { type: \"text\", text: $json.body.poc.salutation || $json.body.poc.name } ] } ] } } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "f87a6612-486a-4d5b-aaf6-77a888f09ada",
+      "name": "No WhatsApp Number",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        240
+      ],
+      "parameters": {}
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Reminder Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Describe What Is Missing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Describe What Is Missing": {
+      "main": [
+        [
+          {
+            "node": "POC Has WhatsApp?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POC Has WhatsApp?": {
+      "main": [
+        [
+          {
+            "node": "Final Rating Reminder?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No WhatsApp Number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Partial Feedback?": {
+      "main": [
+        [
+          {
+            "node": "Send Complete-Feedback Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send First-Response Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Rating Reminder?": {
+      "main": [
+        [
+          {
+            "node": "Send Final Rating Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Partial Feedback?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

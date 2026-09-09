@@ -1,0 +1,90 @@
+{
+  "name": "CSAT - Bad Feedback Manager Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-manager-alert",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "manager-alert-webhook",
+      "name": "Manager Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 260]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.analysis.requiresManagerAlert}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "is-bad-feedback",
+      "name": "Bad Feedback?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [520, 260]
+    },
+    {
+      "parameters": {
+        "fromEmail": "csat-alerts@srvmedia.example",
+        "toEmail": "={{$json.managerEmail || $json.analysis.managerEmail}}",
+        "subject": "={{'CSAT Alert: ' + $json.client.name + ' - ' + $json.analysis.primaryServiceName}}",
+        "text": "={{'Client: ' + $json.client.name + '\\nService: ' + $json.analysis.primaryServiceName + '\\nRisk: ' + $json.analysis.riskLevel + '\\nScore: ' + $json.analysis.csatScore + '/10\\nOwner: ' + $json.analysis.ownerName + '\\n\\nRoot cause:\\n' + $json.analysis.rootCause + '\\n\\nSession ID: ' + $json.session.id}}",
+        "options": {}
+      },
+      "id": "send-manager-email",
+      "name": "Send Manager Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [800, 180]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, handled: true, workflow: 'manager-alert' } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1080, 180]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, handled: false, reason: 'not_bad_feedback' } }}",
+        "options": {}
+      },
+      "id": "respond-skipped",
+      "name": "Respond Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [800, 360]
+    }
+  ],
+  "connections": {
+    "Manager Alert Webhook": {
+      "main": [[{ "node": "Bad Feedback?", "type": "main", "index": 0 }]]
+    },
+    "Bad Feedback?": {
+      "main": [
+        [{ "node": "Send Manager Email", "type": "main", "index": 0 }],
+        [{ "node": "Respond Skipped", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Manager Email": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "name": "4. CSAT v4 - Bad Feedback Manager Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-manager-alert",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": {
+            "values": {
+              "responseCode": 200
+            }
+          },
+          "responseData": "{\"ok\":true,\"accepted\":true}"
+        },
+        "authentication": "headerAuth"
+      },
+      "id": "704de5bc-4afb-4517-b4f4-cb6e83852372",
+      "name": "Manager Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -848,
+        80
+      ],
+      "webhookId": "ea99ab67-8f59-4400-a0eb-5295297553f6",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ead7e0ca-57d4-47b1-b465-06f805763c01",
+              "name": "CSAT_HANDOFF_EMAIL",
+              "value": "directoroffice@srvmedia.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "dd11bc90-a324-48e0-abb7-3b8487d952ea",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -560,
+        80
+      ],
+      "notes": "Edit the three values here. They are not secrets. The webhook secret and Meta token live in credentials."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5c75b592-2d4c-435f-bb18-3b3d00a36e44",
+              "leftValue": "={{ $json.body.analysis.requiresManagerAlert }}",
+              "rightValue": "={{ true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "242d15c8-cc48-4fd9-8060-7f1ccb11ac11",
+      "name": "Needs Manager Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -288,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "directoroffice@srvmedia.com",
+        "toEmail": "={{ $json.body.analysis.managerEmail || $json.body.analysis.ownerEmail || $('Config').first().json.CSAT_HANDOFF_EMAIL }}",
+        "subject": "={{ 'CSAT Alert: ' + $json.body.project.name + ' - ' + ($json.body.analysis.primaryServiceName || 'Overall') }}",
+        "text": "={{ 'Project: ' + $json.body.project.name + '\\nClient: ' + ($json.body.project.clientName || '-') + '\\nClient POC: ' + ($json.body.poc?.name || '-') + '\\nService: ' + ($json.body.analysis.primaryServiceName || '-') + '\\nRisk: ' + $json.body.analysis.riskLevel + '\\nScore: ' + ($json.body.analysis.csatScore ?? 'not rated') + '/10\\nOwner: ' + $json.body.analysis.ownerName + '\\nGuardrail: ' + ($json.body.guardrail || 'none') + '\\n\\nRoot cause:\\n' + ($json.body.analysis.rootCause || 'Not captured') + '\\n\\nOpen the conversation:\\n' + ($json.body.resumeUrl || '-') }}",
+        "options": {}
+      },
+      "id": "72bf5140-ccc1-4026-9010-066947770819",
+      "name": "Send Manager Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "d8305138-ea6b-45fc-b873-7a1f61e997d1",
+      "credentials": {
+        "smtp": {
+          "id": "NDpf2LfKVWN5zViN",
+          "name": "SMTP (Ashish)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "71f6c307-8415-408c-8198-4adab4886be1",
+      "name": "No Manager Alert Required",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        0,
+        224
+      ],
+      "parameters": {}
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manager Alert Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Needs Manager Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Manager Alert?": {
+      "main": [
+        [
+          {
+            "node": "Send Manager Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Manager Alert Required",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

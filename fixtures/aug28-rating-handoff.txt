@@ -1,0 +1,22 @@
+[1:19 am, 28/8/2026] Test Number SRV: Hi Ashish Sir, this is SRV Media's MD Office. It's time for your monthly service pulse check. We'd love to hear how our services (Account Management, Design, PPC / Media, SEO, Website) are working for you. Please reply to this message to share your quick feedback — it takes just 2 minutes.
+[1:19 am, 28/8/2026] Aashish: Yes tell me
+[1:20 am, 28/8/2026] Test Number SRV: Hi Ashish Sir, how has your experience been with our Account Management team recently?
+[1:21 am, 28/8/2026] Aashish: Website needs to improve. SEO performance is satisfactory. Client servicing is okayish
+[1:22 am, 28/8/2026] Test Number SRV: I am sorry to hear that. Could you share what specifically needs to improve with the website?
+[1:22 am, 28/8/2026] Aashish: Your designs are not that great, it needs to be a futuristic website, right now it looks like it was made in 1990s
+[1:22 am, 28/8/2026] Test Number SRV: I understand, and our team will look into this. Is there anything else regarding the website?
+[1:22 am, 28/8/2026] Aashish: no
+[1:23 am, 28/8/2026] Test Number SRV: Got it. How has your experience been with our PPC / Media service recently?
+[1:23 am, 28/8/2026] Aashish: Campaign managemenet is good but leads are poor though
+[1:23 am, 28/8/2026] Test Number SRV: I am sorry to hear that, and our team will look into the lead quality. Is there anything else regarding PPC / Media?
+[1:24 am, 28/8/2026] Aashish: no
+[1:24 am, 28/8/2026] Test Number SRV: Got it. Is there any team or department at SRV Media you would like to appreciate?
+[1:24 am, 28/8/2026] Aashish: your billings are inaccurate so please ask your CFO to pay attention before generating a tax invoice. Additionally, I have a appreciation for the creative team, they are doing a fantastic job with the videos.
+[1:24 am, 28/8/2026] Test Number SRV: I am sorry to hear about the billing inaccuracies, and our team will look into this. Glad to hear the creative team is doing great! Is there anything else regarding billing?
+[1:25 am, 28/8/2026] Aashish: no. One more thing, your AVPs are absent from the meetings, I haven’t met Sarang in the last 3 months, neither in online or offline meetings. Looks like he is very busy, Sarang doesn’t even picks up my calls anymore now.
+[1:25 am, 28/8/2026] Test Number SRV: I am sorry to hear that, and our team will look into Sarang's availability and meeting attendance. Is there anything else regarding management involvement?
+[1:25 am, 28/8/2026] Aashish: No
+[1:26 am, 28/8/2026] Test Number SRV: Was any department missed, or do you have any general feedback for our management?
+[1:26 am, 28/8/2026] Aashish: no
+[1:26 am, 28/8/2026] Test Number SRV: Thank you. On a scale of 0 to 10, how would you rate your overall experience with SRV Media?
+[1:26 am, 28/8/2026] Aashish: 7

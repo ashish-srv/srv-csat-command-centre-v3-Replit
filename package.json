@@ -1,0 +1,42 @@
+{
+  "name": "srv-csat-command-centre-replit",
+  "version": "2.4.0",
+  "private": true,
+  "description": "Replit deployment variant of the SRV CSAT command centre.",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.local.js",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 4173",
+    "check": "eslint . && node --check server.js && node --check server.local.js && node --check src/server/api-handler.js && node --check src/lib/supabase-store.js && node --check src/lib/whatsapp-state-machine.js && node --check src/lib/gemini.js && node --check src/lib/n8n.js && node --check src/lib/store.js",
+    "test:state": "node scripts/state-machine-smoke.js",
+    "test:api": "node scripts/api-smoke.js",
+    "test:admin-import": "node scripts/admin-import-smoke.js",
+    "test": "npm run test:state && npm run test:sweep && npm run test:api && npm run test:admin-import && npm run test:gemini",
+    "test:gemini": "node scripts/gemini-guardrail-smoke.js",
+    "lint": "eslint .",
+    "test:sweep": "node scripts/conversation-sweep.js",
+    "replay": "node scripts/replay.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "exceljs": "^4.4.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.11"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "eslint": "^9.39.5",
+    "eslint-plugin-react": "^7.37.5",
+    "globals": "^17.9.0"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}

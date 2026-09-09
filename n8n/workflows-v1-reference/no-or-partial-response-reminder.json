@@ -1,0 +1,55 @@
+{
+  "name": "CSAT - No or Partial Response Reminder",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-no-response",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "no-response-webhook",
+      "name": "No Response Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 260]
+    },
+    {
+      "parameters": {
+        "fromEmail": "csat@srvmedia.example",
+        "toEmail": "={{$json.client.contactEmail}}",
+        "subject": "={{$json.reminderKind === 'complete_partial_feedback' ? 'Please complete your SRV pulse feedback' : 'Quick SRV pulse check reminder'}}",
+        "text": "={{$json.reminderKind === 'complete_partial_feedback' ? 'Hi ' + ($json.client.salutation || $json.client.poc) + ',\\n\\nThank you for sharing partial feedback. We have saved your response. Please complete only the remaining overall satisfaction score here:\\n' + $json.resumeUrl + '\\n\\nYou do not need to start again.' : 'Hi ' + ($json.client.salutation || $json.client.poc) + ',\\n\\nA quick reminder from SRV Media MD Office. Please share your feedback here:\\n' + $json.resumeUrl}}",
+        "options": {}
+      },
+      "id": "send-client-reminder",
+      "name": "Send Client Reminder",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [560, 260]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, handled: true, workflow: 'no-or-partial-response-reminder' } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [840, 260]
+    }
+  ],
+  "connections": {
+    "No Response Webhook": {
+      "main": [[{ "node": "Send Client Reminder", "type": "main", "index": 0 }]]
+    },
+    "Send Client Reminder": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

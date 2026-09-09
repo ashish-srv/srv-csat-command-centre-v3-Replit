@@ -1,0 +1,70 @@
+{
+  "name": "CSAT - No or Partial Response WhatsApp Reminder",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-whatsapp-reminder",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "reminder-webhook",
+      "name": "Reminder Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.WHATSAPP_SEND_TEMPLATE_URL}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "={{'Bearer ' + $env.WHATSAPP_ACCESS_TOKEN}}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { to: $json.client.contactWhatsapp, templateName: $json.reminderKind === 'complete_partial_feedback' ? 'srv_complete_feedback_reminder' : 'srv_feedback_reminder', language: 'en', variables: { client_name: $json.client.name, poc_name: $json.client.poc, missing_fields: (($json.session.conversationState && $json.session.conversationState.missingFields) || []).join(', '), session_id: $json.session.id } } }}",
+        "options": {}
+      },
+      "id": "send-whatsapp-reminder",
+      "name": "Send WhatsApp Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [540, 260]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, sent: true, workflow: 'no-or-partial-response-whatsapp-reminder' } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [840, 260]
+    }
+  ],
+  "connections": {
+    "Reminder Webhook": {
+      "main": [[{ "node": "Send WhatsApp Reminder", "type": "main", "index": 0 }]]
+    },
+    "Send WhatsApp Reminder": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "notes": "Use approved WhatsApp reminder templates. For partial feedback, remind the client to complete only missing fields, not restart."
+}

@@ -1,0 +1,70 @@
+{
+  "name": "CSAT - Feedback Started Send WhatsApp Template",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-feedback-started-whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "feedback-started-webhook",
+      "name": "Feedback Started Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.WHATSAPP_SEND_TEMPLATE_URL}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "={{'Bearer ' + $env.WHATSAPP_ACCESS_TOKEN}}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { to: $json.client.contactWhatsapp, templateName: $json.session.sessionType === 'project_end' ? 'srv_project_end_feedback' : 'srv_45_day_pulse', language: 'en', variables: { client_name: $json.client.name, poc_name: $json.client.poc, services: ($json.client.activeServices || []).join(', '), session_id: $json.session.id } } }}",
+        "options": {}
+      },
+      "id": "send-whatsapp-template",
+      "name": "Send WhatsApp Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [540, 260]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, sent: true, workflow: 'feedback-started-send-whatsapp-template' } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [840, 260]
+    }
+  ],
+  "connections": {
+    "Feedback Started Webhook": {
+      "main": [[{ "node": "Send WhatsApp Template", "type": "main", "index": 0 }]]
+    },
+    "Send WhatsApp Template": {
+      "main": [[{ "node": "Respond OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "notes": "Adjust jsonBody to your WhatsApp provider. The key idea is: send an approved template with session_id so inbound replies can map to the same session."
+}

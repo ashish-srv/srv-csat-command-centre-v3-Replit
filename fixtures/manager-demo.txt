@@ -1,0 +1,71 @@
+Has it captured about account management. It just skipped again I think.
+
+Also, client is speaking on some topics, and here I am getting mails from director office.
+
+Means If bot has asked to rate from 0 to 10 and if client is still saying somethings about issues or appreciations. These are being mailed.
+Why are these are being mailed?
+
+Also bot is acknowledging and again asking rating there. This is not good.
+
+
+Bot should also ask any appreciation for any team, department.
+It should also ask before end that if any department is missing to give feedback, or any general feedback for managegment or any appreciation for any team to client.
+
+
+Check below conversation: 
+[12:42 am, 14/8/2026] Test Number SRV: Hi Ashish Sir, this is SRV Media's MD Office. It's time for your monthly service pulse check. We'd love to hear how our services (Account Management, Design, PPC / Media, SEO, Website) are working for you. Please reply to this message to share your quick feedback — it takes just 2 minutes.
+[12:43 am, 14/8/2026] Aashish: Yes tell me
+[12:44 am, 14/8/2026] Test Number SRV: Hi Ashish Sir, how has your experience been with our Account Management team recently?
+[12:44 am, 14/8/2026] Aashish: Website needs to improve. SEO performance is satisfactory. Client servicing is okayish.
+[12:44 am, 14/8/2026] Test Number SRV: Understood. Could you share what specifically needs to improve on the website?
+[12:44 am, 14/8/2026] Aashish: Your designs are not that great, it needs to be a futuristic website, right now it looks like it was made in 1990s
+[12:45 am, 14/8/2026] Test Number SRV: Got it, thank you for detailing that. How has your experience been with our PPC and Media performance?
+[12:46 am, 14/8/2026] Aashish: On website, landing page design is also not good
+[12:46 am, 14/8/2026] Test Number SRV: Understood, thank you for specifying that about the landing page. How has your experience been with our PPC and Media performance?
+[12:47 am, 14/8/2026] Aashish: Campaigns are not getting handled well
+[12:47 am, 14/8/2026] Aashish: Media planning should be better
+[12:47 am, 14/8/2026] Test Number SRV: Understood. Could you share what specifically is going wrong with how the campaigns are being handled?
+[12:47 am, 14/8/2026] Test Number SRV: Got it, thank you. On a scale of 0 to 10, how would you rate your overall experience with SRV Media?
+[12:48 am, 14/8/2026] Aashish: Leads are not getting generated as per money is being spent
+[12:48 am, 14/8/2026] Test Number SRV: Thank you for clarifying that about lead generation and spend. On a scale of 0 to 10, how would you rate your overall experience with SRV Media?
+[12:49 am, 14/8/2026] Aashish: One more thing, your AVPs are absent from the meetings, I haven’t met Sarang in the last 3 months, neither in online or offline meetings. Looks like he is very busy, Sarang doesn’t even picks up my calls anymore now.
+[12:50 am, 14/8/2026] Test Number SRV: Thank you for bringing that to our attention regarding Sarang's availability. On a scale of 0 to 10, how would you rate your overall experience with SRV Media?
+[12:50 am, 14/8/2026] Aashish: Additionally, I have a appreciation for the creative team, they are doing a fantastic job with the videos.
+[12:51 am, 14/8/2026] Test Number SRV: That is wonderful to hear about the videos! On a scale of 0 to 10, how would you rate your overall experience with SRV Media?
+[12:53 am, 14/8/2026] Aashish: 5
+[12:54 am, 14/8/2026] Test Number SRV: Thank you for sharing your feedback with us, Ashish Sir. Our team will look into the areas you raised. Have a great day!
+
+
+
+Mails:
+Event: client_question
+Guardrail: n/a
+Project: Brand Campaign 2026
+Client POC: Ashish Kate (919970967899)
+Conversation state: -
+
+What the client said:
+Senior Leadership Unavailability: AVP Sarang has been absent from meetings for 3 months and does not pick up client calls.
+
+
+directoroffice@srvmedia.com
+12:51 AM (3 minutes ago)
+to directoroffice
+
+Event: client_question
+Guardrail: n/a
+Project: Brand Campaign 2026
+Client POC: Ashish Kate (919970967899)
+Conversation state: -
+
+What the client said:
+Creative Team / Videos: Doing a fantastic job with the videos
+
+Event: client_question
+Guardrail: n/a
+Project: Brand Campaign 2026
+Client POC: Ashish Kate (919970967899)
+Conversation state: -
+
+What the client said:
+Management Availability: AVP Sarang has been absent from meetings for 3 months and is not answering calls

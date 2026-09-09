@@ -1,0 +1,78 @@
+{
+  "name": "7. CSAT v4 - Workflow Error Alert",
+  "nodes": [
+    {
+      "id": "dfc3d3b0-23ad-494a-b25e-5f0edf92fdfb",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "cb190ebb-1bfd-4134-8468-55b1e9d246c5",
+      "name": "Send Error Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        288,
+        0
+      ],
+      "parameters": {
+        "fromEmail": "directoroffice@srvmedia.com",
+        "toEmail": "directoroffice@srvmedia.com",
+        "subject": "={{ 'n8n CSAT workflow failed: ' + ($json.workflow?.name || 'Unknown workflow') }}",
+        "text": "={{ 'Workflow: ' + ($json.workflow?.name || '-') + '\\nWorkflow ID: ' + ($json.workflow?.id || '-') + '\\nFailed node: ' + ($json.execution?.lastNodeExecuted || $json.trigger?.error?.node?.name || '-') + '\\nError: ' + ($json.execution?.error?.message || $json.trigger?.error?.message || 'Unknown error') + '\\nExecution: ' + ($json.execution?.url || 'Open n8n Executions to inspect the trigger failure.') }}",
+        "options": {}
+      },
+      "credentials": {
+        "smtp": {
+          "id": "NDpf2LfKVWN5zViN",
+          "name": "SMTP (Ashish)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "01c975e7-e86c-4ef1-9236-a32ee0bbca0e",
+      "name": "ASSIGN THIS AS ERROR WORKFLOW",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -256
+      ],
+      "parameters": {
+        "width": 640,
+        "height": 176,
+        "content": "## After import\nFor workflows 1-5 and 8-10, open **Workflow settings → Error workflow** and select this workflow. Workflow 6 is optional and can remain inactive."
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Send Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}
