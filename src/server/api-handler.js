@@ -3094,7 +3094,10 @@ async function handleApiRequest(request) {
       if (predicted.error === "insufficient_feedback") {
         return error(409, "Not enough feedback to score", "No satisfaction evidence was found in the client's replies.");
       }
-      return error(503, "Could not score this conversation", predicted.error || "the model was unavailable");
+      const details = predicted.error === "gemini_timeout"
+        ? "Gemini timed out after two attempts. No score was saved and the session or cycle status was not changed. You can safely click Retry scoring."
+        : (predicted.error || "the model was unavailable");
+      return error(503, "Could not score this conversation", details);
     }
 
     const hasStatedScore = session.csatSource === "stated"
@@ -3132,7 +3135,8 @@ async function handleApiRequest(request) {
       predicted: predicted.overall,
       observations: predicted.observations,
       alreadyScored: false,
-      sessionRemainsOpen: !["completed", "opted_out"].includes(updated.status)
+      sessionRemainsOpen: !["completed", "opted_out"].includes(updated.status),
+      sessionStatusUnchanged: true
     });
   }
 

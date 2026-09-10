@@ -272,6 +272,12 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     ? cycleSessions.filter((session) => session.clientPocId === feedbackPocId)
     : cycleSessions;
   const selectedSession = feedbackSessions.find((session) => session.id === sessionId) || feedbackSessions[0] || null;
+  const selectedSessionClosed = Boolean(selectedSession && (
+    selectedCycle?.status === "closed"
+    || ["completed", "opted_out"].includes(selectedSession.status)
+    || ["completed", "opted_out", "handed_off"].includes(selectedSession.conversationState?.state)
+    || selectedSession.conversationState?.reminderExhausted
+  ));
   const actionPocs = (workspace?.pocs || []).filter((poc) => selectedActionPocIds.includes(poc.id));
   const actionPocIdSet = new Set(actionPocs.map((poc) => poc.id));
   const selectedCycleSessions = cycleSessions.filter((session) => actionPocIdSet.has(session.clientPocId));
@@ -442,7 +448,9 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           ? result.reason
           : result.alreadyScored
             ? result.reason
-            : "Conversation scored. This POC's feedback session remains open."
+            : selectedSessionClosed
+              ? "Conversation scored. The completed session and closed cycle remain unchanged."
+              : "Conversation scored. This POC's feedback session remains open."
       );
       await loadWorkspace(workspace.project.key);
       onReload();
@@ -767,14 +775,15 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
         && messages.some((message) => message.side === "client") ? (
           <div className="prediction-strip watch">
             <div className="prediction-head">
-              <strong>This conversation has not been scored</strong>
+              <strong>{selectedSessionClosed ? "This closed conversation has not been scored" : "This conversation has not been scored"}</strong>
               <Button onClick={scoreSession} disabled={scoring}>
-                {scoring ? "Scoring…" : "Score it now"}
+                {scoring ? "Scoring…" : selectedSessionClosed ? "Retry scoring" : "Score it now"}
               </Button>
             </div>
             <p>
-              Score the feedback shared so far without ending this POC's session. Greetings,
-              acknowledgements and postponements remain unscored.
+              {selectedSessionClosed
+                ? "Retry the saved conversation. A successful prediction will be added without reopening this POC session or its cycle."
+                : "Score the feedback shared so far without ending this POC's session. Greetings, acknowledgements and postponements remain unscored."}
             </p>
           </div>
         ) : null}

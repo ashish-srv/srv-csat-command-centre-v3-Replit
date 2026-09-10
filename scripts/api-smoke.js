@@ -3336,6 +3336,62 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("closed conversation scoring retries one Gemini timeout without reopening the cycle", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    let attempts = 0;
+    process.env.GEMINI_API_KEY = "test-key";
+    store._session = {
+      id: "sess_1", cycleId: "cyc_1", projectId: "prj_1", clientPocId: "poc_1",
+      status: "completed", completionStatus: "completed", sessionType: "pulse",
+      conversationState: {
+        state: "completed",
+        mentionedServices: {
+          ppc: { serviceKey: "ppc", status: "captured", sentiment: "negative", reasonText: "Lead quality is poor" }
+        }
+      },
+      csatScore: null, predictedCsat: null
+    };
+    calls.messages.length = 0;
+    calls.messages.push({ id: "msg_closed_retry", sessionId: "sess_1", side: "client", body: "PPC lead quality is poor" });
+    global.fetch = async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const timeout = new Error("request timed out");
+        timeout.name = "AbortError";
+        throw timeout;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          output_text: JSON.stringify({
+            overall: { score: 4.5, confidence: 88, reasoning: "Lead quality is poor.", signals: ["poor lead quality"] },
+            services: [{ serviceKey: "ppc", score: 4, confidence: 90, reasoning: "Poor leads.", sentiment: "negative" }],
+            observations: []
+          })
+        })
+      };
+    };
+
+    try {
+      const res = await req("POST", "/api/sessions/sess_1/score", {});
+      const payload = JSON.parse(res.body);
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(attempts, 2);
+      assert.strictEqual(payload.session.predictedCsat, 4.5);
+      assert.strictEqual(payload.session.status, "completed");
+      assert.strictEqual(payload.session.completionStatus, "completed");
+      assert.strictEqual(payload.session.conversationState.state, "completed");
+      assert.strictEqual(payload.sessionRemainsOpen, false);
+      assert.strictEqual(payload.sessionStatusUnchanged, true);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+    }
+  });
+
   await scenario("A conversation cannot close before everything is covered", async () => {
     const { isEverythingCovered, soundsLikeFarewell, buildChecklist } =
       require("../src/lib/whatsapp-state-machine");

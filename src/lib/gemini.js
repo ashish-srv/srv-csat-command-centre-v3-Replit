@@ -26,6 +26,10 @@ const TIMEOUT_MS = 12000;
 // retrying Gemini until n8n returns Bad Gateway and the client hears nothing.
 const WHATSAPP_CALL = { maxAttempts: 1, timeoutMs: 8000 };
 const TERMINAL_CALL = { maxAttempts: 1, timeoutMs: 6000 };
+// Satisfaction scoring is the one terminal read exposed through an explicit
+// dashboard retry. Give a slow model a second bounded attempt; this still fits
+// inside n8n's request window when scoring happens on the final WhatsApp turn.
+const SATISFACTION_CALL = { maxAttempts: 2, timeoutMs: 10000 };
 
 /**
  * Gemini 3.x defaults to MEDIUM thinking, which spent ~5s reasoning before
@@ -1518,7 +1522,7 @@ function hasSatisfactionEvidence({ conversationState = {}, messages = [] } = {})
   });
 }
 
-async function predictSatisfaction({ project, conversationState, messages = [] }) {
+async function predictSatisfaction({ project, conversationState, messages = [], callOptions = SATISFACTION_CALL }) {
   const fallback = { overall: null, services: [], observations: [], source: "fallback", error: null };
   if (!isGeminiConfigured()) return { ...fallback, error: "gemini_not_configured" };
 
@@ -1589,7 +1593,7 @@ async function predictSatisfaction({ project, conversationState, messages = [] }
     fence("conversation", transcript)
   ].filter(Boolean).join("\n");
 
-  const result = await callGemini(input, THINKING_LOW, TERMINAL_CALL);
+  const result = await callGemini(input, THINKING_LOW, callOptions);
   if (!result.ok) return { ...fallback, error: result.error };
 
   const parsed = parseJson(result.text);
