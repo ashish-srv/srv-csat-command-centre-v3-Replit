@@ -40,6 +40,8 @@ docs/                   Existing architecture and operational documentation
 - Production server: `npm start`
 - Validation: `npm run check && npm test`
 - Database migration: `npm run db:migrate`
+- Supabase import preflight (read-only): `npm run db:import:check`
+- Supabase import (replaces Replit app data): `npm run db:import:supabase`
 
 The production server listens on Replit's `PORT` and binds to `0.0.0.0`. It
 serves `/api/*` through the existing API handler and all other routes through
@@ -58,3 +60,5 @@ the built React single-page application.
    tests, and activate workflows only after the end-to-end checks pass.
 
 See `MIGRATION-STATUS.md` for the repository decision and cutover sequence.
+See `docs/supabase-to-replit-data-migration.md` for the guarded production-data
+copy procedure.

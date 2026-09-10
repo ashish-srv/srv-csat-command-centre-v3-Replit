@@ -9,17 +9,20 @@
     "dev": "node server.local.js",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173",
-    "check": "eslint . && node --check server.js && node --check server.local.js && node --check src/server/api-handler.js && node --check src/lib/supabase-store.js && node --check src/lib/postgres-store.js && node --check src/lib/whatsapp-state-machine.js && node --check src/lib/gemini.js && node --check src/lib/n8n.js && node --check src/lib/store.js && node --check scripts/migrate-postgres.js",
+    "check": "eslint . && node --check server.js && node --check server.local.js && node --check src/server/api-handler.js && node --check src/lib/supabase-store.js && node --check src/lib/postgres-store.js && node --check src/lib/whatsapp-state-machine.js && node --check src/lib/gemini.js && node --check src/lib/n8n.js && node --check src/lib/store.js && node --check scripts/migrate-postgres.js && node --check scripts/import-supabase-postgres.js",
     "test:state": "node scripts/state-machine-smoke.js",
     "test:api": "node scripts/api-smoke.js",
     "test:admin-import": "node scripts/admin-import-smoke.js",
-    "test": "npm run test:state && npm run test:sweep && npm run test:api && npm run test:admin-import && npm run test:gemini && npm run test:postgres",
+    "test": "npm run test:state && npm run test:sweep && npm run test:api && npm run test:admin-import && npm run test:gemini && npm run test:postgres && npm run test:db-import",
     "test:gemini": "node scripts/gemini-guardrail-smoke.js",
     "lint": "eslint .",
     "test:sweep": "node scripts/conversation-sweep.js",
     "replay": "node scripts/replay.js",
     "db:migrate": "node scripts/migrate-postgres.js",
-    "test:postgres": "node scripts/postgres-store-smoke.js"
+    "db:import:check": "node scripts/import-supabase-postgres.js --check",
+    "db:import:supabase": "node scripts/import-supabase-postgres.js --replace",
+    "test:postgres": "node scripts/postgres-store-smoke.js",
+    "test:db-import": "node scripts/supabase-import-smoke.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
