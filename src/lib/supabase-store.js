@@ -2160,6 +2160,28 @@ class SupabaseStore {
     return rows.length ? { id: rows[0].id, name: rows[0].name } : null;
   }
 
+  async deleteCluster(clusterId) {
+    const encodedId = encodeURIComponent(clusterId);
+    const [clients, internalPocs] = await Promise.all([
+      this.request("clients", {
+        query: `cluster_id=eq.${encodedId}&select=id`
+      }),
+      this.request("internal_pocs", {
+        query: `cluster_id=eq.${encodedId}&select=id`
+      })
+    ]);
+    const deleted = await this.request("clusters", {
+      method: "DELETE",
+      query: `id=eq.${encodedId}&select=id`,
+      prefer: "return=representation"
+    });
+    return {
+      clustersDeleted: Array.isArray(deleted) ? deleted.length : 0,
+      clientsUnassigned: clients.length,
+      internalPocsUnassigned: internalPocs.length
+    };
+  }
+
   async clusterNameExists(name, exceptId = null) {
     const rows = await this.request("clusters", {
       query: `name=eq.${encodeURIComponent(name)}&select=id&limit=2`

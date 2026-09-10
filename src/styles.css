@@ -1569,6 +1569,11 @@ button.metric-card {
   margin-bottom: 16px;
 }
 
+.metric-row .metric-card {
+  grid-template-rows: 32px auto minmax(32px, 1fr);
+  align-content: start;
+}
+
 .metric-row.four {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -2086,8 +2091,17 @@ button.metric-card {
 
 .dtable.pocs .dtable-head,
 .dtable.pocs .dtable-row {
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.4fr) minmax(0, 1.2fr) 128px minmax(0, 1.4fr) 116px 64px;
+  grid-template-columns: minmax(180px, 1.35fr) minmax(175px, 1.25fr) minmax(170px, 1.2fr) 140px minmax(220px, 1.55fr) 150px 72px;
+  min-width: 1210px;
 }
+
+.dtable.pocs { overflow-x: auto; }
+
+.dtable.pocs .dtable-head > *,
+.dtable.pocs .dtable-row > * { min-width: 0; }
+
+.dtable.pocs .poc-email,
+.dtable.pocs .poc-level { overflow-wrap: anywhere; }
 
 .dtable.services .dtable-head,
 .dtable.services .dtable-row {
@@ -2446,7 +2460,6 @@ button.metric-card {
 
   .dtable-head { display: none; }
   .dtable.projects .dtable-row,
-  .dtable.pocs .dtable-row,
   .dtable.services .dtable-row,
   .dtable.manage-projects .dtable-row,
   .dtable.manage-pocs .dtable-row {
@@ -2475,15 +2488,39 @@ button.metric-card {
   align-items: center;
   gap: 6px;
   padding: 5px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--panel);
+  border: 0;
+  background: transparent;
   color: var(--muted-strong);
   font-size: 12px;
   cursor: pointer;
 }
 
-.cluster-chip:hover { border-color: var(--blue); color: var(--blue); }
+.cluster-chip-group {
+  display: inline-flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+.cluster-chip-group:hover { border-color: var(--blue); }
+.cluster-chip:hover { color: var(--blue); }
+
+.cluster-chip-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.cluster-chip-delete:hover { background: var(--red-soft); color: var(--red); }
+.cluster-chip-delete:disabled { cursor: not-allowed; opacity: 0.55; }
 
 .dtable.manage-services .dtable-head,
 .dtable.manage-services .dtable-row {
@@ -2640,6 +2677,10 @@ button.metric-card {
   border-left: 3px solid var(--blue);
   background: var(--blue-soft);
   box-shadow: inset 0 0 0 1px #b8d4ff;
+}
+
+@media (max-width: 1180px) {
+  .dtable.pocs .dtable-head { display: grid; }
 }
 
 .cycle-name-cell {
@@ -2884,7 +2925,8 @@ button.metric-card {
 
 .response-tracker-table {
   min-width: 0;
-  max-height: min(62vh, 620px);
+  height: clamp(480px, 70vh, 760px);
+  max-height: 760px;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;

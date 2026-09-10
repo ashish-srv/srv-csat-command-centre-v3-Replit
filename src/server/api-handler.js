@@ -3608,6 +3608,13 @@ async function handleApiRequest(request) {
     return json(200, { cluster });
   }
 
+  if (method === "DELETE" && clusterUpdateMatch) {
+    const clusterId = decodeURIComponent(clusterUpdateMatch[1]);
+    const result = await store.deleteCluster(clusterId);
+    if (!result.clustersDeleted) return error(404, "Cluster not found");
+    return json(200, result);
+  }
+
   if (method === "POST" && pathname === "/api/admin/clients") {
     const name = String(body.name || "").trim();
     if (!name) return error(400, "Client name is required");

@@ -201,25 +201,30 @@ function CleanupPinModal({ confirmation, pin, error, busy, onPinChange, onCancel
   const isPocDeletion = confirmation.kind === "pocs";
   const isProjectDeletion = confirmation.kind === "projects";
   const isClientDeletion = confirmation.kind === "clients";
-  const selectedCount = isPocDeletion
-    ? confirmation.pocIds.length
-    : isProjectDeletion
-      ? confirmation.projectIds.length
-      : isClientDeletion
-        ? confirmation.clientIds.length
-        : isChatCleanup || isCycleDeletion
-          ? confirmation.cycleIds.length
-          : confirmation.issueIds.length;
-  const noun = isPocDeletion
-    ? `${selectedCount} selected POC${selectedCount === 1 ? "" : "s"}`
-    : isProjectDeletion
-      ? `${selectedCount} selected project${selectedCount === 1 ? "" : "s"}`
-      : isClientDeletion
-        ? `${selectedCount} selected client${selectedCount === 1 ? "" : "s"}`
-        : isChatCleanup || isCycleDeletion
-          ? `${selectedCount} selected cycle${selectedCount === 1 ? "" : "s"}`
-          : `${selectedCount} selected issue${selectedCount === 1 ? "" : "s"}`;
-  const targetName = confirmation.project?.name || confirmation.client?.name || "the selected records";
+  const isClusterDeletion = confirmation.kind === "clusters";
+  const selectedCount = isClusterDeletion
+    ? 1
+    : isPocDeletion
+      ? confirmation.pocIds.length
+      : isProjectDeletion
+        ? confirmation.projectIds.length
+        : isClientDeletion
+          ? confirmation.clientIds.length
+          : isChatCleanup || isCycleDeletion
+            ? confirmation.cycleIds.length
+            : confirmation.issueIds.length;
+  const noun = isClusterDeletion
+    ? "this cluster"
+    : isPocDeletion
+      ? `${selectedCount} selected POC${selectedCount === 1 ? "" : "s"}`
+      : isProjectDeletion
+        ? `${selectedCount} selected project${selectedCount === 1 ? "" : "s"}`
+        : isClientDeletion
+          ? `${selectedCount} selected client${selectedCount === 1 ? "" : "s"}`
+          : isChatCleanup || isCycleDeletion
+            ? `${selectedCount} selected cycle${selectedCount === 1 ? "" : "s"}`
+            : `${selectedCount} selected issue${selectedCount === 1 ? "" : "s"}`;
+  const targetName = confirmation.cluster?.name || confirmation.project?.name || confirmation.client?.name || "the selected records";
   const consequence = isChatCleanup
     ? " Ratings, scores, cycles and issues will be preserved."
     : isCycleDeletion
@@ -230,7 +235,9 @@ function CleanupPinModal({ confirmation, pin, error, busy, onPinChange, onCancel
           ? " Every POC, service, cycle, chat, rating, issue, schedule and feedback record under those projects will also be deleted."
           : isClientDeletion
             ? " Every project and all POCs, services, cycles, chats, ratings, issues and schedules under this client will also be deleted."
-            : " Chats, ratings, scores and cycles will be preserved.";
+            : isClusterDeletion
+              ? " Clients and internal POCs assigned to it will be kept and changed to Not set."
+              : " Chats, ratings, scores and cycles will be preserved.";
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -239,7 +246,7 @@ function CleanupPinModal({ confirmation, pin, error, busy, onPinChange, onCancel
       <div className="modal-panel cleanup-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="cleanup-confirm-title">
         <h3 id="cleanup-confirm-title">Confirm permanent cleanup</h3>
         <p>
-          You are about to {isChatCleanup ? "clear chat transcripts from" : "permanently delete"} {noun} for <strong>{targetName}</strong>.
+          You are about to {isChatCleanup ? "clear chat transcripts from" : "permanently delete"} {noun}{isClusterDeletion ? ": " : " for "}<strong>{targetName}</strong>.
           {consequence}
         </p>
         <p>This action cannot be undone from the app. Re-enter the Manage admin PIN to proceed.</p>
@@ -259,7 +266,7 @@ function CleanupPinModal({ confirmation, pin, error, busy, onPinChange, onCancel
         <div className="modal-actions">
           <Button onClick={onCancel} disabled={busy}>Cancel</Button>
           <Button icon={Trash2} variant="danger" onClick={onConfirm} disabled={busy || !pin.trim()}>
-            {busy ? "Deleting…" : isCycleDeletion ? "Delete cycles permanently" : isPocDeletion ? "Delete POCs permanently" : isProjectDeletion ? "Delete projects permanently" : isClientDeletion ? "Delete client permanently" : "Confirm cleanup"}
+            {busy ? "Deleting…" : isClusterDeletion ? "Delete cluster permanently" : isCycleDeletion ? "Delete cycles permanently" : isPocDeletion ? "Delete POCs permanently" : isProjectDeletion ? "Delete projects permanently" : isClientDeletion ? "Delete client permanently" : "Confirm cleanup"}
           </Button>
         </div>
       </div>
@@ -1093,33 +1100,47 @@ export default function Manage({ onReload }) {
     });
   }
 
+  function openClusterDeleteConfirmation(cluster) {
+    closeForms();
+    setCleanupPin("");
+    setCleanupPinError("");
+    setCleanupConfirmation({
+      kind: "clusters",
+      cluster: { id: cluster.id, name: cluster.name }
+    });
+  }
+
   async function runConfirmedCleanup() {
     if (!cleanupConfirmation || !cleanupPin.trim()) return;
-    const { kind, project, cycleIds, issueIds, client, pocIds, projectIds, clientIds } = cleanupConfirmation;
+    const { kind, project, cycleIds, issueIds, client, pocIds, projectIds, clientIds, cluster } = cleanupConfirmation;
 
     setCleaning(kind);
     setCleanupPinError("");
     try {
-      const path = kind === "pocs"
-        ? "/api/admin/client-pocs"
-        : kind === "projects"
-          ? "/api/admin/projects"
-          : kind === "clients"
-            ? "/api/admin/clients"
-            : kind === "messages"
-        ? `/api/admin/projects/${encodeURIComponent(project.id)}/chat-messages`
-        : kind === "cycles"
-          ? `/api/admin/projects/${encodeURIComponent(project.id)}/feedback-cycles`
-          : `/api/admin/projects/${encodeURIComponent(project.id)}/issues`;
+      const path = kind === "clusters"
+        ? `/api/admin/clusters/${encodeURIComponent(cluster.id)}`
+        : kind === "pocs"
+          ? "/api/admin/client-pocs"
+          : kind === "projects"
+            ? "/api/admin/projects"
+            : kind === "clients"
+              ? "/api/admin/clients"
+              : kind === "messages"
+                ? `/api/admin/projects/${encodeURIComponent(project.id)}/chat-messages`
+                : kind === "cycles"
+                  ? `/api/admin/projects/${encodeURIComponent(project.id)}/feedback-cycles`
+                  : `/api/admin/projects/${encodeURIComponent(project.id)}/issues`;
       const result = await apiWriteWithAdminPin(
         path,
-        kind === "pocs"
-          ? { clientId: client.id, pocIds }
-          : kind === "projects"
-            ? { clientId: client.id, projectIds }
-            : kind === "clients"
-              ? { clientIds }
-              : kind === "issues" ? { cycleIds, issueIds } : { cycleIds },
+        kind === "clusters"
+          ? {}
+          : kind === "pocs"
+            ? { clientId: client.id, pocIds }
+            : kind === "projects"
+              ? { clientId: client.id, projectIds }
+              : kind === "clients"
+                ? { clientIds }
+                : kind === "issues" ? { cycleIds, issueIds } : { cycleIds },
         "DELETE",
         cleanupPin.trim()
       );
@@ -1127,19 +1148,22 @@ export default function Manage({ onReload }) {
       setCleanupPin("");
       setSelectedDeletePocIds([]);
       setSelectedDeleteProjectIds([]);
+      if (kind === "clusters" && clusterFilterId === cluster.id) setClusterFilterId("");
       await loadAll(kind === "clients" ? "" : clientId);
       onReload();
-      showToast(kind === "pocs"
-        ? `${result.pocsDeleted} client POC${result.pocsDeleted === 1 ? "" : "s"} permanently deleted.`
-        : kind === "projects"
-          ? `${result.projectsDeleted} project${result.projectsDeleted === 1 ? "" : "s"} and all related records permanently deleted.`
-          : kind === "clients"
-            ? `${result.clientsDeleted} client${result.clientsDeleted === 1 ? "" : "s"} and all related records permanently deleted.`
-            : kind === "messages"
-        ? `${result.messagesDeleted} chat message${result.messagesDeleted === 1 ? "" : "s"} cleared from ${result.cyclesAffected} selected cycle${result.cyclesAffected === 1 ? "" : "s"}. Ratings and issues were preserved.`
-        : kind === "cycles"
-          ? `${result.cyclesDeleted} feedback cycle${result.cyclesDeleted === 1 ? "" : "s"} and all dependent feedback data were permanently deleted from ${project.name}.`
-          : `${result.issuesDeleted} selected issue${result.issuesDeleted === 1 ? "" : "s"} deleted from ${project.name}. Chats and ratings were preserved.`);
+      showToast(kind === "clusters"
+        ? `${result.clustersDeleted} cluster${result.clustersDeleted === 1 ? "" : "s"} permanently deleted. Assigned clients and internal POCs were kept without a cluster.`
+        : kind === "pocs"
+          ? `${result.pocsDeleted} client POC${result.pocsDeleted === 1 ? "" : "s"} permanently deleted.`
+          : kind === "projects"
+            ? `${result.projectsDeleted} project${result.projectsDeleted === 1 ? "" : "s"} and all related records permanently deleted.`
+            : kind === "clients"
+              ? `${result.clientsDeleted} client${result.clientsDeleted === 1 ? "" : "s"} and all related records permanently deleted.`
+              : kind === "messages"
+                ? `${result.messagesDeleted} chat message${result.messagesDeleted === 1 ? "" : "s"} cleared from ${result.cyclesAffected} selected cycle${result.cyclesAffected === 1 ? "" : "s"}. Ratings and issues were preserved.`
+                : kind === "cycles"
+                  ? `${result.cyclesDeleted} feedback cycle${result.cyclesDeleted === 1 ? "" : "s"} and all dependent feedback data were permanently deleted from ${project.name}.`
+                  : `${result.issuesDeleted} selected issue${result.issuesDeleted === 1 ? "" : "s"} deleted from ${project.name}. Chats and ratings were preserved.`);
     } catch (cleanupError) {
       setCleanupPinError(cleanupError.status === 403 ? "Incorrect admin PIN." : cleanupError.message);
     } finally {
@@ -1673,15 +1697,26 @@ export default function Manage({ onReload }) {
         {clusters.length ? (
           <div className="cluster-chips">
             {clusters.map((cluster) => (
-              <button
-                key={cluster.id}
-                type="button"
-                className="cluster-chip"
-                onClick={() => { closeForms(); setClusterForm({ id: cluster.id, name: cluster.name }); }}
-              >
-                {cluster.name}
-                <Pencil size={11} aria-hidden="true" />
-              </button>
+              <div key={cluster.id} className="cluster-chip-group">
+                <button
+                  type="button"
+                  className="cluster-chip"
+                  onClick={() => { closeForms(); setClusterForm({ id: cluster.id, name: cluster.name }); }}
+                >
+                  {cluster.name}
+                  <Pencil size={11} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="cluster-chip-delete"
+                  aria-label={`Delete ${cluster.name}`}
+                  title={`Delete ${cluster.name}`}
+                  disabled={Boolean(cleaning)}
+                  onClick={() => openClusterDeleteConfirmation(cluster)}
+                >
+                  <Trash2 size={12} aria-hidden="true" />
+                </button>
+              </div>
             ))}
           </div>
         ) : null}

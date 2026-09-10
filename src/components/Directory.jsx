@@ -260,8 +260,8 @@ export default function Directory({ onOpenProject }) {
                     <span className={`mono ${poc.contactWhatsapp ? "" : "missing"}`}>
                       {poc.contactWhatsapp || "not set"}
                     </span>
-                    <span>{poc.contactEmail || "--"}</span>
-                    <span>{poc.levelName ? `${poc.levelName} · ${formatPocWeightShare(poc, pocs)}` : "Not set"}</span>
+                    <span className="poc-email">{poc.contactEmail || "--"}</span>
+                    <span className="poc-level">{poc.levelName ? `${poc.levelName} · ${formatPocWeightShare(poc, pocs)}` : "Not set"}</span>
                     <span className={poc.active ? "" : "missing"}>{poc.active ? "Yes" : "No"}</span>
                   </div>
                 );

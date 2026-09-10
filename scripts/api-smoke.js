@@ -33,6 +33,7 @@ const calls = {
   deletedClientPocs: [],
   deletedProjects: [],
   deletedClients: [],
+  deletedClusters: [],
   reminderOptions: [],
   automationClaims: new Map()
 };
@@ -260,7 +261,7 @@ const store = {
   },
   isCycleComplete: async () => store._cycleComplete,
   cycleSummary: async () => store._cycleSummary,
-  getDirectory: async () => ({ clusters: [], clients: [{ id: "cl_1", key: "test", name: "Test Client" }], projects: [project], pocLevels: [{ id: "normal", name: "Normal", weight: 40 }, { id: "important", name: "Important", weight: 60 }], departments: [], subDepartments: [], internalPocs: [] }),
+  getDirectory: async () => ({ clusters: [{ id: "clu_1", name: "Existing" }], clients: [{ id: "cl_1", key: "test", name: "Test Client" }], projects: [project], pocLevels: [{ id: "normal", name: "Normal", weight: 40 }, { id: "important", name: "Important", weight: 60 }], departments: [], subDepartments: [], internalPocs: [] }),
   pocLevels: async () => new Map([
     ["normal", { id: "normal", name: "Normal", weight: 40 }],
     ["important", { id: "important", name: "Important", weight: 60 }]
@@ -311,6 +312,11 @@ const store = {
   servicesForProject: async (projectId) => project.services.filter((service) => service.projectId === projectId),
   serviceKeyExists: async (projectId, key, exceptId) => key === "ppc" && exceptId !== "svc_1",
   updateCluster: async (id, input) => (id === "clu_1" ? { id, ...input } : null),
+  deleteCluster: async (id) => {
+    if (id !== "clu_1") return { clustersDeleted: 0, clientsUnassigned: 0, internalPocsUnassigned: 0 };
+    calls.deletedClusters.push(id);
+    return { clustersDeleted: 1, clientsUnassigned: 1, internalPocsUnassigned: 2 };
+  },
   clusterNameExists: async (name, exceptId) => name === "Existing" && exceptId !== "clu_1",
   createClient: async (input) => ({ id: "cl_new", ...input }),
   updateClient: async (id, input) => (id === "cl_1" ? { id, ...input } : null),
@@ -2990,6 +2996,26 @@ async function scenario(name, fn) {
   await scenario("cluster rename keeps its own name", async () => {
     const res = await req("PATCH", "/api/admin/clusters/clu_1", { name: "Existing" }, PIN);
     assert.strictEqual(res.statusCode, 200);
+  });
+
+  await scenario("admin can delete a cluster while retaining assigned records", async () => {
+    const res = await req("DELETE", "/api/admin/clusters/clu_1", {}, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(payload.clustersDeleted, 1);
+    assert.strictEqual(payload.clientsUnassigned, 1);
+    assert.strictEqual(payload.internalPocsUnassigned, 2);
+    assert.strictEqual(calls.deletedClusters.at(-1), "clu_1");
+  });
+
+  await scenario("deleting an unknown cluster returns 404", async () => {
+    const res = await req("DELETE", "/api/admin/clusters/nope", {}, PIN);
+    assert.strictEqual(res.statusCode, 404);
+  });
+
+  await scenario("cluster deletion requires the admin PIN", async () => {
+    const res = await req("DELETE", "/api/admin/clusters/clu_1", {});
+    assert.strictEqual(res.statusCode, 403);
   });
 
   await scenario("create client works with the PIN", async () => {

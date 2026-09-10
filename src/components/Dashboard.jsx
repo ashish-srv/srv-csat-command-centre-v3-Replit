@@ -311,7 +311,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
         </div>
       ) : null}
 
-      <div className="metric-row five">
+      <div className="metric-row four">
         <MetricCard label="Projects" value={visibleProjects.length} />
         <MetricCard
           label="Avg CSAT"
