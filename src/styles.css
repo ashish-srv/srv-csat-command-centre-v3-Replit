@@ -1478,15 +1478,28 @@ button.metric-card {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 15px;
-  height: 15px;
-  border: 1px solid var(--line);
+  flex: 0 0 18px;
+  width: 18px;
+  min-width: 18px;
+  max-width: 18px;
+  height: 18px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--line);
   border-radius: 4px;
   color: var(--blue);
+  font-style: normal;
 }
 
 .filter-option.checked i {
   border-color: var(--blue);
+  background: var(--blue);
+  color: #fff;
+}
+
+.filter-option i svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 3;
 }
 
 .filter-clear,
@@ -1666,6 +1679,21 @@ button.metric-card {
   padding: 7px 4px;
 }
 
+.poc-session-subrow { background: #f8fafc; }
+.poc-session-subrow.weak { border-left: 3px solid var(--red); }
+.poc-session-subrow.watch { border-left: 3px solid var(--amber); }
+.poc-session-subrow.strong { border-left: 3px solid var(--green); }
+.poc-session-subrow .status-pill {
+  min-height: 23px;
+  padding: 3px 7px;
+  font-size: 10px;
+}
+.poc-session-lifecycle {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted-strong);
+}
+
 .subrow-label { color: var(--ink) !important; font-weight: 600; }
 
 /* ---- Schedule strip + services ---- */
@@ -1805,6 +1833,30 @@ button.metric-card {
 }
 
 .poc-card span { font-size: 12px; color: var(--muted-strong); }
+
+.poc-reminder-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.poc-reminder-status span,
+.poc-reminder-status b {
+  color: inherit;
+  font-size: 11px;
+}
+
+.poc-reminder-status b { white-space: nowrap; }
+.poc-reminder-status.exhausted {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
 
 .weight-pill {
   padding: 2px 7px;

@@ -346,6 +346,12 @@ function looksLikeRatingAnswer(text) {
  */
 function detectNumber(text) {
   const value = lower(text);
+  const wordDecimal = value.match(/\b(zero|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:point|dot)\s+(zero|one|two|three|four|five|six|seven|eight|nine)\b/i);
+  if (wordDecimal) {
+    const whole = WORD_NUMBERS.find(([name]) => name === wordDecimal[1].toLowerCase());
+    const fraction = WORD_NUMBERS.find(([name]) => name === wordDecimal[2].toLowerCase());
+    return { value: whole[1] + (fraction[1] / 10), scale: null };
+  }
   const wordScale = value.match(/\b(zero|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:\/|out of)\s*(\d+)\b/i);
   if (wordScale) {
     const word = WORD_NUMBERS.find(([name]) => name === wordScale[1].toLowerCase());
@@ -1829,6 +1835,37 @@ function processWhatsAppReply({
       const asksRecordedRating = /\b(what|which)\b.{0,20}\b(take|took|record(?:ed)?|rating|score)\b/i.test(text)
         || /\bwhat did (?:you|u) take\b/i.test(text);
       const signalsCorrection = /\b(sorry|mistake|correct(?:ion)?|change|instead|make that|take|actually)\b/i.test(text);
+      const refersToRecommendation = conversationState.sessionType === "project_end"
+        && /\b(?:recommend|recommendation|nps|network)\w*\b/i.test(text);
+      const validNps = ratingRead
+        && ratingRead.value >= 0
+        && ratingRead.value <= 10
+        && (!ratingRead.scale || ratingRead.scale === 10);
+
+      if (refersToRecommendation && validNps) {
+        conversationState.npsScore = ratingRead.value;
+        conversationState.npsCorrectedAt = new Date().toISOString();
+        const overall = conversationState.overallRating;
+        const overallText = overall === null || overall === undefined
+          ? "Your overall rating remains recorded"
+          : `Your overall rating remains ${overall} out of 10`;
+        return plainTurn({
+          conversationState, project, poc, text, guardrails,
+          state: STATES.CLOSING_GRACE,
+          body: `No problem — I have updated your recommendation rating to ${ratingRead.value} out of 10. ${overallText}, and the 10-minute correction window remains open.`,
+          control: { suppressTerminalNotifications: true }
+        });
+      }
+
+      if (refersToRecommendation && ratingRead && !validNps) {
+        return plainTurn({
+          conversationState, project, poc, text, guardrails,
+          state: STATES.CLOSING_GRACE,
+          guardrail: GUARDRAILS.INVALID_RATING,
+          body: "That recommendation rating is not valid. The scale here is 0 to 10. Please reply with a number from 0 to 10; decimals such as 3.5 are accepted.",
+          control: { suppressTerminalNotifications: true }
+        });
+      }
 
       if (validRating && (looksLikeRatingAnswer(text) || signalsCorrection)) {
         conversationState.overallRating = normalizedRating;
@@ -2203,7 +2240,11 @@ function processWhatsAppReply({
 
   if (detectedNumber) {
     if (expectsNps) {
-      if (detectedNumber.value >= 0 && detectedNumber.value <= 10) {
+      if (
+        detectedNumber.value >= 0
+        && detectedNumber.value <= 10
+        && (!detectedNumber.scale || detectedNumber.scale === 10)
+      ) {
         npsAnswer = detectedNumber.value;
       } else {
         // --- G8 out-of-scale answer: never clamp or guess, however many times
@@ -2214,7 +2255,7 @@ function processWhatsAppReply({
           conversationState, project, poc, text, guardrails,
           state: STATES.WAITING_FOR_NPS,
           guardrail: GUARDRAILS.INVALID_RATING,
-          body: "Just to confirm — the scale here is 0 to 10. How likely are you to recommend SRV Media?"
+          body: "That recommendation rating is not valid. The scale here is 0 to 10. Please reply with a number from 0 to 10; decimals such as 3.5 are accepted."
         });
       }
     } else if (expectsRating && numberIsAnswer) {
@@ -2231,7 +2272,7 @@ function processWhatsAppReply({
           conversationState, project, poc, text, guardrails,
           state: priorState,
           guardrail: GUARDRAILS.INVALID_RATING,
-          body: "Just to confirm — the scale here is 0 to 10, where 10 is best. Which number would you give?"
+          body: "That rating is not valid. The scale here is 0 to 10, where 10 is best. Please reply with a number from 0 to 10; decimals such as 3.5 are accepted."
         });
       }
     } else if (!expectsRating && numberIsAnswer) {

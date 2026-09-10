@@ -553,6 +553,7 @@ function pendingQuestionTypeFor(conversationState) {
   if (conversationState.pendingQuestionType) return conversationState.pendingQuestionType;
   if (conversationState.state === STATES.WAITING_FOR_SERVICE_SCOPE) return "service_scope";
   if (conversationState.state === STATES.WAITING_FOR_OVERALL_RATING) return "overall_rating";
+  if (conversationState.state === STATES.WAITING_FOR_NPS) return "nps";
   if (conversationState.state === STATES.WAITING_FOR_SERVICE_FOLLOWUP) return "service_followup";
   if (conversationState.askedForAppreciation && !conversationState.appreciationAnswered) return "appreciation";
   if (conversationState.askedForAnythingElse && !conversationState.anythingElseAnswered) return "final_sweep";
@@ -599,7 +600,11 @@ function acceptedOverallRating(conversationState, conducted) {
   // then give the score while we are closing that point. Once the overall
   // question has genuinely been asked, retain an explicit model-read rating
   // instead of asking for the same number again.
-  return conversationState.overallRatingAsked ? conducted.overallRating : null;
+  const answeringNps = conversationState.state === STATES.WAITING_FOR_NPS
+    || pendingQuestionTypeFor(conversationState) === "nps";
+  return conversationState.overallRatingAsked && !answeringNps
+    ? conducted.overallRating
+    : null;
 }
 
 function latestExplicitOverallRating(messages, overallRatingAsked) {
@@ -617,9 +622,23 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
   });
   const candidates = ratingQuestionIndex >= 0 ? messages.slice(ratingQuestionIndex + 1) : messages.slice(-12);
   let latest = null;
+  let ratingContext = "overall";
   for (const message of candidates) {
-    if (message.side !== "client") continue;
     const body = String(message.body || "").trim();
+    if (message.side === "srv") {
+      if (/\b(?:recommend|recommendation|nps)\w*\b.{0,140}\b(?:out of 10|0 to 10)\b/i.test(body)) {
+        ratingContext = "nps";
+      } else if (/\boverall\b.{0,140}\b(?:rating|rate|score|out of 10|0 to 10)\b/i.test(body)) {
+        ratingContext = "overall";
+      }
+      continue;
+    }
+    if (message.side !== "client") continue;
+    const explicitlyOverall = /\boverall\b.{0,45}\b(?:rating|score)\b|\b(?:rating|score)\b.{0,45}\boverall\b/i.test(body);
+    // Once the bot has asked for recommendation likelihood, an ordinary
+    // number answers NPS. Only wording that explicitly says "overall rating"
+    // is allowed to alter CSAT after that point.
+    if (ratingContext === "nps" && !explicitlyOverall) continue;
     const scaledMatch = body.match(/\b(?:a\s+)?(\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:\/|out of)\s*(5|10)\b/i);
     const read = scaledMatch
       ? {
@@ -1422,7 +1441,28 @@ async function analyzeTimedOutPartialSession({
   if (typeof store.getMessagesForSession !== "function") return null;
   const messages = await store.getMessagesForSession(session.id);
   const clientMessages = messages.filter((message) => message.side === "client");
-  if (!clientMessages.length) return null;
+  if (!clientMessages.length) {
+    // A manual Stop must also remove any stale/interim score that predates the
+    // real transcript. No client message means there is nothing for Gemini to
+    // infer and the honest terminal result is explicitly unscored.
+    if (closureReason !== "stopped_by_admin") return null;
+    return {
+      csatScore: null,
+      csatSource: null,
+      predictedCsat: null,
+      predictedConfidence: null,
+      predictedReasoning: null,
+      predictedSignals: [],
+      riskLevel: null,
+      npsScore: null,
+      npsSource: null,
+      tone: null,
+      toneReason: "No client feedback was provided.",
+      toneSource: "fallback",
+      services: [],
+      observations: []
+    };
+  }
 
   const terminalState = {
     ...(session.conversationState || {}),

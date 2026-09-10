@@ -48,14 +48,17 @@ function riskLabel(project, cycles) {
   return project.riskLevel || "Not scored";
 }
 
-function ProjectRow({ project, cycles, expanded, onToggle, onOpenProject }) {
+function ProjectRow({ project, cycles, sessions, expanded, onToggle, onOpenProject }) {
   const risk = riskLabel(project, cycles);
   const latest = cycles[0] || null;
+  const visibleCycleIds = new Set(cycles.map((cycle) => cycle.id));
+  const cycleById = new Map(cycles.map((cycle) => [cycle.id, cycle]));
+  const pocRows = sessions.filter((session) => visibleCycleIds.has(session.cycleId));
 
   return (
     <>
       <div className={`ptable-row ${riskClass(risk)}`}>
-        <button type="button" className="ptable-expand" onClick={onToggle} aria-expanded={expanded} aria-label={expanded ? "Hide cycles" : "Show cycles"}>
+        <button type="button" className="ptable-expand" onClick={onToggle} aria-expanded={expanded} aria-label={expanded ? "Hide POC sessions" : "Show POC sessions"}>
           {cycles.length ? (expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />) : null}
         </button>
         <div className="ptable-name">
@@ -72,20 +75,27 @@ function ProjectRow({ project, cycles, expanded, onToggle, onOpenProject }) {
         <button type="button" className="row-link" onClick={() => onOpenProject(project.key)}>Open</button>
       </div>
 
-      {expanded ? cycles.map((cycle) => (
-        <div key={cycle.id} className="ptable-subrow">
+      {expanded ? pocRows.map((session) => {
+        const cycle = cycleById.get(session.cycleId);
+        const status = session.responseStatus || (
+          session.completionStatus === "completed" ? "completed"
+            : session.lastClientResponseAt ? "partial" : "awaiting"
+        );
+        return (
+        <div key={session.id} className={`ptable-subrow poc-session-subrow ${responseTone(status)}`}>
           <span />
-          <span className="subrow-label">{formatCycleType(cycle.cycleType, cycle.feedbackIntervalDays)}</span>
-          <span>{formatCycleCoverage(cycle)}</span>
-          <span>{cycle.status === "closed" ? "Closed" : "Open"}</span>
-          <span>{formatDate(cycle.startedAt)}</span>
-          <span>{cycle.closedAt ? formatDate(cycle.closedAt) : "--"}</span>
-          <span />
-          <b className={scoreClass(cycle.csatScore)}>{formatScore(cycle.csatScore)}</b>
-          <span className={`risk-text ${riskClass(cycle.riskLevel)}`}>{cycle.riskLevel || "--"}</span>
-          <span />
+          <span className="subrow-label">{session.pocName || "POC"}</span>
+          <span><StatusPill value={responseLabel(status)} tone={responseTone(status)} /></span>
+          <span>{cycle ? formatCycleType(cycle.cycleType, project.feedbackIntervalDays) : "Feedback cycle"}</span>
+          <span>{formatDate(session.startedAt || session.cycleStartedAt)}</span>
+          <span>{session.closedAt ? formatDate(session.closedAt) : "Open"}</span>
+          <span>{Number(session.reminderCount) || 0} / 3 reminders</span>
+          <b className={scoreClass(session.csatScore)}>{formatScore(session.csatScore)}</b>
+          <span className="poc-session-lifecycle">{responseLifecycle(session)}</span>
+          <button type="button" className="row-link" onClick={() => onOpenProject(project.key)}>Open</button>
         </div>
-      )) : null}
+        );
+      }) : null}
     </>
   );
 }
@@ -408,6 +418,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
               key={project.key}
               project={project}
               cycles={cyclesByProject.get(project.id) || []}
+              sessions={responseTracker.filter((session) => session.projectId === project.id)}
               expanded={Boolean(expanded[project.id])}
               onToggle={() => setExpanded((state) => ({ ...state, [project.id]: !state[project.id] }))}
               onOpenProject={onOpenProject}

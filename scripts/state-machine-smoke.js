@@ -244,6 +244,72 @@ scenario("Project-end only follows up concerns actually raised", () => {
   );
 });
 
+scenario("Project-end recommendation keeps decimals and never overwrites overall CSAT", () => {
+  const mentionedServices = Object.fromEntries(project.services.map((service) => [
+    service.serviceKey,
+    {
+      serviceKey: service.serviceKey,
+      serviceName: service.name,
+      status: "captured",
+      sentiment: "neutral",
+      serviceFollowUpAnswered: true
+    }
+  ]));
+  const waitingForNps = {
+    ...newSession("project_end"),
+    conversationState: {
+      state: STATES.WAITING_FOR_NPS,
+      sessionType: "project_end",
+      pendingQuestionType: "nps",
+      projectEndReviewAsked: true,
+      projectEndReviewCaptured: true,
+      serviceScopeStatus: "overall_feedback",
+      askedForAppreciation: true,
+      appreciationAnswered: true,
+      askedForAnythingElse: true,
+      anythingElseAnswered: true,
+      overallRatingAsked: true,
+      overallRating: 4,
+      npsScore: null,
+      mentionedServices
+    }
+  };
+  const initialWaitingForNps = JSON.parse(JSON.stringify(waitingForNps));
+
+  assert.deepStrictEqual(detectors.detectNumber("no take three point five"), {
+    value: 3.5,
+    scale: null
+  });
+  const answered = processWhatsAppReply({
+    session: JSON.parse(JSON.stringify(initialWaitingForNps)), project, poc,
+    text: "no take three point five",
+    geminiUnavailable: true
+  });
+  assert.strictEqual(answered.conversationState.overallRating, 4);
+  assert.strictEqual(answered.conversationState.npsScore, 3.5);
+  assert.strictEqual(answered.conversationState.state, STATES.CLOSING_GRACE);
+
+  const corrected = processWhatsAppReply({
+    session: { ...waitingForNps, conversationState: answered.conversationState },
+    project, poc,
+    text: "take 5 for recommending SRV",
+    geminiUnavailable: true
+  });
+  assert.strictEqual(corrected.conversationState.overallRating, 4);
+  assert.strictEqual(corrected.conversationState.npsScore, 5);
+  assert.match(corrected.nextMessage.body, /recommendation rating to 5 out of 10/i);
+  assert.match(corrected.nextMessage.body, /overall rating remains 4 out of 10/i);
+
+  const invalid = processWhatsAppReply({
+    session: JSON.parse(JSON.stringify(initialWaitingForNps)), project, poc,
+    text: "11",
+    geminiUnavailable: true
+  });
+  assert.strictEqual(invalid.conversationState.npsScore, null);
+  assert.strictEqual(invalid.conversationState.state, STATES.WAITING_FOR_NPS);
+  assert.match(invalid.nextMessage.body, /scale here is 0 to 10/i);
+});
+
 scenario("An in-flight project-end scope question resumes without repeating feedback", () => {
   const state = getConversationState({
     sessionType: "project_end",

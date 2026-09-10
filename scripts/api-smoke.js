@@ -1831,6 +1831,38 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("stopping with no client feedback clears every stale score without calling Gemini", async () => {
+    const priorFetch = global.fetch;
+    const priorMessages = [...calls.messages];
+    store._cycleComplete = false;
+    store._session = {
+      id: "sess_no_feedback", cycleId: "cyc_1", projectId: "prj_1", clientPocId: "poc_1",
+      status: "no_response", completionStatus: "no_response", sessionType: "pulse",
+      csatScore: 7, predictedCsat: 7, predictedConfidence: 50, csatSource: "predicted",
+      riskLevel: "Low", conversationState: { state: "waiting_for_open_feedback" }
+    };
+    calls.messages.length = 0;
+    global.fetch = async () => { throw new Error("Gemini must not run without client feedback"); };
+
+    try {
+      const res = await req("POST", "/api/sessions/sess_no_feedback/stop", {});
+      const payload = JSON.parse(res.body);
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(payload.session.status, "opted_out");
+      assert.strictEqual(payload.session.csatScore, null);
+      assert.strictEqual(payload.session.predictedCsat, null);
+      assert.strictEqual(payload.session.predictedConfidence, null);
+      assert.strictEqual(payload.session.riskLevel, null);
+      assert.strictEqual(payload.stopScore.attempted, true);
+      assert.strictEqual(payload.stopScore.scored, false);
+      assert.match(payload.stopScore.reason, /no satisfaction evidence/i);
+    } finally {
+      global.fetch = priorFetch;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+    }
+  });
+
   await scenario("Supabase reminder persistence schedules exactly 24 hours and closes after three", async () => {
     const policyStore = Object.create(SupabaseStore.prototype);
     let current = {
@@ -3485,6 +3517,14 @@ async function scenario(name, fn) {
       0,
       "a real zero must still be preserved after the question"
     );
+    assert.strictEqual(
+      conversationFlow.acceptedOverallRating(
+        { overallRatingAsked: true, state: "waiting_for_nps", pendingQuestionType: "nps" },
+        { overallRating: 5 }
+      ),
+      null,
+      "a number answering NPS must never overwrite the earlier overall score"
+    );
   });
 
   await scenario("an explicit rating survives a management-feedback interruption", async () => {
@@ -3510,6 +3550,19 @@ async function scenario(name, fn) {
       { side: "srv", body: "Overall, how would you rate the work SRV Media has done for you so far, out of 10?" }
     ], true);
     assert.strictEqual(rating, 8);
+  });
+
+  await scenario("recommendation answers are excluded from overall-rating reconciliation", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const rating = conversationFlow.latestExplicitOverallRating([
+      { side: "srv", body: "Overall, how would you rate the work SRV Media delivered on this project, out of 10?" },
+      { side: "client", body: "4" },
+      { side: "srv", body: "Lastly, how likely are you to recommend SRV Media to someone in your network, out of 10?" },
+      { side: "client", body: "no take three point five" },
+      { side: "client", body: "take 5 for recommending SRV" }
+    ], true);
+    assert.strictEqual(rating, 4,
+      "the recommendation answer and its correction must not replace overall CSAT");
   });
 
   await scenario("a spoken rating followed by no take 5 is corrected to 5", async () => {

@@ -883,6 +883,8 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
             const session = cycleSessions.find((item) => item.clientPocId === poc.id) || null;
             const viewing = session && selectedSession && session.id === selectedSession.id;
             const selectedForAction = selectedActionPocIds.includes(poc.id);
+            const reminderCount = Math.max(0, Math.min(3, Number(session?.reminderCount) || 0));
+            const cycleIsOpen = selectedCycle && selectedCycle.status !== "closed";
             return (
               <button
                 key={poc.id}
@@ -906,6 +908,13 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
                   </div>
                 </div>
                 <span>{poc.designation || "Designation not set"}</span>
+                {session && cycleIsOpen ? (
+                  <div className={`poc-reminder-status ${reminderCount >= 3 ? "exhausted" : ""}`}>
+                    <Bell size={13} aria-hidden="true" />
+                    <span>Reminders sent</span>
+                    <b>{reminderCount} / 3</b>
+                  </div>
+                ) : null}
                 <div className="poc-card-foot">
                   <em>{session ? formatSessionOutcome(session) : "No session in this cycle"}</em>
                   <i className="poc-weight">
