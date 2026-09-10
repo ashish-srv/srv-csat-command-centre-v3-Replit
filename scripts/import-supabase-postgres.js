@@ -53,6 +53,19 @@ function makeSchemaMap(rows) {
   return tables;
 }
 
+function typesCompatible(sourceType, destinationType) {
+  if (sourceType === destinationType) return true;
+  const safeWidenings = {
+    int2: new Set(["int4", "int8", "numeric"]),
+    int4: new Set(["int8", "numeric"]),
+    int8: new Set(["numeric"]),
+    float4: new Set(["float8"]),
+    varchar: new Set(["text"]),
+    bpchar: new Set(["text"])
+  };
+  return safeWidenings[sourceType]?.has(destinationType) || false;
+}
+
 function validateCompatibility(sourceSchema, destinationSchema) {
   const errors = [];
 
@@ -72,14 +85,18 @@ function validateCompatibility(sourceSchema, destinationSchema) {
     for (const sourceColumn of sourceColumns.filter((column) => !column.generated && !column.identity)) {
       const destinationColumn = destinationByName.get(sourceColumn.name);
       if (!destinationColumn) {
-        errors.push(`Destination is missing public.${table}.${sourceColumn.name}`);
+        const nullable = sourceColumn.nullable ? "nullable" : "not null";
+        errors.push(
+          `Destination is missing public.${table}.${sourceColumn.name} ` +
+          `(source type ${sourceColumn.udtName}, ${nullable})`
+        );
         continue;
       }
       if (destinationColumn.generated || destinationColumn.identity) {
         errors.push(`Destination cannot preserve public.${table}.${sourceColumn.name} because it is generated`);
         continue;
       }
-      if (sourceColumn.udtName !== destinationColumn.udtName) {
+      if (!typesCompatible(sourceColumn.udtName, destinationColumn.udtName)) {
         errors.push(
           `Type mismatch for public.${table}.${sourceColumn.name}: ` +
           `source ${sourceColumn.udtName}, destination ${destinationColumn.udtName}`
@@ -355,5 +372,6 @@ module.exports = {
   parseMode,
   quoteIdentifier,
   sameDatabase,
+  typesCompatible,
   validateCompatibility
 };

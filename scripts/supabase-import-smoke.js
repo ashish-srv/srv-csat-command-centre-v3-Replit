@@ -8,6 +8,7 @@ const {
   parseMode,
   quoteIdentifier,
   sameDatabase,
+  typesCompatible,
   validateCompatibility
 } = require("./import-supabase-postgres");
 
@@ -31,6 +32,9 @@ assert.equal(parseMode(["--check"]), "check");
 assert.equal(parseMode(["--replace"]), "replace");
 assert.throws(() => parseMode([]), /exactly one mode/);
 assert.throws(() => parseMode(["--check", "--replace"]), /exactly one mode/);
+assert.equal(typesCompatible("int4", "numeric"), true);
+assert.equal(typesCompatible("numeric", "int4"), false);
+assert.equal(typesCompatible("varchar", "text"), true);
 
 assert.equal(normalizeValue(["one", "two"], column({ udtName: "jsonb" })), '["one","two"]');
 assert.deepEqual(normalizeValue(["one", "two"], column({ udtName: "_text" })), ["one", "two"]);
