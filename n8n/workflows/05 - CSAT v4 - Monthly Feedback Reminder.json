@@ -59,7 +59,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const map = {\n  open_feedback: 'your monthly feedback on our services',\n  issue_reason: 'a little more detail on what should improve',\n  service_rating: 'anything else about the service you mentioned',\n  service_followup: 'anything else about the service you mentioned',\n  overall_rating: 'your overall SRV rating out of 10',\n  nps_recommendation: 'how likely you are to recommend SRV'\n};\n\nfor (const item of $input.all()) {\n  const body = item.json.body || {};\n  const fields = body.session?.conversationState?.missingFields || [];\n  const readable = fields.map((f) => map[f] || f.replace(/_/g, ' '));\n\n  let text;\n  if (!readable.length) text = 'just a quick confirmation';\n  else if (readable.length === 1) text = readable[0];\n  else text = readable.slice(0, -1).join(', ') + ' and ' + readable[readable.length - 1];\n\n  item.json.missingText = text;\n}\n\nreturn $input.all();"
+        "jsCode": "for (const item of $input.all()) {\n  const body = item.json.body || {};\n  const isProjectEnd = body.session?.sessionType === 'project_end';\n  const map = {\n    open_feedback: isProjectEnd\n      ? 'your overall feedback on the completed project'\n      : 'your monthly feedback on our services',\n    issue_reason: 'a little more detail on what should improve',\n    service_rating: 'anything else about the service you mentioned',\n    service_followup: 'anything else about the service you mentioned',\n    overall_rating: 'your overall SRV rating out of 10',\n    nps_recommendation: 'how likely you are to recommend SRV'\n  };\n  const fields = body.session?.conversationState?.missingFields || [];\n  const readable = fields.map((field) => map[field] || field.replace(/_/g, ' '));\n\n  let text;\n  if (!readable.length) text = 'just a quick confirmation';\n  else if (readable.length === 1) text = readable[0];\n  else text = readable.slice(0, -1).join(', ') + ' and ' + readable[readable.length - 1];\n\n  item.json.missingText = text;\n  item.json.reminderTemplateName = isProjectEnd\n    ? 'srv_complete_project_end_feedback_reminder'\n    : 'srv_complete_feedback_reminder';\n}\n\nreturn $input.all();"
       },
       "id": "1242f33f-0412-49b8-8ba8-a79efb83cac0",
       "name": "Describe What Is Missing",
@@ -154,7 +154,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $json.body.poc.contactWhatsapp, type: \"template\", template: { name: \"srv_complete_feedback_reminder\", language: { code: \"en\" }, components: [ { type: \"body\", parameters: [ { type: \"text\", text: $json.body.poc.salutation || $json.body.poc.name }, { type: \"text\", text: $json.missingText } ] } ] } } }}",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $json.body.poc.contactWhatsapp, type: \"template\", template: { name: $json.reminderTemplateName || \"srv_complete_feedback_reminder\", language: { code: \"en\" }, components: [ { type: \"body\", parameters: [ { type: \"text\", text: $json.body.poc.salutation || $json.body.poc.name }, { type: \"text\", text: $json.missingText } ] } ] } } }}",
         "options": {
           "timeout": 20000
         }

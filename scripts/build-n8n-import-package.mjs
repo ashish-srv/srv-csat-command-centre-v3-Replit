@@ -478,10 +478,34 @@ async function buildWorkflow5() {
   });
 
   const describe = node(workflow, "Describe What Is Missing");
-  describe.parameters.jsCode = describe.parameters.jsCode
-    .replace("your overall thoughts on our services", "your monthly feedback on our services")
-    .replace("service_rating: 'a rating for the service you mentioned'", "service_rating: 'anything else about the service you mentioned',\n  service_followup: 'anything else about the service you mentioned'")
-    .replace("your overall SRV rating out of 5", "your overall SRV rating out of 10");
+  describe.parameters.jsCode = `for (const item of $input.all()) {
+  const body = item.json.body || {};
+  const isProjectEnd = body.session?.sessionType === 'project_end';
+  const map = {
+    open_feedback: isProjectEnd
+      ? 'your overall feedback on the completed project'
+      : 'your monthly feedback on our services',
+    issue_reason: 'a little more detail on what should improve',
+    service_rating: 'anything else about the service you mentioned',
+    service_followup: 'anything else about the service you mentioned',
+    overall_rating: 'your overall SRV rating out of 10',
+    nps_recommendation: 'how likely you are to recommend SRV'
+  };
+  const fields = body.session?.conversationState?.missingFields || [];
+  const readable = fields.map((field) => map[field] || field.replace(/_/g, ' '));
+
+  let text;
+  if (!readable.length) text = 'just a quick confirmation';
+  else if (readable.length === 1) text = readable[0];
+  else text = readable.slice(0, -1).join(', ') + ' and ' + readable[readable.length - 1];
+
+  item.json.missingText = text;
+  item.json.reminderTemplateName = isProjectEnd
+    ? 'srv_complete_project_end_feedback_reminder'
+    : 'srv_complete_feedback_reminder';
+}
+
+return $input.all();`;
 
   for (const name of ["Send Complete-Feedback Reminder", "Send First-Response Reminder"]) {
     const send = node(workflow, name);
@@ -489,6 +513,11 @@ async function buildWorkflow5() {
     addRetry(send, 5000);
     setHttpTimeout(send, 20000);
   }
+  const partialReminder = node(workflow, "Send Complete-Feedback Reminder");
+  partialReminder.parameters.jsonBody = partialReminder.parameters.jsonBody.replace(
+    'name: "srv_complete_feedback_reminder"',
+    'name: $json.reminderTemplateName || "srv_complete_feedback_reminder"'
+  );
 
   addNode(workflow, {
     name: "Final Rating Reminder?",

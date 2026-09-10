@@ -1397,6 +1397,53 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("Closing-window appreciation is acknowledged without reopening the service", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    delete process.env.GEMINI_API_KEY;
+    calls.messages.length = 0;
+    store._session = {
+      id: "sess_1", cycleId: "cyc_1", projectId: "prj_1", clientPocId: "poc_1",
+      status: "completed", completionStatus: "completed", sessionType: "pulse",
+      conversationState: {
+        state: "closing_grace",
+        sessionType: "pulse",
+        pendingQuestionType: null,
+        closingGraceExpiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString(),
+        askedForAnythingElse: true,
+        anythingElseAnswered: true,
+        askedForAppreciation: true,
+        appreciationAnswered: true,
+        overallRatingAsked: true,
+        overallRating: 7,
+        mentionedServices: {
+          ppc: { serviceKey: "ppc", serviceName: "PPC / Media", status: "captured", sentiment: "neutral", serviceFollowUpAnswered: true },
+          website: { serviceKey: "website", serviceName: "Website / SEO", status: "captured", sentiment: "neutral", serviceFollowUpAnswered: true }
+        }
+      }
+    };
+    try {
+      const response = await rawReq("POST", "/api/whatsapp/inbound", {
+        from: "+91 99999 99999",
+        text: "I want to appreciate for website team",
+        providerMessageId: "wamid.closing-appreciation"
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(response.statusCode, 201);
+      assert.match(payload.whatsappReplyText, /thank you for appreciating the Website Team/i);
+      assert.match(payload.whatsappReplyText, /added your appreciation to your recorded feedback/i);
+      assert.doesNotMatch(payload.whatsappReplyText, /anything more.*Website/i);
+      assert.strictEqual(payload.state, "closing_grace");
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
+  });
+
   await scenario("0 then mistake then 8 updates the score without a handoff", async () => {
     const mentionedServices = Object.fromEntries(project.services.map((service) => [
       service.serviceKey,
@@ -3578,6 +3625,23 @@ async function scenario(name, fn) {
       "I appreciate the creative team; the videos are fantastic");
     assert.strictEqual(markers.answeredAppreciation, true);
     assert.strictEqual(markers.appreciationVolunteered, true);
+
+    const praiseOnly = {
+      captured: [{
+        serviceKey: "account", sentiment: "positive",
+        summary: "I want to appreciate the Account Management team",
+        needsFollowUp: true
+      }],
+      observations: [],
+      appreciations: [{
+        subject: "Account Management Team",
+        detail: "I want to appreciate the Account Management team",
+        serviceKey: "account"
+      }]
+    };
+    conversationFlow.separateAppreciations(praiseOnly);
+    assert.strictEqual(praiseOnly.captured[0].needsFollowUp, false,
+      "explicit praise must not reopen a completed service for another question");
   });
 
   await scenario("Overall feedback asks for scope before selecting another service", async () => {

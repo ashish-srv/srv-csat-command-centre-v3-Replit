@@ -62,6 +62,12 @@ WHAT WAS FIXED
   Meta WhatsApp credential and returns only after Meta accepts the message.
 - Workflow 05 uses `srv_final_rating_reminder` for the third reminder when a
   partial respondent has not provided an overall rating.
+- Workflow 05 uses `srv_complete_project_end_feedback_reminder` for partial
+  project-end feedback, while monthly partial feedback continues to use
+  `srv_complete_feedback_reminder`. Create and approve the project-end Meta
+  template before activating this route; use {{1}} for the POC name and {{2}}
+  for the missing-feedback list, and say "complete your project-end feedback"
+  instead of "complete this month's check-in".
 - Workflow 12 sends `srv_feedback_session_closed` and waits for Meta to accept
   it before the application closes an exhausted partial session.
 

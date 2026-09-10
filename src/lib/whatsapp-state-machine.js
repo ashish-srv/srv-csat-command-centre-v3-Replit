@@ -2580,7 +2580,10 @@ function processWhatsAppReply({
       conversationState.closingGraceExpiresAt = new Date(Date.now() + CLOSING_GRACE_MS).toISOString();
     }
     const rating = conversationState.overallRating;
-    next.text = `Thank you, ${salutation}. Your feedback and rating of ${rating} out of 10 have been successfully recorded for confidential review by the Directors.\n\nIf your feedback includes a concern or an area for improvement, the system has created the necessary action item and notified the Directors. It will be handled constructively and discreetly.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\nThank you again for your honesty, time and trust. Please take care, and we look forward to connecting with you again next month.`;
+    const closingLine = conversationState.sessionType === "project_end"
+      ? "Thank you again for your honesty, time and trust. We appreciate the opportunity to have worked with you and wish you every success ahead."
+      : "Thank you again for your honesty, time and trust. Please take care, and we look forward to connecting with you again next month.";
+    next.text = `Thank you, ${salutation}. Your feedback and rating of ${rating} out of 10 have been successfully recorded for confidential review by the Directors.\n\nIf your feedback includes a concern or an area for improvement, the system has created the necessary action item and notified the Directors. It will be handled constructively and discreetly.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
   }
   conversationState.pendingServiceKey = next.pendingServiceKey || null;
   conversationState.pendingNegativeServices = negativeServices(conversationState);

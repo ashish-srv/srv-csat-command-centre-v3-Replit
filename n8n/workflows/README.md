@@ -32,6 +32,23 @@ Workflow 05 sends `srv_final_rating_reminder` for reminder three when a partial
 respondent has not supplied an overall rating. Reminders one and two and all
 no-response reminders retain their existing templates.
 
+For a partial project-end response, Workflow 05 uses the separate approved Meta
+template `srv_complete_project_end_feedback_reminder`; monthly partial responses
+continue to use `srv_complete_feedback_reminder`. Create the project-end template
+with body parameters `{{1}}` for the POC name and `{{2}}` for the missing items:
+
+> Hello {{1}}, thank you for the feedback you have shared with us so far.
+>
+> Your responses have been saved, so you will not need to start again. We only
+> need {{2}} to complete your project-end feedback.
+>
+> You are also welcome to add anything else you would like the Directors to know.
+> Anything you share will continue to be reviewed directly and confidentially by
+> the Directors and used constructively to improve your experience.
+>
+> Simply reply to continue from where you stopped. We genuinely appreciate your
+> time and openness.
+
 Workflow 12 sends `srv_feedback_session_closed` after an exhausted partial
 session's final 24-hour grace period. Set
 `N8N_FEEDBACK_SESSION_CLOSED_WEBHOOK` in Netlify to its production webhook URL.

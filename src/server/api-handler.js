@@ -140,6 +140,15 @@ function separateAppreciations(conducted) {
       // A merely positive service comment such as "SEO is fine" must not turn
       // into an Appreciation card.
       existing.fromAppreciation = true;
+      // An explicit appreciation is already a complete positive point. Gemini
+      // can conservatively mark it as needing a follow-up, which would reopen
+      // a finished service and ask "anything more?" during closing grace. Only
+      // preserve follow-up requirements when the same capture is a criticism.
+      if (existing.sentiment !== "negative") {
+        existing.sentiment = "positive";
+        existing.declined = false;
+        existing.needsFollowUp = false;
+      }
       continue;
     }
     conducted.captured = [
@@ -299,7 +308,21 @@ function groundMultiServiceCaptures(captured = [], text = "", project = {}, stat
 function resetFreshCapturedServices(conversationState, stateBefore, captured = []) {
   const existingKeys = new Set(Object.keys(stateBefore.mentionedServices || {}));
   for (const item of captured) {
-    if (!item.serviceKey || existingKeys.has(item.serviceKey)) continue;
+    if (!item.serviceKey) continue;
+    const previous = stateBefore.mentionedServices?.[item.serviceKey];
+    const pureAppreciation = item.fromAppreciation === true
+      && item.sentiment === "positive"
+      && item.needsFollowUp !== true;
+    if (existingKeys.has(item.serviceKey)) {
+      // The preliminary rule pass sees a named team and treats the praise as a
+      // new service opinion before structured appreciation extraction runs.
+      // Restore an already-finished service so closing-window praise cannot
+      // manufacture a fresh "anything else?" requirement.
+      if (pureAppreciation && previous?.serviceFollowUpAnswered === true) {
+        conversationState.mentionedServices[item.serviceKey] = JSON.parse(JSON.stringify(previous));
+      }
+      continue;
+    }
     // The preliminary rule pass used message-level sentiment. Recreate a new
     // service from its grounded capture so stale negative sentiment cannot
     // survive in the service's sentiment history.
@@ -442,16 +465,29 @@ function fallbackForAction(action, conversationState, project, context = {}) {
   return "Thank you. Your feedback and overall rating are recorded. This chat will remain open for 10 minutes in case you want to correct or add anything.";
 }
 
-function closingGraceMessage(poc, conversationState = {}) {
+function closingGraceMessage(poc, conversationState = {}, context = {}) {
   const salutation = (poc && (poc.salutation || poc.name)) || "there";
   const rating = conversationState.overallRating;
   const ratingText = rating === null || rating === undefined
     ? "your overall rating"
     : `rating of ${rating} out of 10`;
   if (conversationState.reopenedDuringClosingGrace) {
-    return `Thank you. I have added that to your recorded feedback. ${ratingText[0].toUpperCase()}${ratingText.slice(1)} remains recorded, and the original 10-minute window is still open if you want to add or correct anything else.`;
+    const appreciation = (context.appreciations || [])[0];
+    const subject = String(appreciation?.subject || "").trim();
+    const acknowledgement = appreciation
+      ? /^client appreciation$/i.test(subject)
+        ? "Thank you for sharing that appreciation."
+        : `Thank you for appreciating ${/\b(?:team|department)$/i.test(subject) ? `the ${subject}` : subject}.`
+      : "Thank you.";
+    const recorded = appreciation
+      ? "I have added your appreciation to your recorded feedback."
+      : "I have added that to your recorded feedback.";
+    return `${acknowledgement} ${recorded} ${ratingText[0].toUpperCase()}${ratingText.slice(1)} remains recorded, and the original 10-minute window is still open if you want to add or correct anything else.`;
   }
-  return `Thank you, ${salutation}. Your feedback and ${ratingText} have been successfully recorded for confidential review by the Directors.\n\nIf your feedback includes a concern or an area for improvement, the system has created the necessary action item and notified the Directors. It will be handled constructively and discreetly.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\nThank you again for your honesty, time and trust. Please take care, and we look forward to connecting with you again next month.`;
+  const closingLine = conversationState.sessionType === "project_end"
+    ? "Thank you again for your honesty, time and trust. We appreciate the opportunity to have worked with you and wish you every success ahead."
+    : "Thank you again for your honesty, time and trust. Please take care, and we look forward to connecting with you again next month.";
+  return `Thank you, ${salutation}. Your feedback and ${ratingText} have been successfully recorded for confidential review by the Directors.\n\nIf your feedback includes a concern or an area for improvement, the system has created the necessary action item and notified the Directors. It will be handled constructively and discreetly.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
 }
 
 function recordRequiredQuestion(conversationState, project, action) {
@@ -2013,7 +2049,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 
       replyText = conducted.text;
       if (turn.conversationState.state === STATES.CLOSING_GRACE) {
-        replyText = closingGraceMessage(poc, turn.conversationState);
+        replyText = closingGraceMessage(poc, turn.conversationState, conducted);
       }
 
       // A farewell written while the checklist is unsatisfied is replaced with
@@ -2132,7 +2168,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       setStateForRequiredAction(turn.conversationState, requiredAction, recordedQuestion);
       if (requiredAction.type === "close") {
         turn.conversationState.state = STATES.CLOSING_GRACE;
-        replyText = closingGraceMessage(poc, turn.conversationState);
+        replyText = closingGraceMessage(poc, turn.conversationState, fallbackConducted);
       }
     }
   } else if (control.offScript) {
