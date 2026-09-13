@@ -232,7 +232,7 @@ function isAppreciationActionRequest(text) {
 function extractExplicitAppreciations(text, services = []) {
   const source = String(text || "").replace(/\s+/g, " ").trim();
   if (!source) return [];
-  const cue = /\b(?:appreciat(?:e|ed|ing|ion)|kudos|praise|commend|well done|great job|fantastic job|excellent job|amazing job|doing (?:a |an )?(?:great|fantastic|excellent|amazing) job)\b/i;
+  const cue = /\b(?:appreciat(?:e|ed|ing|ion)|special\s+mention|shout[- ]?out|credit\s+to|kudos|praise|commend|well done|great job|fantastic job|excellent job|amazing job|doing (?:a |an )?(?:great|fantastic|excellent|amazing) job)\b/i;
   const match = cue.exec(source);
   if (!match) return [];
   const cueContext = source.slice(Math.max(0, match.index - 35), match.index + 140);
@@ -249,8 +249,8 @@ function extractExplicitAppreciations(text, services = []) {
   if (!detail || /\b(?:do not|don't|did not|didn't|cannot|can't)\s+appreciat/i.test(detail)) return [];
 
   const subjectPatterns = [
-    /\b(?:appreciat(?:ion|e|ed|ing)|kudos|praise|commendation|shout[- ]?out)\s+(?:for|to)?\s*(?:the\s+)?([a-z][a-z0-9& /'-]{1,50}?(?:team|department))\b/i,
-    /\b((?:the\s+)?[a-z][a-z0-9& /'-]{1,45}?(?:team|department))\b[^.!?]{0,70}\b(?:great|fantastic|excellent|amazing|appreciat\w*)\b/i
+    /\b(?:appreciat(?:ion|e|ed|ing)|special\s+mention|kudos|praise|commendation|shout[- ]?out|credit)\s+(?:for|to)?\s*(?:the\s+)?([a-z][a-z0-9& /'-]{1,50}?(?:team|department|manager|person|individual))\b/i,
+    /\b((?:the\s+)?[a-z][a-z0-9& /'-]{1,45}?(?:team|department|manager|person|individual))\b[^.!?]{0,70}\b(?:good|great|fantastic|excellent|amazing|patient|understanding|supportive|helpful|appreciat\w*)\b/i
   ];
   let subject = "Client appreciation";
   for (const pattern of subjectPatterns) {
@@ -260,6 +260,7 @@ function extractExplicitAppreciations(text, services = []) {
       break;
     }
   }
+  if (/^(?:(?:your|our|the)\s+)?team$/i.test(subject)) subject = "Client appreciation";
   const serviceKey = appreciationServiceKey(subject, detail, services);
   if (/^client appreciation$/i.test(subject) && serviceKey) {
     const service = services.find((item) => item.serviceKey === serviceKey);
@@ -1039,8 +1040,11 @@ async function interpretReply({ project, question, text }) {
     "internal processes, named people and leadership. kind is request only when",
     "the client asks SRV to do something; otherwise it is feedback.",
     "",
-    "appreciations contains every explicit piece of praise, even when praise is",
-    "in the same message as a complaint or defer request. A polite request such",
+    "appreciations contains every semantic expression of praise, gratitude or",
+    "positive recognition, regardless of the exact words used and even when it",
+    "is in the same message as a complaint or defer request. If the preceding",
+    "question asks whom they appreciate, a positive answer is appreciation even",
+    "without the literal word appreciate. A polite request such",
     "as 'we would appreciate a meeting' is an observation request, not praise.",
     "",
     "explainsProblem: true if the message says WHAT is wrong, not merely that",
@@ -1194,12 +1198,16 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "  captured, even if billing or a named leader seems related to Account",
     "  Management.",
     "",
-    "appreciations: every explicit piece of praise in THIS reply, even when it",
+    "appreciations: every semantic expression of praise, gratitude or positive",
+    "recognition in THIS reply, regardless of the exact wording, even when it",
     "arrives before the appreciation question or in the same message as a",
     "complaint. 'Appreciation for the creative team; the videos are fantastic'",
     "must be a separate appreciation and must not be swallowed by a negative",
     "Design entry. subject names the praised team/person/department; detail keeps",
     "what the client liked; serviceKey is the best matching service or null.",
+    "When a role such as account manager is praised without a person's name,",
+    "acknowledge it and ask once for the name; do not ask for an individual's",
+    "name when the client clearly praised the whole team or department.",
     "'We would appreciate a meeting/call/report/update' is a polite action request,",
     "not praise. Put it in observations and never in appreciations.",
     "Do not put the same appreciation in observations or captured.",
@@ -1289,6 +1297,8 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "- Do not use the word 'Understood'. It became a repetitive canned prefix.",
     "  Match the acknowledgement to the reply: empathy for a problem, thanks",
     "  for clarification, or genuine appreciation for praise.",
+    "- Every appreciation must be acknowledged before the next survey question,",
+    "  and say that the kind words will be shared with the relevant person/team.",
     "- For a real problem, lead with brief empathy such as 'I am sorry to hear",
     "  that', then say our team will look into it. Do not admit legal fault.",
     "- Use their name ONLY in the first message and the last.",

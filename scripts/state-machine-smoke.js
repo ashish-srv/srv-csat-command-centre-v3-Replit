@@ -1165,6 +1165,34 @@ scenario("A rating correction inside the 10-minute window replaces the earlier s
   assert.strictEqual(corrected.control.suppressTerminalNotifications, true);
 });
 
+scenario("Rating corrections follow intended meaning across varied wording", () => {
+  const done = run(newSession(), ["all good", "9", "no", "8"]);
+  let state = done.last.conversationState;
+  const corrections = [
+    ["Revise the raiting to 10", 10],
+    ["I meant nine point five", 9.5],
+    ["change it from 9.5 to 7", 7],
+    ["10 instead of 7", 10],
+    ["set the score to 6", 6]
+  ];
+  for (const [text, expected] of corrections) {
+    const reply = processWhatsAppReply({
+      session: { ...newSession(), conversationState: state },
+      project, poc, text
+    });
+    assert.strictEqual(reply.conversationState.overallRating, expected, text);
+    assert.match(reply.nextMessage.body, new RegExp(`updated.*${String(expected).replace(".", "\\.")} out of 10`, "i"));
+    state = reply.conversationState;
+  }
+
+  const unrelated = processWhatsAppReply({
+    session: { ...newSession(), conversationState: state },
+    project, poc, text: "I said the next review meeting is in 10 days"
+  });
+  assert.strictEqual(unrelated.conversationState.overallRating, 6,
+    "an unrelated number must not become a correction");
+});
+
 scenario("An acknowledgement inside the correction window does not reopen the survey", () => {
   const done = run(newSession(), ["all good", "9", "no", "8"]);
   const reply = processWhatsAppReply({

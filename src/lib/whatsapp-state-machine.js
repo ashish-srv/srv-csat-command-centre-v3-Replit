@@ -323,7 +323,7 @@ function looksLikeRatingAnswer(text) {
   }
 
   if (
-    new RegExp(`\\b(?:rating|score|rate|give|take|make that|i(?:'d| would| will|'ll)? say)\\b[^.!?]{0,30}\\b(?:\\d+(?:\\.\\d+)?|${numberWord})\\b`, "i").test(value)
+    new RegExp(`\\b(?:rating|raiting|score|rate|give|take|make that|revise|update|set|i said|i meant|i(?:'d| would| will|'ll)? say)\\b[^.!?]{0,35}\\b(?:\\d+(?:\\.\\d+)?|${numberWord})\\b`, "i").test(value)
     && !/\b(?:day|days|week|weeks|month|months|meeting|meetings|lead|leads|report|reports)\b/i.test(value)
   ) {
     return true;
@@ -369,6 +369,35 @@ function detectNumber(text) {
   }
   const word = WORD_NUMBERS.find(([name]) => hasPhrase(value, name));
   return word ? { value: word[1], scale: null } : null;
+}
+
+/**
+ * Read the value the client intends to replace the current rating with.
+ * Correction messages can contain both the old and new values ("change 8
+ * to 10"), so the generic first-number reader is not sufficient here.
+ */
+function detectRatingCorrection(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+
+  const intendedFragments = [];
+  const fromTo = value.match(/\bfrom\b[\s\S]{0,35}?\bto\b([\s\S]+)$/i);
+  if (fromTo) intendedFragments.push(fromTo[1]);
+
+  const correctionTo = value.match(/\b(?:change|correct|revise|update|set)\b[\s\S]{0,55}?\b(?:to|as)\b([\s\S]+)$/i);
+  if (correctionTo) intendedFragments.push(correctionTo[1]);
+
+  const statedTarget = value.match(/\b(?:i\s+(?:said|meant)|should\s+be|make\s+that|take|record|use|give)\b[\s:,-]*([\s\S]+)$/i);
+  if (statedTarget) intendedFragments.push(statedTarget[1]);
+
+  const preference = value.match(/^([\s\S]+?)\b(?:instead\s+of|rather\s+than)\b/i);
+  if (preference) intendedFragments.push(preference[1]);
+
+  for (const fragment of intendedFragments) {
+    const read = detectNumber(fragment);
+    if (read) return read;
+  }
+  return detectNumber(value);
 }
 
 function detectSentiment(text) {
@@ -1824,7 +1853,7 @@ function processWhatsAppReply({
     const graceIsOpen = Number.isFinite(expiresAt) && expiresAt > Date.now();
 
     if (graceIsOpen) {
-      const ratingRead = detectNumber(text);
+      const ratingRead = detectRatingCorrection(text);
       const normalizedRating = ratingRead && ratingRead.scale === 5
         ? ratingRead.value * 2
         : ratingRead?.value;
@@ -1834,7 +1863,10 @@ function processWhatsAppReply({
         && (!ratingRead.scale || ratingRead.scale === 5 || ratingRead.scale === 10);
       const asksRecordedRating = /\b(what|which)\b.{0,20}\b(take|took|record(?:ed)?|rating|score)\b/i.test(text)
         || /\bwhat did (?:you|u) take\b/i.test(text);
-      const signalsCorrection = /\b(sorry|mistake|correct(?:ion)?|change|instead|make that|take|actually)\b/i.test(text);
+      const signalsCorrection = /\b(sorry|mistake|correct(?:ion|ed)?|change|revise|update|set|instead|rather than|make that|take|record|use|actually|i said|i meant|should be)\b/i.test(text);
+      const correctionNumberLooksRelevant = !/\b(?:day|days|week|weeks|month|months|meeting|meetings|campaign|campaigns|lead|leads|report|reports)\b/i.test(text)
+        || Boolean(ratingRead?.scale)
+        || /\b(?:rating|raiting|score|csat|rate)\b/i.test(text);
       const refersToRecommendation = conversationState.sessionType === "project_end"
         && /\b(?:recommend|recommendation|nps|network)\w*\b/i.test(text);
       const validNps = ratingRead
@@ -1867,7 +1899,7 @@ function processWhatsAppReply({
         });
       }
 
-      if (validRating && (looksLikeRatingAnswer(text) || signalsCorrection)) {
+      if (validRating && (looksLikeRatingAnswer(text) || (signalsCorrection && correctionNumberLooksRelevant))) {
         conversationState.overallRating = normalizedRating;
         conversationState.ratingCorrectedAt = new Date().toISOString();
         return plainTurn({
@@ -2317,6 +2349,20 @@ function processWhatsAppReply({
     const service = ensureServiceState(conversationState, project, conversationState.pendingServiceKey);
     service.detailAsked = true;
     service.status = "captured";
+  } else if (
+    priorState === STATES.WAITING_FOR_SERVICE_FOLLOWUP
+    && conversationState.pendingServiceKey
+    && conversationState.awaitingAppreciationPersonName?.serviceKey === conversationState.pendingServiceKey
+  ) {
+    const service = ensureServiceState(conversationState, project, conversationState.pendingServiceKey);
+    const declinedName = isMoveOnReply(text) || isNegativeSkip(text);
+    if (!declinedName) {
+      service.appreciationPersonName = String(text || "").trim().slice(0, 120);
+    }
+    service.serviceFollowUpAnswered = true;
+    service.followUpAsked = true;
+    service.status = hasServiceRating(service) ? "rated" : "captured";
+    conversationState.awaitingAppreciationPersonName = null;
   } else if (priorState === STATES.WAITING_FOR_SERVICE_FOLLOWUP && conversationState.pendingServiceKey) {
     const service = ensureServiceState(conversationState, project, conversationState.pendingServiceKey);
     const movedToAnotherService = detectedServiceKeys.length > 0
@@ -2701,5 +2747,5 @@ module.exports = {
   overallRatingQuestion,
   scoreConversation,
   buildAnalysis,
-  detectors: { detectServices, detectSentiment, detectNumber, looksLikeRatingAnswer, isOptOut, isEscalation, emojiSentiment }
+  detectors: { detectServices, detectSentiment, detectNumber, detectRatingCorrection, looksLikeRatingAnswer, isOptOut, isEscalation, emojiSentiment }
 };

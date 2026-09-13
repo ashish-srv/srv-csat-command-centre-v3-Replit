@@ -1372,7 +1372,7 @@ async function scenario(name, fn) {
       });
       const issuePayload = JSON.parse(issue.body);
       assert.match(issuePayload.whatsappReplyText, /inaccurate billing/i);
-      assert.match(issuePayload.whatsappReplyText, /appreciating Creative Team/i);
+      assert.match(issuePayload.whatsappReplyText, /appreciating (?:the )?Creative Team/i);
       assert.match(issuePayload.whatsappReplyText, /anything else about Billing/i);
       assert.strictEqual(store._session.conversationState.pendingObservation.topic, "Billing");
       assert.strictEqual(store._session.conversationState.appreciationAnswered, true);
@@ -1397,7 +1397,7 @@ async function scenario(name, fn) {
     }
   });
 
-  await scenario("Closing-window appreciation is acknowledged without reopening the service", async () => {
+  await scenario("Closing-window appreciation is acknowledged and gets one easy follow-up", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorMessages = [...calls.messages];
     const priorSession = store._session;
@@ -1432,9 +1432,18 @@ async function scenario(name, fn) {
       const payload = JSON.parse(response.body);
       assert.strictEqual(response.statusCode, 201);
       assert.match(payload.whatsappReplyText, /thank you for appreciating the Website Team/i);
-      assert.match(payload.whatsappReplyText, /added your appreciation to your recorded feedback/i);
-      assert.doesNotMatch(payload.whatsappReplyText, /anything more.*Website/i);
-      assert.strictEqual(payload.state, "closing_grace");
+      assert.match(payload.whatsappReplyText, /share your kind words/i);
+      assert.match(payload.whatsappReplyText, /anything else.*Website \/ SEO/i);
+      assert.strictEqual(payload.state, "waiting_for_service_followup");
+
+      const close = await rawReq("POST", "/api/whatsapp/inbound", {
+        from: "+91 99999 99999",
+        text: "no",
+        providerMessageId: "wamid.closing-appreciation-done"
+      });
+      const closePayload = JSON.parse(close.body);
+      assert.strictEqual(closePayload.state, "closing_grace");
+      assert.match(closePayload.whatsappReplyText, /original 10-minute window is still open/i);
     } finally {
       if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = priorKey;
@@ -1442,6 +1451,80 @@ async function scenario(name, fn) {
       calls.messages.push(...priorMessages);
       store._session = priorSession;
     }
+  });
+
+  await scenario("An unnamed appreciated person is acknowledged and requested by name once", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    delete process.env.GEMINI_API_KEY;
+    calls.messages.length = 0;
+    store._session = {
+      id: "sess_1", cycleId: "cyc_1", projectId: "prj_1", clientPocId: "poc_1",
+      status: "completed", completionStatus: "completed", sessionType: "pulse",
+      conversationState: {
+        state: "closing_grace", sessionType: "pulse", pendingQuestionType: null,
+        closingGraceExpiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString(),
+        askedForAnythingElse: true, anythingElseAnswered: true,
+        askedForAppreciation: true, appreciationAnswered: true,
+        overallRatingAsked: true, overallRating: 10,
+        mentionedServices: {
+          ppc: { serviceKey: "ppc", serviceName: "PPC / Media", status: "captured", sentiment: "neutral", serviceFollowUpAnswered: true },
+          website: { serviceKey: "website", serviceName: "Website / SEO", status: "captured", sentiment: "neutral", serviceFollowUpAnswered: true }
+        }
+      }
+    };
+    try {
+      const mention = await rawReq("POST", "/api/whatsapp/inbound", {
+        from: "+91 99999 99999",
+        text: "A special mention for the website manager for being patient and understanding",
+        providerMessageId: "wamid.unnamed-person-appreciation"
+      });
+      const mentionPayload = JSON.parse(mention.body);
+      assert.match(mentionPayload.whatsappReplyText, /thank you.*special mention/i);
+      assert.match(mentionPayload.whatsappReplyText, /share the .*manager'?s name/i);
+      assert.strictEqual(mentionPayload.state, "waiting_for_service_followup");
+
+      const named = await rawReq("POST", "/api/whatsapp/inbound", {
+        from: "+91 99999 99999",
+        text: "Neha Sharma",
+        providerMessageId: "wamid.appreciation-person-name"
+      });
+      const namedPayload = JSON.parse(named.body);
+      assert.strictEqual(namedPayload.state, "closing_grace");
+      assert.strictEqual(store._session.conversationState.mentionedServices.website.appreciationPersonName, "Neha Sharma");
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
+  });
+
+  await scenario("Praise answering the appreciation question is acknowledged without a keyword", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const conducted = {
+      captured: [{ serviceKey: "website", sentiment: "positive", summary: "The landing pages and video edits were very good", needsFollowUp: false }],
+      observations: [],
+      appreciations: []
+    };
+    conversationFlow.ensureClientAppreciations(
+      conducted,
+      { pendingQuestionType: "appreciation", askedForAppreciation: true, appreciationAnswered: false },
+      "The landing page team designed good pages and the video edits were also very good",
+      project
+    );
+    assert.ok(conducted.appreciations.length > 0);
+    const reply = conversationFlow.fallbackForAction(
+      { type: "overall_rating" },
+      { overallRatingAsked: false },
+      project,
+      conducted
+    );
+    assert.match(reply, /thank you for appreciating/i);
+    assert.match(reply, /share your kind words/i);
+    assert.match(reply, /overall.*out of 10/i);
   });
 
   await scenario("0 then mistake then 8 updates the score without a handoff", async () => {
@@ -3606,6 +3689,25 @@ async function scenario(name, fn) {
       { side: "srv", body: "Overall, how would you rate the work SRV Media has done for you so far, out of 10?" }
     ], true);
     assert.strictEqual(rating, 8);
+  });
+
+  await scenario("rating reconciliation understands corrections rather than restoring an older score", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const rating = conversationFlow.latestExplicitOverallRating([
+      { side: "srv", body: "Overall, how would you rate the work SRV Media has done for you so far, out of 10?" },
+      { side: "client", body: "8" },
+      { side: "client", body: "Revise the raiting to 10" },
+      { side: "client", body: "I said 10" }
+    ], true);
+    assert.strictEqual(rating, 10);
+
+    const twoValues = conversationFlow.latestExplicitOverallRating([
+      { side: "srv", body: "Overall, how would you rate SRV Media, out of 10?" },
+      { side: "client", body: "8" },
+      { side: "client", body: "Please change it from 8 to 9.5" }
+    ], true);
+    assert.strictEqual(twoValues, 9.5,
+      "the intended replacement value must win when old and new scores share a message");
   });
 
   await scenario("recommendation answers are excluded from overall-rating reconciliation", async () => {

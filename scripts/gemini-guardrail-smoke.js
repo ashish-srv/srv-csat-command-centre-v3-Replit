@@ -49,6 +49,16 @@ const turn = {
       "the complaint must not leak into the appreciation card");
   });
 
+  await scenario("A special mention for an unnamed role is semantic appreciation", async () => {
+    const appreciations = extractExplicitAppreciations(
+      "Also a special mention for the account manager for being patient and understanding",
+      [{ serviceKey: "account", name: "Account Management" }]
+    );
+    assert.strictEqual(appreciations.length, 1);
+    assert.strictEqual(appreciations[0].serviceKey, "account");
+    assert.match(appreciations[0].detail, /patient and understanding/i);
+  });
+
   await scenario("Greetings, postponements and typo corrections contain no scoring evidence", async () => {
     assert.strictEqual(hasSatisfactionEvidence({
       conversationState: { deferredAt: new Date().toISOString(), mentionedServices: {} },

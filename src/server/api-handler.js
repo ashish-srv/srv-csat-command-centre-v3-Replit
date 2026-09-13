@@ -169,6 +169,132 @@ function separateAppreciations(conducted) {
   return conducted;
 }
 
+function ensureClientAppreciations(conducted, stateBefore, text, project) {
+  const serviceList = (project.services || []).map((service) => ({
+    serviceKey: service.serviceKey,
+    name: service.name
+  }));
+  const merged = [...(conducted.appreciations || [])];
+  const explicit = extractExplicitAppreciations(text, serviceList);
+  for (const item of explicit) {
+    const duplicate = merged.some((existing) => {
+      if (item.serviceKey && existing.serviceKey === item.serviceKey) return true;
+      const overlap = contentOverlap(existing.detail, item.detail);
+      return overlap.shared >= 3 && overlap.ratio >= 0.55;
+    });
+    if (!duplicate) merged.push(item);
+  }
+
+  const answeringAppreciation = pendingQuestionTypeFor(stateBefore) === "appreciation";
+  const declined = isMoveOnReply(text)
+    || /^\s*(?:no|none|nothing|not really|no one|nobody)\b/i.test(String(text || ""));
+  const politeActionRequest = /\b(?:would|will)\s+appreciat(?:e|ed|ing)\b[\s\S]{0,80}\b(?:meeting|call|discussion|review|report|update|follow[ -]?up|help|support)\b/i.test(String(text || ""));
+  const positiveReply = detectors.detectSentiment(text) === "positive"
+    || /\b(?:patient|understanding|supportive|helpful|impressive|commendable|well done)\b/i.test(text);
+  const negatedPraise = /\b(?:not|never|isn'?t|wasn'?t|weren'?t)\s+(?:good|great|excellent|patient|understanding|supportive|helpful)\b/i.test(text);
+  const pendingPerson = stateBefore.awaitingAppreciationPersonName;
+
+  if (pendingPerson && !merged.length && !declined && String(text || "").trim()) {
+    const personName = String(text).trim().slice(0, 120);
+    merged.push({
+      subject: personName,
+      detail: `Appreciation for ${pendingPerson.role}: ${personName}`,
+      serviceKey: pendingPerson.serviceKey || null
+    });
+  }
+
+  // When the bot has just asked whom the client appreciates, ordinary praise
+  // is itself the answer; clients should not have to use the word "appreciate".
+  if (answeringAppreciation && !merged.length && !declined && !politeActionRequest && positiveReply && !negatedPraise) {
+    const keys = [...new Set([
+      ...detectors.detectServices(text, project),
+      ...(conducted.captured || [])
+        .filter((item) => item.sentiment === "positive")
+        .map((item) => item.serviceKey)
+    ].filter(Boolean))];
+    if (keys.length) {
+      for (const serviceKey of keys) {
+        const service = serviceList.find((item) => item.serviceKey === serviceKey);
+        merged.push({
+          subject: service?.name ? `${service.name} Team` : "Client appreciation",
+          detail: String(text || "").trim().slice(0, 600),
+          serviceKey
+        });
+      }
+    } else {
+      merged.push({
+        subject: "Client appreciation",
+        detail: String(text || "").trim().slice(0, 600),
+        serviceKey: null
+      });
+    }
+  }
+  conducted.appreciations = merged;
+  return conducted;
+}
+
+function unnamedAppreciationRole(text) {
+  const source = String(text || "");
+  const role = source.match(/\b((?:account|project|campaign|relationship|client|service|website|seo|creative|media)\s+manager|manager|coordinator|executive|team\s+lead|department\s+head)\b/i);
+  if (!role) return null;
+  const named = /\b(?:named?|called)\s+[a-z][a-z.'-]{1,30}\b/i.test(source)
+    || /\b(?:mr|mrs|ms|miss|dr|shri)\.?\s+[a-z][a-z.'-]{1,30}\b/i.test(source)
+    || new RegExp(`${role[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[,(:-]?\\s*(?!for\\b|who\\b|that\\b|is\\b|was\\b|has\\b|being\\b|because\\b)([a-z][a-z.'-]{1,30})\\b`, "i").test(source)
+    || new RegExp(`\\b(?!(?:the|our|your|my|a|an|for|to|mention|appreciate)\\b)([a-z][a-z.'-]{1,30})\\s*,?\\s+(?:our|the)?\\s*${role[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(source);
+  return named ? null : role[1];
+}
+
+function openAppreciationFollowUp(conversationState, stateBefore, conducted, text) {
+  if (!(conducted.appreciations || []).length) return false;
+  const serviceKey = (conducted.appreciations || []).find((item) => item.serviceKey)?.serviceKey;
+  const service = serviceKey ? conversationState.mentionedServices?.[serviceKey] : null;
+  if (!service) return false;
+  const unnamedRole = unnamedAppreciationRole(text);
+  if (stateBefore.state !== STATES.CLOSING_GRACE && !unnamedRole) return false;
+  service.status = "needs_service_followup";
+  service.serviceFollowUpAnswered = false;
+  service.followUpAsked = false;
+  service.serviceFollowUpAskCount = 0;
+  conversationState.pendingServiceKey = serviceKey;
+  conversationState.awaitingAppreciationPersonName = unnamedRole
+    ? { serviceKey, role: unnamedRole }
+    : null;
+  return true;
+}
+
+function appreciationAcknowledgement(context = {}, project = {}, conversationState = {}) {
+  const items = context.appreciations || [];
+  if (!items.length) return "";
+  const unnamedRole = conversationState.awaitingAppreciationPersonName?.role;
+  if (unnamedRole) {
+    return `Thank you for the special mention for the ${unnamedRole}. We will make sure your kind words reach the right person.`;
+  }
+  const explicitSubjects = [...new Set(items
+    .map((item) => String(item.subject || "").trim())
+    .filter((subject) => subject && !/^client appreciation$/i.test(subject)))];
+  const serviceNames = [...new Set(items
+    .map((item) => (project.services || []).find((service) => service.serviceKey === item.serviceKey)?.name)
+    .filter(Boolean))];
+  if (items.length === 1 && explicitSubjects.length === 1) {
+    const subject = explicitSubjects[0];
+    const target = /\b(?:team|department|manager|coordinator|executive|lead|head)$/i.test(subject)
+      ? `the ${subject}`
+      : subject;
+    return `Thank you for appreciating ${target}. We will share your kind words with them.`;
+  }
+  if (serviceNames.length === 1) {
+    return `Thank you for appreciating the ${serviceNames[0]} team. We will share your kind words with them.`;
+  }
+  if (serviceNames.length > 1 || items.length > 1) {
+    return "Thank you for appreciating the teams and people you mentioned. We will share your kind words with them.";
+  }
+  const subject = String(items[0].subject || "").trim();
+  if (subject && !/^client appreciation$/i.test(subject)) {
+    return `Thank you for that special mention for ${subject}. We will share your kind words with them.`;
+  }
+  return "Thank you for sharing that appreciation. We will share your kind words with the team.";
+}
+
 function suppressBroadOverallServiceGuess(conducted, interpretation, text, project) {
   const isOverall = interpretation?.serviceScope === SERVICE_SCOPE_DECISIONS.OVERALL_FEEDBACK
     || conducted?.serviceScope === SERVICE_SCOPE_DECISIONS.OVERALL_FEEDBACK;
@@ -378,13 +504,16 @@ function suppressDuplicateIssues(services = []) {
   return services;
 }
 
-function fallbackForAction(action, conversationState, project, context = {}) {
+function baseFallbackForAction(action, conversationState, project, context = {}) {
   if (action.type === "project_end_review") return projectEndReviewQuestion(project);
   if (action.type === "service_scope") return SERVICE_SCOPE_QUESTION;
   if (action.type === "issue_reason") {
     return `I am sorry to hear that ${action.name} needs improvement. Our team will look into it. Could you share what specifically should improve?`;
   }
   if (action.type === "service_followup") {
+    if (conversationState.awaitingAppreciationPersonName?.serviceKey === action.serviceKey) {
+      return `Could you please share the ${conversationState.awaitingAppreciationPersonName.role}'s name so we can pass this appreciation to the right person? You can also add anything else; if you prefer not to name them, just reply no.`;
+    }
     if (action.askCount > 0 && action.askCount % 3 === 0) {
       return `Just to finish ${action.name}: is there one more point to add, or have we covered it?`;
     }
@@ -418,28 +547,25 @@ function fallbackForAction(action, conversationState, project, context = {}) {
     return `I am sorry to hear that. What specifically happened with ${action.topic}?`;
   }
   if (action.type === "observation_followup") {
-    const appreciationLead = (context.appreciations || []).length
-      ? `Thank you as well for appreciating ${context.appreciations[0].subject}; we will share that with the team. `
-      : "";
     if (conversationState.pendingObservation?.acknowledged) {
-      return `${appreciationLead}Before we move on, is there anything else about ${action.topic} we should know? If not, just reply no.`;
+      return `Before we move on, is there anything else about ${action.topic} we should know? If not, just reply no.`;
     }
     if (action.topic === "Billing") {
       const requestLead = conversationState.pendingObservation?.responseKind === "request"
         ? " We will also pass your request to the team."
         : "";
-      return `${appreciationLead}I am sorry to hear about the inaccurate billing. Our team will review the invoice process.${requestLead} Is there anything else about Billing we should know?`;
+      return `I am sorry to hear about the inaccurate billing. Our team will review the invoice process.${requestLead} Is there anything else about Billing we should know?`;
     }
     if (conversationState.pendingObservation?.responseKind === "request") {
       const positiveLead = conversationState.pendingObservation?.positiveContext === "Social Media"
         ? "Glad to hear that social media is working well. "
         : "";
-      return `${appreciationLead}${positiveLead}Thank you for raising this. We will share the meeting request with our team and senior management and ask them to take it forward. Is there anything else about ${action.topic} we should know?`;
+      return `${positiveLead}Thank you for raising this. We will share the meeting request with our team and senior management and ask them to take it forward. Is there anything else about ${action.topic} we should know?`;
     }
     if (action.topic === "Senior Involvement") {
-      return `${appreciationLead}I am sorry to hear about the lack of senior involvement and communication. We will raise this with management and ask the relevant leaders to address it. Is there anything else about Senior Involvement we should know?`;
+      return `I am sorry to hear about the lack of senior involvement and communication. We will raise this with management and ask the relevant leaders to address it. Is there anything else about Senior Involvement we should know?`;
     }
-    return `${appreciationLead}I am sorry to hear that. Our team will look into it. Is there anything else about ${action.topic} we should know?`;
+    return `I am sorry to hear that. Our team will look into it. Is there anything else about ${action.topic} we should know?`;
   }
   if (action.type === "appreciation") {
     return "Before the overall rating, is there any team or department you would like to appreciate?";
@@ -465,6 +591,16 @@ function fallbackForAction(action, conversationState, project, context = {}) {
   return "Thank you. Your feedback and overall rating are recorded. This chat will remain open for 10 minutes in case you want to correct or add anything.";
 }
 
+function fallbackForAction(action, conversationState, project, context = {}) {
+  const acknowledgement = appreciationAcknowledgement(context, project, conversationState);
+  const next = acknowledgement
+    && action.type === "service_followup"
+    && !conversationState.awaitingAppreciationPersonName
+    ? `Is there anything else you would like to add about ${action.name}? If that is all, just reply no.`
+    : baseFallbackForAction(action, conversationState, project, context);
+  return acknowledgement ? `${acknowledgement} ${next}` : next;
+}
+
 function closingGraceMessage(poc, conversationState = {}, context = {}) {
   const salutation = (poc && (poc.salutation || poc.name)) || "there";
   const rating = conversationState.overallRating;
@@ -480,7 +616,7 @@ function closingGraceMessage(poc, conversationState = {}, context = {}) {
         : `Thank you for appreciating ${/\b(?:team|department)$/i.test(subject) ? `the ${subject}` : subject}.`
       : "Thank you.";
     const recorded = appreciation
-      ? "I have added your appreciation to your recorded feedback."
+      ? "We will share your kind words with the relevant team, and I have added your appreciation to your recorded feedback."
       : "I have added that to your recorded feedback.";
     return `${acknowledgement} ${recorded} ${ratingText[0].toUpperCase()}${ratingText.slice(1)} remains recorded, and the original 10-minute window is still open if you want to add or correct anything else.`;
   }
@@ -609,10 +745,6 @@ function acceptedOverallRating(conversationState, conducted) {
 
 function latestExplicitOverallRating(messages, overallRatingAsked) {
   if (!overallRatingAsked) return null;
-  const ratingWords = {
-    zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
-    six: 6, seven: 7, eight: 8, nine: 9, ten: 10
-  };
   const ratingQuestionIndex = messages.findIndex((message) => {
     if (message.side !== "srv") return false;
     const body = String(message.body || "");
@@ -634,25 +766,18 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
       continue;
     }
     if (message.side !== "client") continue;
-    const explicitlyOverall = /\boverall\b.{0,45}\b(?:rating|score)\b|\b(?:rating|score)\b.{0,45}\boverall\b/i.test(body);
+    const explicitlyOverall = /\boverall\b.{0,45}\b(?:rating|rate|score|csat|\d|zero|one|two|three|four|five|six|seven|eight|nine|ten)\b|\b(?:rating|score|csat)\b.{0,45}\boverall\b/i.test(body);
     // Once the bot has asked for recommendation likelihood, an ordinary
     // number answers NPS. Only wording that explicitly says "overall rating"
     // is allowed to alter CSAT after that point.
     if (ratingContext === "nps" && !explicitlyOverall) continue;
-    const scaledMatch = body.match(/\b(?:a\s+)?(\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:\/|out of)\s*(5|10)\b/i);
-    const read = scaledMatch
-      ? {
-          value: Object.prototype.hasOwnProperty.call(ratingWords, scaledMatch[1].toLowerCase())
-            ? ratingWords[scaledMatch[1].toLowerCase()]
-            : Number(scaledMatch[1]),
-          scale: Number(scaledMatch[2])
-        }
-      : detectors.detectNumber(body);
+    const read = detectors.detectRatingCorrection(body);
     if (!read) continue;
     if (/\b(?:day|days|week|weeks|month|months|campaign|campaigns|lead|leads|report|reports)\b/i.test(body)
-      && !/\b(?:out of|rating|score|take|make that|change|instead)\b/i.test(body)) continue;
+      && !read.scale
+      && !/\b(?:rating|raiting|score|csat|rate)\b/i.test(body)) continue;
     const direct = /^\s*(?:\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*(?:\/|out of)\s*(?:5|10))?\s*[.!]*\s*$/i.test(body);
-    const explicit = /\b(?:out of|rating|score|take|make that|change(?: it)? to|actually|instead|i(?:'d| would)? say|i(?:'ll| will)? give)\b/i.test(body);
+    const explicit = /\b(?:out of|rating|raiting|score|take|record|use|make that|change|correct|revise|update|set|actually|instead|rather than|i said|i meant|should be|i(?:'d| would)? say|i(?:'ll| will)? give)\b/i.test(body);
     if (!direct && !explicit) continue;
     const normalized = read.scale === 5 ? read.value * 2 : read.value;
     if (normalized < 0 || normalized > 10 || (read.scale && ![5, 10].includes(read.scale))) continue;
@@ -1056,6 +1181,7 @@ function applyDeferredInterpretation(turn, stateBefore, interpretation, text, pr
     overallRating: interpretation?.rating ?? null,
     corrects: false
   };
+  ensureClientAppreciations(conducted, stateBefore, text, project);
   separateAppreciations(conducted);
   conducted.observations = mergeObservations(
     conducted.observations || [],
@@ -1927,6 +2053,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         project,
         stateBefore
       );
+      ensureClientAppreciations(conducted, stateBefore, text, project);
       separateAppreciations(conducted);
       for (const observation of conducted.observations || []) {
         if (observation.kind === "appreciation") continue;
@@ -1992,6 +2119,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         acceptedOverallRating(stateBefore, conducted),
         conducted.corrects
       );
+      openAppreciationFollowUp(turn.conversationState, stateBefore, conducted, text);
       applyTurnServiceScope(
         turn.conversationState,
         project,
@@ -2029,7 +2157,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       const machineWordedAction = (needsConcernAcknowledgement && !hasConcernAcknowledgement)
         || (requiredAction.type === "observation_followup"
           && (conducted.appreciations?.length
-            || ["Billing", "Senior Involvement"].includes(requiredAction.topic)));
+            || ["Billing", "Senior Involvement"].includes(requiredAction.topic)))
+        || Boolean(conducted.appreciations?.length);
 
       if (actionRejected || machineWordedAction) {
         if (actionRejected) {
@@ -2139,6 +2268,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         observations: interpretedObservation ? [interpretedObservation] : [],
         appreciations: extractExplicitAppreciations(text, serviceList)
       };
+      ensureClientAppreciations(fallbackConducted, stateBefore, text, project);
       separateAppreciations(fallbackConducted);
 
       // An observation must not mutate a nearby service merely because the
@@ -2159,6 +2289,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         project,
         fallbackConducted.captured
       );
+      openAppreciationFollowUp(turn.conversationState, stateBefore, fallbackConducted, text);
       applyTurnServiceScope(
         turn.conversationState,
         project,
@@ -4247,6 +4378,8 @@ module.exports = {
     suppressDuplicateIssues,
     mergeObservations,
     separateAppreciations,
+    ensureClientAppreciations,
+    openAppreciationFollowUp,
     suppressBroadOverallServiceGuess,
     applyPendingIssueInterpretation,
     normalizeLegacyServiceFollowups,
