@@ -43,6 +43,8 @@ Activate workflows 1, 13, and 14 after the Meta template is approved. Workflow 1
 - Sends only to active clients, active projects, and active POCs with a WhatsApp number.
 - Does not ask for CSAT, NPS, or service-by-service ratings.
 - Does not alter the normal feedback schedule or project score.
-- `All good` records the response and closes that POC's quick check-in.
-- `Share feedback` asks for one free-text explanation, records it, and closes after the explanation.
+- `All good` records the response and opens an original 10-minute add/correction window.
+- `Share feedback` asks for one free-text explanation, records it, and then opens the same 10-minute window.
+- Natural-language additions during that window are interpreted, recorded, and acknowledged without restarting the deadline.
 - Unanswered quick check-ins expire after 48 hours without reminders.
+- Keep the existing workflow 09 reminder processor active; it also finalizes elapsed quick-check-in windows in the database. The application enforces the 10-minute deadline on inbound messages even between scheduler runs.

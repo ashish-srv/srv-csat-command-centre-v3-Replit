@@ -2920,29 +2920,46 @@ class SupabaseStore {
       throw new Error("Quick check-in session not found");
     }
 
-    const now = new Date().toISOString();
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
     const detail = String(input.detail || "").trim();
     const waitingForDetail = input.outcome === "needs_improvement" && !detail;
+    const previousState = session.conversationState || {};
+    const previousDetail = String(previousState.quickCheckinDetail || "").trim();
+    const combinedDetail = detail
+      ? [previousDetail, detail].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join("\n\n")
+      : previousDetail || null;
+    const existingWindowExpiry = Date.parse(previousState.quickCheckinWindowExpiresAt || "");
+    const windowExpiresAt = waitingForDetail
+      ? null
+      : Number.isFinite(existingWindowExpiry) && existingWindowExpiry > nowDate.getTime()
+        ? new Date(existingWindowExpiry).toISOString()
+        : new Date(nowDate.getTime() + (10 * 60 * 1000)).toISOString();
+    const outcome = waitingForDetail
+      ? "needs_improvement"
+      : detail || previousState.quickCheckinOutcome === "feedback_shared"
+        ? "feedback_shared"
+        : "all_good";
     const conversationState = {
-      ...(session.conversationState || {}),
-      state: waitingForDetail ? "quick_checkin_detail" : "completed",
-      quickCheckinOutcome: waitingForDetail
-        ? "needs_improvement"
-        : input.outcome === "all_good" ? "all_good" : "feedback_shared",
-      quickCheckinDetail: detail || null,
-      quickCheckinRespondedAt: now
+      ...previousState,
+      state: waitingForDetail ? "quick_checkin_detail" : "quick_checkin_window",
+      quickCheckinOutcome: outcome,
+      quickCheckinDetail: combinedDetail,
+      quickCheckinRespondedAt: previousState.quickCheckinRespondedAt || now,
+      quickCheckinLastResponseAt: now,
+      quickCheckinWindowExpiresAt: windowExpiresAt
     };
 
     const rows = await this.request("feedback_sessions", {
       method: "PATCH",
       query: `id=eq.${encodeURIComponent(sessionId)}`,
       body: {
-        status: waitingForDetail ? "partial" : "completed",
-        completion_status: waitingForDetail ? "partial" : "completed",
+        status: "partial",
+        completion_status: "partial",
         conversation_state: conversationState,
         last_client_response_at: now,
-        completed_at: waitingForDetail ? null : now,
-        reminder_due_at: waitingForDetail ? session.reminderDueAt : null
+        completed_at: null,
+        reminder_due_at: waitingForDetail ? session.reminderDueAt : windowExpiresAt
       }
     });
 
@@ -3051,22 +3068,26 @@ class SupabaseStore {
     const cycleIds = new Set();
     for (const row of due) {
       const state = row.conversation_state || {};
+      const completedWindow = state.state === "quick_checkin_window";
       await this.request("feedback_sessions", {
         method: "PATCH",
         query: `id=eq.${encodeURIComponent(row.id)}`,
         body: {
           status: "completed",
-          completion_status: state.state === "quick_checkin_detail" ? "partial" : "not_started",
+          completion_status: completedWindow
+            ? "completed"
+            : state.state === "quick_checkin_detail" ? "partial" : "not_started",
           completed_at: nowIso,
           reminder_due_at: null,
           conversation_state: {
             ...state,
             state: "completed",
-            reminderExhausted: true,
-            closureReason: "quick_checkin_expired",
-            quickCheckinOutcome: state.state === "quick_checkin_detail"
-              ? "awaiting_details_expired"
-              : "no_response"
+            reminderExhausted: !completedWindow,
+            closureReason: completedWindow ? "quick_checkin_window_elapsed" : "quick_checkin_expired",
+            quickCheckinWindowClosedAt: completedWindow ? nowIso : state.quickCheckinWindowClosedAt || null,
+            quickCheckinOutcome: completedWindow
+              ? state.quickCheckinOutcome
+              : state.state === "quick_checkin_detail" ? "awaiting_details_expired" : "no_response"
           }
         }
       });

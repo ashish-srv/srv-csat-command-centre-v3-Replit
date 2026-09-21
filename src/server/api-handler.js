@@ -3575,6 +3575,9 @@ async function handleApiRequest(request) {
 
   if (method === "POST" && pathname === "/api/automation/process-due-reminders") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    const expiredQuickCheckins = typeof store.expireDueQuickCheckins === "function"
+      ? await store.expireDueQuickCheckins(body.now)
+      : { expired: 0 };
     const targets = await store.getDueReminderTargets(body.now);
     const reminders = [];
     const closed = [];
@@ -3749,6 +3752,7 @@ async function handleApiRequest(request) {
       reminders,
       closed,
       deferredClosures,
+      expiredQuickCheckins: expiredQuickCheckins.expired,
       policy: { maximumReminders: MAX_REMINDERS, intervalHours: 24 }
     });
   }
@@ -4515,20 +4519,12 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     || /^(?:share feedback|needs? improvement|have an issue|issue|something to share)$/i.test(normalized);
   let result;
   let replyText;
+  let alertText = null;
 
-  if (allGood && state.state !== "quick_checkin_detail") {
-    result = await store.applyQuickCheckinResponse(session.id, { outcome: "all_good" });
-    replyText = `Glad to hear that, ${poc.salutation || poc.name}. Thank you for confirming that everything is going well with ${project.name}. Your response has been recorded.`;
-  } else if (shareChoice && state.state !== "quick_checkin_detail") {
-    result = await store.applyQuickCheckinResponse(session.id, { outcome: "needs_improvement" });
-    replyText = `Thank you, ${poc.salutation || poc.name}. Please share what needs improvement, any issue you are facing, or anything you would like management to be aware of regarding ${project.name}.`;
-  } else if (state.state === "quick_checkin_choice" && /^(?:yes|no|ok|okay)$/i.test(normalized)) {
-    result = { session };
-    replyText = "Please choose All good if everything is going well, or Share feedback if anything needs improvement or should be brought to management's attention.";
-  } else {
+  const interpretAndRecord = async () => {
     let interpretation = await interpretReply({
       project,
-      question: `What needs improvement, or what should management know about ${project.name}?`,
+      question: `What needs improvement, what is going well, or what should management know about ${project.name}?`,
       text
     });
     if (!interpretation.sentiment) {
@@ -4536,14 +4532,57 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       const positive = /\b(good|great|fine|excellent|happy|appreciat\w*|well done|satisfied)\b/i.test(text);
       interpretation = { ...interpretation, sentiment: negative ? "negative" : positive ? "positive" : "neutral" };
     }
-    result = await store.applyQuickCheckinResponse(session.id, {
+    const recorded = await store.applyQuickCheckinResponse(session.id, {
       outcome: "feedback_shared",
       detail: text,
       interpretation
     });
-    replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback regarding ${project.name} has been recorded for confidential management review.`;
+    if (recorded.sentiment !== "positive") alertText = text;
+    return recorded;
+  };
 
-    if (result.sentiment !== "positive") {
+  const responseDeadline = Date.parse(
+    state.state === "quick_checkin_window"
+      ? state.quickCheckinWindowExpiresAt || ""
+      : session.reminderDueAt || ""
+  );
+  const responseDeadlineExpired = Number.isFinite(responseDeadline) && responseDeadline <= Date.now();
+
+  if (session.status === "completed" || state.state === "completed" || responseDeadlineExpired) {
+    if (responseDeadlineExpired && session.status !== "completed" && state.state !== "completed") {
+      await store.expireDueQuickCheckins(new Date().toISOString());
+    }
+    result = { session: await store.getSession(session.id) || session };
+    replyText = "This quick check-in response window has now closed. Your earlier response remains safely recorded for management review.";
+  } else if (state.state === "quick_checkin_window") {
+    if (allGood) {
+      result = { session };
+      replyText = "Glad to hear that. Your All good response is already recorded, and the original 10-minute window remains open if you would like to add or correct anything else.";
+    } else if (shareChoice) {
+      result = { session };
+      replyText = "Please share what needs improvement, any issue you are facing, or anything you would like management to be aware of. The original 10-minute window remains open.";
+    } else if (/^(?:ok|okay|thanks|thank you|no|nothing else|that(?:'s| is) all)$/i.test(normalized)) {
+      result = { session };
+      replyText = "Thank you. Your response is recorded, and the original 10-minute window remains open if you would like to add or correct anything else.";
+    } else {
+      result = await interpretAndRecord();
+      replyText = `Thank you, ${poc.salutation || poc.name}. I have added that to your quick check-in for confidential management review. The original 10-minute window remains open if you would like to add or correct anything else.`;
+    }
+  } else if (allGood) {
+    result = await store.applyQuickCheckinResponse(session.id, { outcome: "all_good" });
+    replyText = `Glad to hear that, ${poc.salutation || poc.name}. Thank you for confirming that everything is going well. Your response has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+  } else if (shareChoice) {
+    result = await store.applyQuickCheckinResponse(session.id, { outcome: "needs_improvement" });
+    replyText = `Thank you, ${poc.salutation || poc.name}. Please share what needs improvement, any issue you are facing, or anything you would like management to be aware of. After you share it, the quick check-in will remain open for 10 minutes in case you want to add or correct anything.`;
+  } else if (state.state === "quick_checkin_choice" && /^(?:yes|no|ok|okay)$/i.test(normalized)) {
+    result = { session };
+    replyText = "Please choose All good if everything is going well, or Share feedback if anything needs improvement or should be brought to management's attention.";
+  } else {
+    result = await interpretAndRecord();
+    replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+  }
+
+  if (alertText) {
       notifyAutomationAsync(store, "manager_alert", {
         project,
         poc,
@@ -4557,11 +4596,10 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
           primaryServiceName: result.service?.name || "Quick check-in",
           riskLevel: result.issue?.severity || "Watch",
           csatScore: null,
-          rootCause: text
+          rootCause: alertText
         },
         resumeUrl: buildResumeUrl(baseUrl, project, result.session)
       }, `manager_alert:quick_checkin:${clientMessage.id}`, waitUntil);
-    }
   }
 
   const assistantMessage = await store.addMessage(session.id, {

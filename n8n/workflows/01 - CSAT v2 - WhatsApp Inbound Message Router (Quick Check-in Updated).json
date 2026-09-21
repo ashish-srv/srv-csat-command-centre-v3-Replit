@@ -98,7 +98,7 @@
           "conditions": [
             {
               "id": "badfb620-92b0-4462-8e0d-8f5f6ede68cc",
-              "leftValue": "={{ $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body || $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.interactive?.button_reply?.title || \"\" }}",
+              "leftValue": "={{ $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body || $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.interactive?.button_reply?.title || $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.button?.text || \"\" }}",
               "rightValue": "",
               "operator": {
                 "type": "string",
@@ -151,7 +151,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { from: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].from, fromName: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.contacts?.[0]?.profile?.name, providerMessageId: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].id, text: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].text?.body || $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].interactive?.button_reply?.title || \"\", buttonPayload: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].interactive?.button_reply?.id || null } }}",
+        "jsonBody": "={{ { from: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].from, fromName: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.contacts?.[0]?.profile?.name, providerMessageId: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].id, text: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].text?.body || $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].interactive?.button_reply?.title || $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].button?.text || \"\", buttonPayload: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].interactive?.button_reply?.id || $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].button?.payload || null } }}",
         "options": {}
       },
       "id": "f393197f-d3d3-4331-bd6e-cfddfd1a8c36",

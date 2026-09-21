@@ -20,23 +20,34 @@ async function run() {
   assert.deepEqual(due.targets, [{ projectKey: "active", cycleType: "quick_checkin", scheduleKey: "2026-10-11" }]);
 
   const store = new SupabaseStore({ skipEnv: true });
-  store.getSession = async () => ({
+  let currentSession = {
     id: "s1", cycleId: "c1", clientPocId: "poc1", projectId: "project1",
     sessionType: "quick_checkin", status: "started", reminderDueAt: "2026-10-13T04:30:00.000Z",
     conversationState: { state: "quick_checkin_choice", quickCheckinOutcome: "awaiting_response" }
-  });
+  };
+  store.getSession = async () => currentSession;
   store.servicesForProject = async () => [];
   store.recomputeCycle = async () => null;
   const writes = [];
   store.request = async (table, options = {}) => {
     writes.push({ table, options });
     if (table === "feedback_sessions") {
-      return [{
+      const row = {
         id: "s1", cycle_id: "c1", client_poc_id: "poc1", project_id: "project1",
         status: options.body.status, completion_status: options.body.completion_status,
         conversation_state: options.body.conversation_state, reminder_due_at: options.body.reminder_due_at,
         last_client_response_at: options.body.last_client_response_at, completed_at: options.body.completed_at
-      }];
+      };
+      currentSession = {
+        ...currentSession,
+        status: row.status,
+        completionStatus: row.completion_status,
+        conversationState: row.conversation_state,
+        reminderDueAt: row.reminder_due_at,
+        lastClientResponseAt: row.last_client_response_at,
+        completedAt: row.completed_at
+      };
+      return [row];
     }
     if (table === "observations") return [{ id: "ob1" }];
     if (table === "issues") return [{ id: "issue1" }];
@@ -45,8 +56,11 @@ async function run() {
   };
 
   const allGood = await store.applyQuickCheckinResponse("s1", { outcome: "all_good" });
-  assert.equal(allGood.session.status, "completed");
+  assert.equal(allGood.session.status, "partial");
+  assert.equal(allGood.session.conversationState.state, "quick_checkin_window");
   assert.equal(allGood.session.conversationState.quickCheckinOutcome, "all_good");
+  assert.ok(Date.parse(allGood.session.conversationState.quickCheckinWindowExpiresAt) > Date.now());
+  const originalWindowExpiry = allGood.session.conversationState.quickCheckinWindowExpiresAt;
   assert.equal(writes.some((write) => write.table === "issues"), false);
 
   writes.length = 0;
@@ -56,6 +70,9 @@ async function run() {
     interpretation: { sentiment: "negative", observations: [], captured: [] }
   });
   assert.equal(shared.session.conversationState.quickCheckinOutcome, "feedback_shared");
+  assert.equal(shared.session.status, "partial");
+  assert.equal(shared.session.conversationState.state, "quick_checkin_window");
+  assert.equal(shared.session.conversationState.quickCheckinWindowExpiresAt, originalWindowExpiry);
   assert.equal(writes.some((write) => write.table === "observations"), true);
   assert.equal(writes.some((write) => write.table === "issues"), true);
 

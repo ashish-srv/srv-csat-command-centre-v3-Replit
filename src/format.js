@@ -145,6 +145,10 @@ export function formatSessionOutcome(session) {
   if (!session) return "Unknown";
   if (session.sessionType === "quick_checkin") {
     const outcome = session.conversationState?.quickCheckinOutcome;
+    const windowExpiry = Date.parse(session.conversationState?.quickCheckinWindowExpiresAt || "");
+    const inWindowState = session.conversationState?.state === "quick_checkin_window";
+    const windowOpen = inWindowState && (!Number.isFinite(windowExpiry) || windowExpiry > Date.now());
+    const windowElapsed = inWindowState && Number.isFinite(windowExpiry) && windowExpiry <= Date.now();
     const labels = {
       awaiting_response: "Awaiting response",
       needs_improvement: "Awaiting details",
@@ -153,7 +157,11 @@ export function formatSessionOutcome(session) {
       no_response: "No response - closed",
       awaiting_details_expired: "Details not received - closed"
     };
-    if (labels[outcome]) return labels[outcome];
+    if (labels[outcome]) {
+      if (windowOpen) return `${labels[outcome]} - 10-minute window open`;
+      if (windowElapsed) return `${labels[outcome]} - window closed`;
+      return labels[outcome];
+    }
   }
   if (session.conversationState && session.conversationState.stoppedByAdmin) {
     return "Stopped for this cycle";
