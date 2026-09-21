@@ -4520,6 +4520,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   let result;
   let replyText;
   let alertText = null;
+  let postCompletionHandoff = false;
 
   const interpretAndRecord = async () => {
     let interpretation = await interpretReply({
@@ -4553,7 +4554,11 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       await store.expireDueQuickCheckins(new Date().toISOString());
     }
     result = { session: await store.getSession(session.id) || session };
-    replyText = "This quick check-in response window has now closed. Your earlier response remains safely recorded for management review.";
+    const closedAcknowledgement = /^(?:ok|okay|thanks|thank you|all good|fine|good|no problem|no|nothing else|that(?:'s| is) all|👍(?:🏻|🏼|🏽|🏾|🏿)?)$/i.test(normalized);
+    postCompletionHandoff = !closedAcknowledgement;
+    replyText = postCompletionHandoff
+      ? "This automated quick check-in has closed, so I cannot add this message to it. I have passed your message to the SRV team, and someone will respond directly."
+      : "Thank you. This quick check-in has closed, and your earlier response remains safely recorded for management review.";
   } else if (state.state === "quick_checkin_window") {
     if (allGood) {
       result = { session };
@@ -4602,11 +4607,27 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       }, `manager_alert:quick_checkin:${clientMessage.id}`, waitUntil);
   }
 
+  if (postCompletionHandoff) {
+    notifyAutomationAsync(store, "post_completion_message", {
+      project,
+      poc,
+      session: result.session,
+      clientText: text,
+      guardrail: "quick_checkin_post_completion",
+      state: result.session.conversationState?.state || "completed",
+      resumeUrl: buildResumeUrl(baseUrl, project, result.session)
+    }, `post_completion_message:quick_checkin:${clientMessage.id}`, waitUntil);
+  }
+
   const assistantMessage = await store.addMessage(session.id, {
     speaker: "SRV Media Directors' Office",
     side: "srv",
     body: replyText,
-    metadata: { source: "quick_checkin", outcome: result.session.conversationState?.quickCheckinOutcome || null }
+    metadata: {
+      source: "quick_checkin",
+      outcome: result.session.conversationState?.quickCheckinOutcome || null,
+      postCompletionHandoff
+    }
   });
   return json(201, {
     session: result.session,
@@ -4616,6 +4637,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     nextMessage: assistantMessage,
     whatsappReplyText: replyText,
     sendToWhatsapp: true,
+    guardrail: postCompletionHandoff ? "quick_checkin_post_completion" : null,
     state: result.session.conversationState?.state || null
   });
 }

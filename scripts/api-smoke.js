@@ -1691,6 +1691,56 @@ async function scenario(name, fn) {
     assert.ok(/already closed/i.test(payload.whatsappReplyText));
   });
 
+  await scenario("closed quick check-in routes substantive messages to human handoff", async () => {
+    store._session = {
+      ...store._session,
+      status: "completed",
+      completionStatus: "completed",
+      sessionType: "quick_checkin",
+      conversationState: {
+        state: "completed",
+        quickCheckinOutcome: "all_good",
+        closureReason: "quick_checkin_window_elapsed"
+      }
+    };
+    calls.automation.length = 0;
+    const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+      text: "Can someone call me about a new concern?"
+    });
+    const payload = JSON.parse(res.body);
+    await new Promise((resolve) => setImmediate(resolve));
+    const event = calls.automation.find((item) => item.eventType === "post_completion_message");
+    assert.strictEqual(payload.state, "completed");
+    assert.strictEqual(payload.guardrail, "quick_checkin_post_completion");
+    assert.match(payload.whatsappReplyText, /passed your message to the SRV team/i);
+    assert.ok(event, JSON.stringify(calls.automation.map((item) => item.eventType)));
+    assert.strictEqual(event.payload.clientText, "Can someone call me about a new concern?");
+    assert.strictEqual(store._session.status, "completed", "closed quick check-in must not reopen");
+  });
+
+  await scenario("closed quick check-in acknowledgement does not alert a human", async () => {
+    store._session = {
+      ...store._session,
+      status: "completed",
+      completionStatus: "completed",
+      sessionType: "quick_checkin",
+      conversationState: {
+        state: "completed",
+        quickCheckinOutcome: "all_good",
+        closureReason: "quick_checkin_window_elapsed"
+      }
+    };
+    calls.automation.length = 0;
+    const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "Thanks" });
+    const payload = JSON.parse(res.body);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(payload.state, "completed");
+    assert.strictEqual(payload.guardrail, null);
+    assert.match(payload.whatsappReplyText, /quick check-in has closed/i);
+    assert.ok(!calls.automation.some((item) => item.eventType === "post_completion_message"));
+    store._session = { ...store._session, sessionType: "pulse" };
+  });
+
   await scenario("G7 escalation emits one manager alert and no handoff duplicate", async () => {
     store._session = {
       ...store._session,
