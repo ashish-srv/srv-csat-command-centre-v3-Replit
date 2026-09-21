@@ -3,6 +3,7 @@
 // N8N_HUMAN_HANDOFF_WEBHOOK, so a guardrail can never fire into a void.
 const EVENT_TO_ENV = {
   feedback_started: "N8N_FEEDBACK_STARTED_WEBHOOK",
+  quick_checkin_started: "N8N_QUICK_CHECKIN_WEBHOOK",
   feedback_received: "N8N_FEEDBACK_RECEIVED_WEBHOOK",
   manager_alert: "N8N_MANAGER_ALERT_WEBHOOK",
   no_response: "N8N_NO_RESPONSE_WEBHOOK",

@@ -1,0 +1,210 @@
+{
+  "name": "13. CSAT v1 - Quick Check-in Template Sender",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-quick-checkin-started",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": {
+            "values": {
+              "responseCode": 200
+            }
+          },
+          "responseData": "{\"ok\":true,\"accepted\":true}"
+        },
+        "authentication": "headerAuth"
+      },
+      "id": "7172d060-b152-4bd6-872e-3c6101195c65",
+      "name": "Feedback Started Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        528,
+        -192
+      ],
+      "webhookId": "f532544f-d57c-450f-91e7-c0c97f5aa1bc",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "091fcf10-40cf-45e1-9cfe-426cf4751b8e",
+              "name": "WHATSAPP_GRAPH_URL",
+              "value": "https://graph.facebook.com/v23.0/1143136358892896/messages",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "dd89e7a1-ef60-4c13-b13b-c903a4f4861b",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        816,
+        -192
+      ],
+      "notes": "Edit the three values here. They are not secrets. The webhook secret and Meta token live in credentials."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6821ea8c-6838-432c-9a95-62a9c3e86366",
+              "leftValue": "={{ $json.body.poc?.contactWhatsapp }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d1e2d998-a7b7-4f4a-a8e6-27a2bc0773c5",
+      "name": "POC Has WhatsApp?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1088,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $json.body.poc.contactWhatsapp, type: \"template\", template: { name: \"srv_project_quick_checkin\", language: { code: \"en\" }, components: [ { type: \"body\", parameters: [ { type: \"text\", text: $json.body.poc.salutation || $json.body.poc.name } ] }, { type: \"button\", sub_type: \"quick_reply\", index: \"0\", parameters: [ { type: \"payload\", payload: \"QC_ALL_GOOD:\" + $json.body.session.id } ] }, { type: \"button\", sub_type: \"quick_reply\", index: \"1\", parameters: [ { type: \"payload\", payload: \"QC_SHARE_FEEDBACK:\" + $json.body.session.id } ] } ] } } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "48ae80a3-68e9-4f34-8d4e-4f897adb0fe0",
+      "name": "Send WhatsApp Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1376,
+        -192
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "1e5921f3-cdb4-4986-8068-5af746167a6a",
+      "name": "No WhatsApp Number",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        -16
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "caf22b42-a92b-4daf-a56f-4f3372bb7a1b",
+      "name": "MONTHLY WORDING NOTE",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1264,
+        -432
+      ],
+      "parameters": {
+        "width": 496,
+        "height": 176,
+        "content": "## Required Meta template\nApprove and use `srv_project_quick_checkin` with two quick-reply buttons: **All good** and **Share feedback**. The only body variable is `{{1}}` for the POC salutation."
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Feedback Started Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "POC Has WhatsApp?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POC Has WhatsApp?": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Template",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No WhatsApp Number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

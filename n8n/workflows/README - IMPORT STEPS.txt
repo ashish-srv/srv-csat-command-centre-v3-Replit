@@ -76,3 +76,13 @@ WORKFLOW 06
 Workflow 06 is an optional email-only fallback. Do not point
 N8N_FEEDBACK_STARTED_WEBHOOK to it when workflow 02 is active, because workflow
 02 already sends the monthly feedback request on WhatsApp.
+
+
+QUICK CHECK-IN ADDITION
+-----------------------
+Update workflow 01 using the supplied CSAT v2 Quick Check-in Updated file, then import workflows 13 and 14.
+Create and approve the Meta template srv_project_quick_checkin with one body variable
+for the POC salutation, plus All good and Share feedback buttons.
+Set Replit deployment secret N8N_QUICK_CHECKIN_WEBHOOK to workflow 13's
+production webhook URL. Keep the existing Meta callback URL; workflow 01's path
+has not changed. See docs/QUICK-CHECKIN-SETUP.md for the exact template text.

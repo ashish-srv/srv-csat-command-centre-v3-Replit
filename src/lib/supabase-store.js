@@ -18,6 +18,16 @@ function addDays(date, days) {
   return new Date(date.getTime() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function quickCheckinScheduleKey(nowIso = new Date().toISOString()) {
+  const date = new Date(nowIso);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(date).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  if (!["11", "21"].includes(parts.day)) return null;
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
 function firstPulseDueAt(startDate, intervalDays = 30) {
   const start = startDate
     ? new Date(`${String(startDate).slice(0, 10)}T00:00:00.000Z`)
@@ -139,6 +149,7 @@ function toProject(row, extra = {}) {
     nextCycleDueAt: row.next_cycle_due_at,
     endFeedbackRequestedAt: row.end_feedback_requested_at,
     csatScore: num(row.csat_score),
+    clientActiveStatus: extra.clientActiveStatus || null,
     healthScore: num(row.health_score),
     npsScore: num(row.nps_score),
     riskLevel: row.risk_level,
@@ -154,6 +165,7 @@ function toProject(row, extra = {}) {
 
 function toCycle(row) {
   return {
+    scheduleKey: row.schedule_key || null,
     id: row.id,
     projectId: row.project_id,
     cycleType: row.cycle_type,
@@ -456,13 +468,14 @@ class SupabaseStore {
       clientName: row.clients ? row.clients.name : null,
       clientKey: row.clients ? row.clients.client_key : null,
       clusterId: row.clients && row.clients.clusters ? row.clients.clusters.id : null,
+      clientActiveStatus: row.clients ? row.clients.active_status : null,
       clusterName: row.clients && row.clients.clusters ? row.clients.clusters.name : null
     };
   }
 
   async listProjects() {
     const rows = await this.request("projects", {
-      query: "select=*,clients(id,client_key,name,cluster_id,clusters(id,name))&order=name.asc"
+      query: "select=*,clients(id,client_key,name,cluster_id,active_status,clusters(id,name))&order=name.asc"
     });
     return rows.map((row) => toProject(row, this.projectExtras(row)));
   }
@@ -470,7 +483,7 @@ class SupabaseStore {
   async getProjectRow(value, byId = false) {
     const field = byId ? "id" : "project_key";
     const rows = await this.request("projects", {
-      query: `${field}=eq.${encodeURIComponent(value)}&select=*,clients(id,client_key,name,cluster_id,clusters(id,name))&limit=1`
+      query: `${field}=eq.${encodeURIComponent(value)}&select=*,clients(id,client_key,name,cluster_id,active_status,clusters(id,name))&limit=1`
     });
     return rows[0] || null;
   }
@@ -886,7 +899,9 @@ class SupabaseStore {
     const project = await this.getProject(projectKey);
     if (!project) throw new Error(`Project ${projectKey} not found`);
 
-    const cycleType = options.cycleType === "project_end" ? "project_end" : "pulse";
+    const allowedCycleTypes = new Set(["pulse", "project_end", "quick_checkin"]);
+    const cycleType = allowedCycleTypes.has(options.cycleType) ? options.cycleType : "pulse";
+    const isQuickCheckin = cycleType === "quick_checkin";
     const selectionProvided = Array.isArray(options.clientPocIds);
     const requestedPocIds = selectionProvided
       ? [...new Set(options.clientPocIds.map((id) => String(id || "").trim()).filter(Boolean))]
@@ -911,12 +926,18 @@ class SupabaseStore {
       throw new Error(`Project ${projectKey} has no active POC with a WhatsApp number`);
     }
 
-    // WhatsApp identifies the sender, not the project. The same number may be
-    // configured on several projects for one client, but only one of those
-    // sessions can be open at a time or the next reply would be ambiguous.
+    // Full feedback must remain the only open conversation for a phone number.
+    // Quick check-ins can coexist because template buttons identify a session;
+    // subsequent free text is routed to the one awaiting details.
     for (const poc of pocs) {
       const routing = await this.getWhatsappRoutingContext(poc.contactWhatsapp);
-      if (routing.status === "active" || routing.status === "ambiguous") {
+      const activeSessions = routing.status === "ambiguous"
+        ? routing.candidates.map((candidate) => candidate.session)
+        : routing.status === "active" ? [routing.session] : [];
+      const conflicts = isQuickCheckin
+        ? activeSessions.some((activeSession) => activeSession.sessionType !== "quick_checkin")
+        : activeSessions.length > 0;
+      if (conflicts) {
         throw new Error(`${poc.name} already has an active feedback request on another project. Finish or stop it before starting this cycle.`);
       }
     }
@@ -927,6 +948,7 @@ class SupabaseStore {
       body: [{
         project_id: project.id,
         cycle_type: cycleType,
+        schedule_key: options.scheduleKey || null,
         status: "open",
         started_at: now.toISOString(),
         poc_total: pocs.length,
@@ -944,13 +966,21 @@ class SupabaseStore {
         project_id: project.id,
         status: "started",
         completion_status: "not_started",
-        conversation_state: { pocWeightPercentage: num(poc.weightPercentage) },
+        conversation_state: isQuickCheckin
+          ? {
+              pocWeightPercentage: num(poc.weightPercentage),
+              state: "quick_checkin_choice",
+              quickCheckinOutcome: "awaiting_response",
+              scheduleKey: options.scheduleKey || null
+            }
+          : { pocWeightPercentage: num(poc.weightPercentage) },
         channel: options.channel || "whatsapp",
         started_at: now.toISOString(),
-        reminder_due_at: addHours(now, options.reminderHours || 24)
+        reminder_due_at: addHours(now, isQuickCheckin ? 48 : (options.reminderHours || 24))
       }))
     });
 
+    if (!isQuickCheckin) {
     const projectPatch = { last_cycle_started_at: now.toISOString() };
     if (cycleType === "project_end") {
       projectPatch.end_feedback_requested_at = now.toISOString();
@@ -962,6 +992,7 @@ class SupabaseStore {
       query: `id=eq.${encodeURIComponent(project.id)}`,
       body: projectPatch
     });
+    }
 
     const sessions = sessionRows.map((row) => {
       const poc = pocs.find((item) => item.id === row.client_poc_id);
@@ -974,10 +1005,11 @@ class SupabaseStore {
 
     for (const session of sessions) {
       const poc = pocs.find((item) => item.id === session.clientPocId);
+      const label = isQuickCheckin ? "Quick check-in" : cycleType === "project_end" ? "Project-end" : "Monthly";
       await this.addMessage(session.id, {
-        speaker: "SRV Media MD Office",
+        speaker: "SRV Media Directors' Office",
         side: "system",
-        body: `${cycleType === "project_end" ? "Project-end" : "Pulse"} feedback started for ${poc ? poc.name : "client POC"}.`,
+        body: `${label} started for ${poc ? poc.name : "client POC"}.`,
         metadata: { source: "cycle_created" }
       });
     }
@@ -1343,6 +1375,33 @@ class SupabaseStore {
   async recomputeCycle(cycleId, projectId) {
     if (!cycleId) return null;
     const sessions = await this.listCycleSessions(cycleId);
+    if (sessions[0]?.sessionType === "quick_checkin") {
+      const responded = sessions.filter((session) => Boolean(session.lastClientResponseAt));
+      const complete = sessions.length > 0 && sessions.every(sessionIsTerminal);
+      const configuredWeight = sessions.reduce((sum, session) => sum + Math.max(0, Number(session.pocWeight) || 0), 0);
+      const respondedWeight = responded.reduce((sum, session) => sum + Math.max(0, Number(session.pocWeight) || 0), 0);
+      const result = {
+        csatScore: null,
+        npsScore: null,
+        riskLevel: null,
+        weightResponded: configuredWeight ? respondedWeight / configuredWeight : 0,
+        pocResponded: responded.length,
+        pocTotal: sessions.length
+      };
+      await this.request("feedback_cycles", {
+        method: "PATCH",
+        query: `id=eq.${encodeURIComponent(cycleId)}`,
+        body: {
+          status: complete ? "closed" : "open",
+          closed_at: complete ? new Date().toISOString() : null,
+          weight_responded: result.weightResponded,
+          poc_responded: result.pocResponded,
+          poc_total: result.pocTotal
+        }
+      });
+      return result;
+    }
+
     // The POC population is the one that actually received this cycle. A POC
     // deactivated afterward must not disappear from the historical weighting.
     const sessionPocIds = new Set(sessions.map((session) => session.clientPocId));
@@ -1713,7 +1772,7 @@ class SupabaseStore {
       query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,no_response,partial)&select=*,client_pocs(name,salutation,honorific,contact_whatsapp,contact_email,poc_level_id,weight_percentage),feedback_cycles(cycle_type),projects(project_key,name)&order=reminder_due_at.asc`
     });
 
-    return rows.map((row) => ({
+    return rows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin").map((row) => ({
       session: toSession(row, this.sessionExtras(row)),
       poc: row.client_pocs
         ? toClientPoc(
@@ -2723,7 +2782,7 @@ class SupabaseStore {
     });
 
     const openCycleRows = await this.request("feedback_cycles", {
-      query: "status=eq.open&select=*&order=started_at.desc"
+      query: "status=eq.open&cycle_type=neq.quick_checkin&select=*&order=started_at.desc"
     });
 
     // Every cycle, not just the open ones. The dashboard table expands a project
@@ -2731,7 +2790,7 @@ class SupabaseStore {
     const allCycleRows = [];
     for (let offset = 0; ; offset += 1000) {
       const page = await this.request("feedback_cycles", {
-        query: `select=*&order=started_at.desc&limit=1000&offset=${offset}`
+        query: `cycle_type=neq.quick_checkin&select=*&order=started_at.desc&limit=1000&offset=${offset}`
       });
       allCycleRows.push(...page);
       if (page.length < 1000) break;
@@ -2751,7 +2810,8 @@ class SupabaseStore {
 
     // Read only the latest client bubble for each listed session. Chunking keeps
     // PostgREST URLs bounded while avoiding a separate request per POC.
-    const responseSessionIds = responseRows.map((row) => row.id).filter(Boolean);
+    const fullFeedbackResponseRows = responseRows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin");
+    const responseSessionIds = fullFeedbackResponseRows.map((row) => row.id).filter(Boolean);
     const latestClientMessage = new Map();
     for (let index = 0; index < responseSessionIds.length; index += 100) {
       const ids = responseSessionIds.slice(index, index + 100).map((id) => encodeURIComponent(id));
@@ -2771,7 +2831,7 @@ class SupabaseStore {
       ? Math.round((scored.reduce((sum, p) => sum + p.csatScore, 0) / scored.length) * 10) / 10
       : null;
 
-    const responseTracker = responseRows.map((row) => {
+    const responseTracker = fullFeedbackResponseRows.map((row) => {
       const state = row.conversation_state || {};
       const exhausted = Boolean(state.reminderExhausted);
       const latestReply = latestClientMessage.get(row.id) || null;
@@ -2852,6 +2912,172 @@ class SupabaseStore {
       )
     };
   }
+
+  /** Persist the deliberately small two-step quick-check-in conversation. */
+  async applyQuickCheckinResponse(sessionId, input = {}) {
+    const session = await this.getSession(sessionId);
+    if (!session || session.sessionType !== "quick_checkin") {
+      throw new Error("Quick check-in session not found");
+    }
+
+    const now = new Date().toISOString();
+    const detail = String(input.detail || "").trim();
+    const waitingForDetail = input.outcome === "needs_improvement" && !detail;
+    const conversationState = {
+      ...(session.conversationState || {}),
+      state: waitingForDetail ? "quick_checkin_detail" : "completed",
+      quickCheckinOutcome: waitingForDetail
+        ? "needs_improvement"
+        : input.outcome === "all_good" ? "all_good" : "feedback_shared",
+      quickCheckinDetail: detail || null,
+      quickCheckinRespondedAt: now
+    };
+
+    const rows = await this.request("feedback_sessions", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(sessionId)}`,
+      body: {
+        status: waitingForDetail ? "partial" : "completed",
+        completion_status: waitingForDetail ? "partial" : "completed",
+        conversation_state: conversationState,
+        last_client_response_at: now,
+        completed_at: waitingForDetail ? null : now,
+        reminder_due_at: waitingForDetail ? session.reminderDueAt : null
+      }
+    });
+
+    let observation = null;
+    let issue = null;
+    let service = null;
+    let sentiment = "neutral";
+    if (detail) {
+      const interpretation = input.interpretation || {};
+      const captured = Array.isArray(interpretation.captured) ? interpretation.captured : [];
+      const observations = Array.isArray(interpretation.observations) ? interpretation.observations : [];
+      const serviceKey = interpretation.serviceKeys?.[0] || captured[0]?.serviceKey || null;
+      service = serviceKey
+        ? (await this.servicesForProject(session.projectId)).find((item) => item.serviceKey === serviceKey) || null
+        : null;
+      const sentiments = [interpretation.sentiment, ...captured.map((item) => item.sentiment), ...observations.map((item) => item.sentiment)];
+      sentiment = sentiments.includes("negative") ? "negative" : sentiments.includes("positive") ? "positive" : "neutral";
+      const severity = sentiment === "negative" ? "watch" : "info";
+
+      const observationRows = await this.request("observations", {
+        method: "POST",
+        body: [{
+          project_id: session.projectId,
+          session_id: session.id,
+          client_poc_id: session.clientPocId,
+          topic: service ? service.name : "Quick check-in",
+          detail,
+          sentiment,
+          severity,
+          status: "open"
+        }]
+      });
+      observation = observationRows[0] || null;
+
+      if (sentiment === "negative") {
+        const issueRows = await this.request("issues", {
+          method: "POST",
+          query: "on_conflict=session_id,service_key",
+          prefer: "resolution=ignore-duplicates,return=representation",
+          body: [{
+            project_id: session.projectId,
+            session_id: session.id,
+            client_poc_id: session.clientPocId,
+            service_key: service ? service.serviceKey : "quick_checkin",
+            service_name: service ? service.name : "Quick check-in",
+            severity,
+            status: "open",
+            title: detail.slice(0, 160),
+            root_cause: detail,
+            internal_poc_id: service ? service.internalPocId : null,
+            sla: "48h",
+            due_at: addHours(new Date(), 48)
+          }]
+        });
+        issue = issueRows[0] || null;
+        if (issue) {
+          await this.request("issue_events", {
+            method: "POST",
+            body: [{
+              issue_id: issue.id,
+              project_id: session.projectId,
+              session_id: session.id,
+              action: "created",
+              next_status: "open",
+              note: "Created from quick check-in"
+            }]
+          });
+        }
+      }
+    }
+
+    const updatedSession = toSession(rows[0], {
+      cycleType: session.sessionType,
+      pocName: session.pocName,
+      pocWeight: session.pocWeight
+    });
+    await this.recomputeCycle(session.cycleId, session.projectId);
+    return { session: updatedSession, observation, issue, service, sentiment };
+  }
+
+  async hasScheduledQuickCheckin(projectId, scheduleKey) {
+    const rows = await this.request("feedback_cycles", {
+      query: `project_id=eq.${encodeURIComponent(projectId)}&cycle_type=eq.quick_checkin&schedule_key=eq.${encodeURIComponent(scheduleKey)}&select=id&limit=1`
+    });
+    return rows.length > 0;
+  }
+
+  async getDueQuickCheckinTargets(nowIso = new Date().toISOString()) {
+    const scheduleKey = quickCheckinScheduleKey(nowIso);
+    if (!scheduleKey) return { scheduleKey: null, targets: [] };
+    const projects = await this.listProjects();
+    const targets = [];
+    for (const project of projects) {
+      if (project.activeStatus !== "active" || project.clientActiveStatus !== "active") continue;
+      if (await this.hasScheduledQuickCheckin(project.id, scheduleKey)) continue;
+      targets.push({ projectKey: project.key, cycleType: "quick_checkin", scheduleKey });
+    }
+    return { scheduleKey, targets };
+  }
+
+  async expireDueQuickCheckins(nowIso = new Date().toISOString()) {
+    const rows = await this.request("feedback_sessions", {
+      query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,partial)&select=*,feedback_cycles(cycle_type)&order=reminder_due_at.asc`
+    });
+    const due = rows.filter((row) => row.feedback_cycles?.cycle_type === "quick_checkin");
+    const cycleIds = new Set();
+    for (const row of due) {
+      const state = row.conversation_state || {};
+      await this.request("feedback_sessions", {
+        method: "PATCH",
+        query: `id=eq.${encodeURIComponent(row.id)}`,
+        body: {
+          status: "completed",
+          completion_status: state.state === "quick_checkin_detail" ? "partial" : "not_started",
+          completed_at: nowIso,
+          reminder_due_at: null,
+          conversation_state: {
+            ...state,
+            state: "completed",
+            reminderExhausted: true,
+            closureReason: "quick_checkin_expired",
+            quickCheckinOutcome: state.state === "quick_checkin_detail"
+              ? "awaiting_details_expired"
+              : "no_response"
+          }
+        }
+      });
+      cycleIds.add(row.cycle_id);
+    }
+    for (const cycleId of cycleIds) {
+      const session = due.find((row) => row.cycle_id === cycleId);
+      await this.recomputeCycle(cycleId, session.project_id);
+    }
+    return { expired: due.length };
+  }
 }
 
 module.exports = {
@@ -2860,5 +3086,6 @@ module.exports = {
   groupAllocationWeights,
   MAX_REMINDERS,
   REMINDER_INTERVAL_HOURS,
-  sessionIsTerminal
+  sessionIsTerminal,
+  quickCheckinScheduleKey
 };

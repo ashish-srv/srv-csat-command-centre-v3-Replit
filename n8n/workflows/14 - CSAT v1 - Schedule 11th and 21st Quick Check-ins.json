@@ -1,0 +1,147 @@
+{
+  "name": "14. CSAT v1 - Schedule 11th and 21st Quick Check-ins",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 10,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "23da478a-d0b0-47d2-8e7d-e47f241e08de",
+      "name": "Daily at 10 AM IST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fa2f4ed5-4cb8-423f-b49c-2ad9225a4f77",
+              "name": "CSAT_APP_URL",
+              "value": "https://YOUR-REPLIT-APP.replit.app",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "0069ddd6-c1ec-4184-ac7b-b95c6a4b4966",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        288,
+        0
+      ],
+      "notes": "Edit the three values here. They are not secrets. The webhook secret and Meta token live in credentials."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $(\"Config\").first().json.CSAT_APP_URL }}/api/automation/create-due-quick-checkins",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "options": {
+          "timeout": 30000
+        },
+        "specifyBody": "json",
+        "jsonBody": "={{ { now: $now.toISO() } }}"
+      },
+      "id": "5ed81e97-6e35-4f67-9a13-8aa9ef878bbc",
+      "name": "Create Due Sessions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        560,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {},
+      "id": "43667463-3420-401e-8505-c5db3f01294b",
+      "name": "Sessions Created",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        848,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Create Due Sessions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Due Sessions": {
+      "main": [
+        [
+          {
+            "node": "Sessions Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily at 10 AM IST": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "timezone": "Asia/Kolkata"
+  }
+}

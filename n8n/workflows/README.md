@@ -54,3 +54,8 @@ session's final 24-hour grace period. Set
 `N8N_FEEDBACK_SESSION_CLOSED_WEBHOOK` in Netlify to its production webhook URL.
 The workflow waits for Meta to accept the template; only then does the app close
 the session. **Stop Feedback** does not invoke this workflow.
+
+
+## Quick Check-in setup
+
+See [Quick Check-in setup](../../docs/QUICK-CHECKIN-SETUP.md) for the Meta template, workflows 13-14, Replit secret, and activation steps.

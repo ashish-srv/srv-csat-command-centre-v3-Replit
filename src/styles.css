@@ -2524,6 +2524,21 @@ button.metric-card {
   grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.3fr) minmax(0, 1.2fr) 96px 44px;
 }
 
+.manage-clients-scroll {
+  max-height: min(460px, 52vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--soft-line);
+  border-radius: 10px;
+}
+
+.manage-clients-scroll .dtable-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+}
+
 .dtable-row.selected { background: var(--blue-soft); }
 
 .cluster-chips {
@@ -2533,6 +2548,9 @@ button.metric-card {
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid var(--soft-line);
+  max-height: 148px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .cluster-chip {

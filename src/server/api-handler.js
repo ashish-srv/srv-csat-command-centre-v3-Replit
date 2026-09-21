@@ -2808,10 +2808,11 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 // Cycle creation (one session per active POC)
 // ---------------------------------------------------------------------
 
-async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clientPocIds }) {
+async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clientPocIds, scheduleKey }) {
   const result = await store.createCycle(projectKey, {
     cycleType,
     channel: "whatsapp",
+    scheduleKey: scheduleKey || null,
     ...(Array.isArray(clientPocIds) ? { clientPocIds } : {})
   });
   const { cycle, sessions, project, pocs } = result;
@@ -2820,15 +2821,17 @@ async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clien
   for (const session of sessions) {
     const poc = pocs.find((item) => item.id === session.clientPocId) || null;
     const resumeUrl = buildResumeUrl(baseUrl, project, session);
-    await notifyAutomation(store, "feedback_started", {
+    const eventType = cycleType === "quick_checkin" ? "quick_checkin_started" : "feedback_started";
+    await notifyAutomation(store, eventType, {
       project,
       poc,
       cycle,
       session,
       reason: reason || "manual_dashboard_request",
       reminderDueAt: session.reminderDueAt,
+      scheduleKey: scheduleKey || null,
       resumeUrl
-    }, `feedback_started:session:${session.id}`);
+    }, `${eventType}:session:${session.id}`);
     dispatched.push({ session, poc, resumeUrl });
   }
 
@@ -2971,7 +2974,8 @@ async function handleApiRequest(request) {
   const requestFeedbackMatch = pathname.match(/^\/api\/projects\/([^/]+)\/request-feedback$/);
   if (method === "POST" && requestFeedbackMatch) {
     const projectKey = decodeURIComponent(requestFeedbackMatch[1]);
-    const cycleType = body.cycleType === "project_end" ? "project_end" : "pulse";
+    const allowedCycleTypes = new Set(["pulse", "project_end", "quick_checkin"]);
+    const cycleType = allowedCycleTypes.has(body.cycleType) ? body.cycleType : "pulse";
 
     const project = await store.getProject(projectKey);
     if (!project) return error(404, "Project not found");
@@ -3159,6 +3163,9 @@ async function handleApiRequest(request) {
 
     const project = await store.getProjectById(session.projectId);
     const poc = await store.getClientPocById(session.clientPocId);
+    if (session.sessionType === "quick_checkin") {
+      return handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel: "web" });
+    }
     return handleTurn({ store, session, project, poc, body, text, baseUrl, channel: "web" });
   }
 
@@ -3171,6 +3178,9 @@ async function handleApiRequest(request) {
     const sessionId = decodeURIComponent(scoreMatch[1]);
     const session = await store.getSession(sessionId);
     if (!session) return error(404, "Session not found");
+    if (session.sessionType === "quick_checkin") {
+      return error(409, "Quick check-ins are not scored", "They record All good or the client's written feedback without changing CSAT or NPS.");
+    }
 
     const messages = typeof store.getMessagesForSession === "function"
       ? await store.getMessagesForSession(sessionId)
@@ -3295,6 +3305,12 @@ async function handleApiRequest(request) {
     });
     const project = await store.getProjectById(session.projectId);
     const poc = await store.getClientPocById(session.clientPocId);
+    if (session.sessionType === "quick_checkin") {
+      return json(200, {
+        session, project, poc,
+        stopScore: { attempted: false, scored: false, reason: "Quick check-ins do not create satisfaction scores." }
+      });
+    }
     let stopScore = { attempted: false, scored: false, reason: "No client feedback was available to score." };
 
     // Stopping ends only this POC's participation in this cycle. Review the
@@ -3414,22 +3430,53 @@ async function handleApiRequest(request) {
     if (!text) return error(400, "WhatsApp message text is required");
     if (!body.from) return error(400, "WhatsApp sender (from) is required");
 
+    const buttonSessionId = quickCheckinSessionId(body);
     const routing = typeof store.getWhatsappRoutingContext === "function"
       ? await store.getWhatsappRoutingContext(body.from)
       : null;
-    if (routing?.status === "ambiguous") {
-      return error(409, "This WhatsApp number has more than one active feedback session", "Stop one cycle before processing the reply so it cannot be attached to the wrong project.");
-    }
-    const poc = routing ? routing.poc : await store.getPocByWhatsapp(body.from);
-    if (!poc) return error(404, `No active client POC found for WhatsApp number ${body.from}`);
 
-    // Prefer the open session; fall back to the most recent one so that a
-    // post-completion message still reaches G3 instead of 404-ing into silence.
-    const active = routing ? routing.session : await store.getActiveSessionForPoc(poc.id);
-    const session = active || (routing ? null : await store.getLatestSessionForPoc(poc.id));
+    let poc = null;
+    let session = null;
+    if (buttonSessionId) {
+      session = await store.getSession(buttonSessionId);
+      const phonePocs = typeof store.getPocsByWhatsapp === "function"
+        ? await store.getPocsByWhatsapp(body.from)
+        : [];
+      poc = phonePocs.find((item) => item.id === session?.clientPocId) || null;
+      if (!session || session.sessionType !== "quick_checkin" || !poc) {
+        return error(400, "This quick check-in button does not match the sender or an active quick check-in");
+      }
+    } else if (routing?.status === "ambiguous") {
+      const detailCandidates = (routing.candidates || []).filter((candidate) =>
+        candidate.session?.sessionType === "quick_checkin"
+        && candidate.session?.conversationState?.state === "quick_checkin_detail"
+      );
+      if (detailCandidates.length) {
+        detailCandidates.sort((left, right) =>
+          new Date(right.session.lastClientResponseAt || right.session.startedAt || 0).getTime()
+          - new Date(left.session.lastClientResponseAt || left.session.startedAt || 0).getTime()
+        );
+        ({ poc, session } = detailCandidates[0]);
+      } else {
+        return error(409, "This WhatsApp number has more than one active feedback session", "Use the button for the relevant project. If feedback details were requested, reply immediately after choosing Share feedback.");
+      }
+    } else {
+      poc = routing ? routing.poc : await store.getPocByWhatsapp(body.from);
+      // Prefer the open session; fall back to the most recent one so that a
+      // post-completion message still reaches G3 instead of 404-ing into silence.
+      const active = routing ? routing.session : await store.getActiveSessionForPoc(poc?.id);
+      session = active || (routing ? null : await store.getLatestSessionForPoc(poc?.id));
+    }
+    if (!poc) return error(404, `No active client POC found for WhatsApp number ${body.from}`);
     if (!session) return error(404, `No feedback session found for POC ${poc.name}`);
 
     const project = await store.getProjectById(session.projectId);
+    if (session.sessionType === "quick_checkin") {
+      return handleQuickCheckinTurn({
+        store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
+        waitUntil: request.waitUntil
+      });
+    }
     return handleTurn({
       store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
       waitUntil: request.waitUntil
@@ -3448,6 +3495,12 @@ async function handleApiRequest(request) {
 
     const project = await store.getProjectById(session.projectId);
     const poc = await store.getClientPocById(session.clientPocId);
+    if (session.sessionType === "quick_checkin") {
+      return handleQuickCheckinTurn({
+        store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
+        waitUntil: request.waitUntil
+      });
+    }
     return handleTurn({
       store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
       waitUntil: request.waitUntil
@@ -3484,6 +3537,31 @@ async function handleApiRequest(request) {
     return json(201, { cycles, skipped });
   }
 
+
+  if (method === "POST" && pathname === "/api/automation/create-due-quick-checkins") {
+    if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    const expired = await store.expireDueQuickCheckins(body.now);
+    const due = await store.getDueQuickCheckinTargets(body.now);
+    const cycles = [];
+    const skipped = [];
+
+    for (const target of due.targets) {
+      try {
+        cycles.push(await startCycle({
+          store,
+          projectKey: target.projectKey,
+          cycleType: "quick_checkin",
+          scheduleKey: due.scheduleKey,
+          baseUrl,
+          reason: "scheduled_11th_or_21st"
+        }));
+      } catch (cycleError) {
+        skipped.push({ projectKey: target.projectKey, reason: cycleError.message });
+      }
+    }
+
+    return json(201, { scheduleKey: due.scheduleKey, cycles, skipped, expired: expired.expired });
+  }
   if (method === "GET" && pathname === "/api/automation/due-reminders") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
     const targets = await store.getDueReminderTargets(searchParams.get("now") || undefined);
@@ -4392,3 +4470,114 @@ module.exports = {
     clientBurstContext
   }
 };
+
+function quickCheckinButton(body) {
+  const payload = String(body.buttonPayload || body.buttonId || "").trim();
+  if (payload.startsWith("QC_ALL_GOOD:")) return "all_good";
+  if (payload.startsWith("QC_SHARE_FEEDBACK:")) return "share_feedback";
+  return null;
+}
+
+function quickCheckinSessionId(body) {
+  const payload = String(body.buttonPayload || body.buttonId || "").trim();
+  const match = payload.match(/^QC_(?:ALL_GOOD|SHARE_FEEDBACK):(.+)$/);
+  return match ? match[1] : null;
+}
+
+async function handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil }) {
+  const providerMessageId = body.providerMessageId || null;
+  if (providerMessageId && await store.hasProviderMessage(providerMessageId)) {
+    return json(200, { duplicate: true, sendToWhatsapp: false, sessionId: session.id });
+  }
+
+  const inbound = {
+    speaker: body.fromName || poc.salutation || poc.name || "Client",
+    side: "client",
+    body: text,
+    providerMessageId,
+    metadata: {
+      source: channel === "whatsapp" ? "whatsapp" : "web_test",
+      from: body.from || null,
+      buttonPayload: body.buttonPayload || body.buttonId || null
+    }
+  };
+  const clientMessage = providerMessageId && typeof store.addInboundMessage === "function"
+    ? await store.addInboundMessage(session.id, inbound)
+    : await store.addMessage(session.id, inbound);
+  if (!clientMessage) return json(200, { duplicate: true, sendToWhatsapp: false, sessionId: session.id });
+
+  const button = quickCheckinButton(body);
+  const state = session.conversationState || {};
+  const normalized = String(text || "").trim().toLowerCase();
+  const allGood = button === "all_good"
+    || /^(?:all good|everything(?: is|'s)? (?:good|fine)|going well|no issues?|no problem|fine|good)$/i.test(normalized);
+  const shareChoice = button === "share_feedback"
+    || /^(?:share feedback|needs? improvement|have an issue|issue|something to share)$/i.test(normalized);
+  let result;
+  let replyText;
+
+  if (allGood && state.state !== "quick_checkin_detail") {
+    result = await store.applyQuickCheckinResponse(session.id, { outcome: "all_good" });
+    replyText = `Glad to hear that, ${poc.salutation || poc.name}. Thank you for confirming that everything is going well with ${project.name}. Your response has been recorded.`;
+  } else if (shareChoice && state.state !== "quick_checkin_detail") {
+    result = await store.applyQuickCheckinResponse(session.id, { outcome: "needs_improvement" });
+    replyText = `Thank you, ${poc.salutation || poc.name}. Please share what needs improvement, any issue you are facing, or anything you would like management to be aware of regarding ${project.name}.`;
+  } else if (state.state === "quick_checkin_choice" && /^(?:yes|no|ok|okay)$/i.test(normalized)) {
+    result = { session };
+    replyText = "Please choose All good if everything is going well, or Share feedback if anything needs improvement or should be brought to management's attention.";
+  } else {
+    let interpretation = await interpretReply({
+      project,
+      question: `What needs improvement, or what should management know about ${project.name}?`,
+      text
+    });
+    if (!interpretation.sentiment) {
+      const negative = /\b(issue|problem|improv\w*|delay\w*|late|slow|poor|bad|concern|not (?:good|working|happy)|unhappy|miss\w*)\b/i.test(text);
+      const positive = /\b(good|great|fine|excellent|happy|appreciat\w*|well done|satisfied)\b/i.test(text);
+      interpretation = { ...interpretation, sentiment: negative ? "negative" : positive ? "positive" : "neutral" };
+    }
+    result = await store.applyQuickCheckinResponse(session.id, {
+      outcome: "feedback_shared",
+      detail: text,
+      interpretation
+    });
+    replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback regarding ${project.name} has been recorded for confidential management review.`;
+
+    if (result.sentiment !== "positive") {
+      notifyAutomationAsync(store, "manager_alert", {
+        project,
+        poc,
+        session: result.session,
+        clientText: text,
+        analysis: {
+          requiresManagerAlert: true,
+          managerEmail: result.service?.managerEmail || null,
+          ownerEmail: result.service?.ownerEmail || null,
+          ownerName: result.service?.ownerName || "Management",
+          primaryServiceName: result.service?.name || "Quick check-in",
+          riskLevel: result.issue?.severity || "Watch",
+          csatScore: null,
+          rootCause: text
+        },
+        resumeUrl: buildResumeUrl(baseUrl, project, result.session)
+      }, `manager_alert:quick_checkin:${clientMessage.id}`, waitUntil);
+    }
+  }
+
+  const assistantMessage = await store.addMessage(session.id, {
+    speaker: "SRV Media Directors' Office",
+    side: "srv",
+    body: replyText,
+    metadata: { source: "quick_checkin", outcome: result.session.conversationState?.quickCheckinOutcome || null }
+  });
+  return json(201, {
+    session: result.session,
+    project,
+    poc,
+    receivedMessage: clientMessage,
+    nextMessage: assistantMessage,
+    whatsappReplyText: replyText,
+    sendToWhatsapp: true,
+    state: result.session.conversationState?.state || null
+  });
+}

@@ -749,7 +749,7 @@ function ProjectForm({ value, clients, onChange, onSave, onCancel, saving }) {
   );
 }
 
-function ProjectSetupForm({ value, levels, people, onChange, onSave, onCancel, saving }) {
+function ProjectSetupForm({ value, clients, levels, people, onChange, onSave, onCancel, saving }) {
   const pocs = value.pocs || [];
   const services = value.services || [];
   const activePocWeightTotal = Math.round(pocs.reduce(
@@ -778,6 +778,16 @@ function ProjectSetupForm({ value, levels, people, onChange, onSave, onCancel, s
 
       <h4>1. Project</h4>
       <div className="form-grid">
+        <Field label="Client">
+          <select value={value.project.clientId || ""} onChange={(event) => updateProject({ clientId: event.target.value })}>
+            <option value="">Select client</option>
+            {clients.map((client) => (
+              <option key={client.id} value={client.id}>
+                {client.name}{client.activeStatus && client.activeStatus !== "active" ? ` - ${client.activeStatus}` : ""}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="Project name">
           <input value={value.project.name} onChange={(event) => updateProject({ name: event.target.value })} />
         </Field>
@@ -1001,8 +1011,8 @@ export default function Manage({ onReload }) {
 
   useEffect(() => {
     if (!projectForm && !clientForm && !clusterForm && !internalForm && !internalBatch && !clientBatch && !pocBatch && !serviceBatch && !setupForm) return;
-    window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }));
-  }, [projectForm, clientForm, clusterForm, internalForm, internalBatch, clientBatch, pocBatch, serviceBatch, setupForm]);
+    window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }, [Boolean(projectForm), Boolean(clientForm), Boolean(clusterForm), Boolean(internalForm), Boolean(internalBatch), Boolean(clientBatch), Boolean(pocBatch), Boolean(serviceBatch), Boolean(setupForm)]);
 
   async function selectClient(id) {
     setClientId(id);
@@ -1651,6 +1661,7 @@ export default function Manage({ onReload }) {
             />
           </div>
         ) : null}
+        <div className="manage-clients-scroll">
         <div className="dtable manage-clients">
           <div className="dtable-head">
             <span>Client</span>
@@ -1694,6 +1705,7 @@ export default function Manage({ onReload }) {
             />
           ) : null}
         </div>
+        </div>
         {clusters.length ? (
           <div className="cluster-chips">
             {clusters.map((cluster) => (
@@ -1731,7 +1743,7 @@ export default function Manage({ onReload }) {
             <Button
               icon={Plus}
               variant="primary"
-              disabled={!clientId}
+              disabled={!clients.length}
               onClick={() => {
                 closeForms();
                 setSetupForm({
@@ -1757,6 +1769,7 @@ export default function Manage({ onReload }) {
           <div ref={formRef}>
             <ProjectSetupForm
               value={setupForm}
+              clients={clients}
               levels={levels}
               people={people}
               saving={saving}

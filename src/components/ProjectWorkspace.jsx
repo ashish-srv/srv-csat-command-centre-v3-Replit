@@ -15,6 +15,15 @@ const COMPLETION_OPTIONS = [
   { value: "pending", label: "Not completed" }
 ];
 
+const QUICK_CHECKIN_OUTCOMES = [
+  { value: "awaiting_response", label: "Awaiting response" },
+  { value: "needs_improvement", label: "Awaiting details" },
+  { value: "all_good", label: "All good" },
+  { value: "feedback_shared", label: "Feedback shared" },
+  { value: "no_response", label: "No response" },
+  { value: "awaiting_details_expired", label: "Details not received" }
+];
+
 function sessionCanBeStopped(session) {
   if (!session || ["completed", "opted_out"].includes(session.status)) return false;
   const state = session.conversationState || {};
@@ -24,7 +33,7 @@ function sessionCanBeStopped(session) {
 }
 
 function sessionCanReceiveReminder(session) {
-  if (!session || ["completed", "opted_out"].includes(session.status)) return false;
+  if (!session || session.sessionType === "quick_checkin" || ["completed", "opted_out"].includes(session.status)) return false;
   const state = session.conversationState || {};
   if (["completed", "opted_out", "handed_off"].includes(state.state) || state.reminderExhausted || state.stoppedByAdmin) {
     return false;
@@ -127,6 +136,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const [clusters, setClusters] = useState([]);
   const [clients, setClients] = useState([]);
   const [cycleTypes, setCycleTypes] = useState([]);
+  const [quickOutcomes, setQuickOutcomes] = useState([]);
   const [completion, setCompletion] = useState("");
   const [range, setRange] = useState({ from: "", to: "", basis: "started" });
 
@@ -249,13 +259,17 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
       // Compare on the stored value, not the rendered label — the label now
       // varies by project interval, and matching on it would break the filter.
       if (cycleTypes.length && !cycleTypes.includes(cycle.cycleType)) return false;
+      if (quickOutcomes.length && !(cycle.sessions || []).some((session) =>
+        quickOutcomes.includes(session.conversationState?.quickCheckinOutcome)
+      )) return false;
       if (completion === "completed" && cycle.status !== "closed") return false;
       if (completion === "pending" && cycle.status === "closed") return false;
       return cycleInRange(cycle, range);
     });
-  }, [workspace, cycleTypes, completion, range]);
+  }, [workspace, cycleTypes, quickOutcomes, completion, range]);
 
   const selectedCycle = cycles.find((cycle) => cycle.id === cycleId) || cycles[0] || null;
+  const selectedIsQuickCheckin = selectedCycle?.cycleType === "quick_checkin";
 
   // A filter can hide the cycle currently being read. Move to the newest one
   // still in range, so the conversation below always matches the filters above.
@@ -342,9 +356,11 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
       showToast(`Cannot send to: ${unavailable.map((poc) => poc.name).join(", ")}. Each selected POC must be active and have a WhatsApp number.`);
       return;
     }
-    const label = cycleType === "project_end" ? "project-end" : `${project.feedbackIntervalDays || 30}-day`;
-    if (!window.confirm(`Send the ${label} feedback request for ${project.name}?\n\n${actionPocs.length} selected POC(s): ${actionPocs.map((poc) => poc.name).join(", ")}`)) return;
-    setBulkAction(cycleType === "project_end" ? "project_end" : "pulse");
+    const label = cycleType === "quick_checkin"
+      ? "quick check-in"
+      : cycleType === "project_end" ? "project-end" : `${project.feedbackIntervalDays || 30}-day`;
+    if (!window.confirm(`Send the ${label} request for ${project.name}?\n\n${actionPocs.length} selected POC(s): ${actionPocs.map((poc) => poc.name).join(", ")}`)) return;
+    setBulkAction(cycleType);
     try {
       const data = await apiPost(`/api/projects/${encodeURIComponent(project.key)}/request-feedback`, {
         cycleType,
@@ -614,7 +630,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     ? cycleSessions
     : allCycles.flatMap((cycle) => cycle.sessions || [])
   ).filter((item) => item.npsScore !== null && item.npsScore !== undefined).length;
-  const cycleFiltersActive = Boolean(range.from || range.to || cycleTypes.length || completion);
+  const cycleFiltersActive = Boolean(range.from || range.to || cycleTypes.length || quickOutcomes.length || completion);
   const selectedConversationPoc = selectedSession
     ? pocs.find((poc) => poc.id === selectedSession.clientPocId) || null
     : null;
@@ -666,7 +682,13 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const openIssues = scopedIssues.filter((issue) => issue.status !== "closed");
   const closedIssues = scopedIssues.filter((issue) => issue.status === "closed");
   const intervalLabel = `${project.feedbackIntervalDays || 30}-day`;
-  const filtersActive = Boolean(clusters.length || clients.length || cycleTypes.length || completion || range.from || range.to || feedbackPocId);
+  const quickOutcomeCounts = cycleSessions.reduce((counts, session) => {
+    const outcome = session.conversationState?.quickCheckinOutcome || "awaiting_response";
+    counts[outcome] = (counts[outcome] || 0) + 1;
+    return counts;
+  }, {});
+  const quickResponses = cycleSessions.filter((session) => Boolean(session.lastClientResponseAt)).length;
+  const filtersActive = Boolean(clusters.length || clients.length || cycleTypes.length || quickOutcomes.length || completion || range.from || range.to || feedbackPocId);
 
   return (
     <>
@@ -680,7 +702,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
 
       <FilterBar
         showReset={filtersActive}
-        onReset={() => { setClusters([]); setClients([]); setCycleTypes([]); setCompletion(""); setFeedbackPocId(""); setRange({ from: "", to: "", basis: "started" }); }}
+        onReset={() => { setClusters([]); setClients([]); setCycleTypes([]); setQuickOutcomes([]); setCompletion(""); setFeedbackPocId(""); setRange({ from: "", to: "", basis: "started" }); }}
       >
         <MultiSelect label="Cluster" allLabel="All clusters" selected={clusters} onChange={setClusters}
           options={[...new Set(allProjects.map((item) => item.clusterName).filter(Boolean))].sort()} />
@@ -695,8 +717,11 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
             label: `${formatCycleType(cycle.cycleType, project.feedbackIntervalDays)} · ${formatDate(cycle.startedAt)}${cycle.status === "closed" ? " · closed" : ""}`
           }))} />
         <MultiSelect label="Cycle type" allLabel="All types" selected={cycleTypes} onChange={setCycleTypes}
-          options={["pulse", "project_end"]}
+          options={["pulse", "project_end", "quick_checkin"]}
           renderOption={(value) => formatCycleType(value, project.feedbackIntervalDays)} />
+        <MultiSelect label="Quick check-in result" allLabel="All results" selected={quickOutcomes} onChange={setQuickOutcomes}
+          options={QUICK_CHECKIN_OUTCOMES.map((option) => option.value)}
+          renderOption={(value) => QUICK_CHECKIN_OUTCOMES.find((option) => option.value === value)?.label || value} />
         <SingleSelect label="Completion" value={completion} placeholder="" onChange={setCompletion}
           options={COMPLETION_OPTIONS.map((option) => ({ value: option.value, label: option.label }))} />
         <DateRange range={range} onChange={setRange} />
@@ -704,7 +729,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           options={pocs.map((poc) => ({ value: poc.id, label: poc.name }))} />
       </FilterBar>
 
-      {(range.from || range.to || cycleTypes.length || completion) && !cycles.length ? (
+      {(range.from || range.to || cycleTypes.length || quickOutcomes.length || completion) && !cycles.length ? (
         <div className="filter-empty-note">
           No cycle on this project matches these filters. Clear them to see the full history.
         </div>
@@ -712,29 +737,34 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
 
       <div className="metric-row">
         <MetricCard
-          label={selectedCycle ? "Cycle CSAT (weighted)" : "Latest CSAT (weighted)"}
-          value={formatScore(statedScore)}
-          caption={statedScore === null || statedScore === undefined
-            ? "no rating given"
-            : selectedCycle
-              ? `${selectedCycle.pocResponded || 0} POC rating(s); configured group percentages applied`
-              : "latest weighted project score"}
-          tone={scoreClass(statedScore)}
+          label={selectedIsQuickCheckin ? "Responses" : selectedCycle ? "Cycle CSAT (weighted)" : "Latest CSAT (weighted)"}
+          value={selectedIsQuickCheckin ? `${quickResponses} / ${cycleSessions.length}` : formatScore(statedScore)}
+          caption={selectedIsQuickCheckin
+            ? "quick check-in replies"
+            : statedScore === null || statedScore === undefined
+              ? "no rating given"
+              : selectedCycle
+                ? `${selectedCycle.pocResponded || 0} POC rating(s); configured group percentages applied`
+                : "latest weighted project score"}
+          tone={selectedIsQuickCheckin ? (quickResponses === cycleSessions.length ? "strong" : "watch") : scoreClass(statedScore)}
         />
         <MetricCard
-          label="CSAT (predicted)"
-          value={formatScore(predictedScore)}
-          caption={predictedScore === null || predictedScore === undefined
-            ? "not scored yet"
-            : formatConfidence(selectedSession && selectedSession.predictedConfidence)}
-          tone={confidenceClass(selectedSession && selectedSession.predictedConfidence)}
+          label={selectedIsQuickCheckin ? "All good" : "CSAT (predicted)"}
+          value={selectedIsQuickCheckin ? (quickOutcomeCounts.all_good || 0) : formatScore(predictedScore)}
+          caption={selectedIsQuickCheckin
+            ? "closed immediately"
+            : predictedScore === null || predictedScore === undefined
+              ? "not scored yet"
+              : formatConfidence(selectedSession && selectedSession.predictedConfidence)}
+          tone={selectedIsQuickCheckin ? "strong" : confidenceClass(selectedSession && selectedSession.predictedConfidence)}
         />
         <MetricCard
-          label="NPS"
-          value={formatNps(selectedCycle ? selectedCycle.npsScore : project.npsScore)}
-          tone={npsClass(selectedCycle ? selectedCycle.npsScore : project.npsScore)}
-          caption={
-            selectedCycle && selectedCycle.cycleType !== "project_end"
+          label={selectedIsQuickCheckin ? "Feedback shared" : "NPS"}
+          value={selectedIsQuickCheckin ? (quickOutcomeCounts.feedback_shared || 0) : formatNps(selectedCycle ? selectedCycle.npsScore : project.npsScore)}
+          tone={selectedIsQuickCheckin ? ((quickOutcomeCounts.feedback_shared || 0) ? "watch" : "neutral") : npsClass(selectedCycle ? selectedCycle.npsScore : project.npsScore)}
+          caption={selectedIsQuickCheckin
+            ? `${quickOutcomeCounts.needs_improvement || 0} awaiting details`
+            : selectedCycle && selectedCycle.cycleType !== "project_end"
               ? "project-end cycles only"
               : npsResponses
                 ? formatNpsBasis(npsResponses)
@@ -747,7 +777,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           onClick={() => issuesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })} />
       </div>
 
-      {selectedSession && selectedSession.predictedReasoning ? (
+      {!selectedIsQuickCheckin && selectedSession && selectedSession.predictedReasoning ? (
         <div className={`prediction-strip ${confidenceClass(selectedSession.predictedConfidence)}`}>
           <div className="prediction-head">
             <strong>How this conversation reads</strong>
@@ -770,7 +800,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
         </div>
       ) : null}
 
-      {selectedSession
+      {!selectedIsQuickCheckin && selectedSession
         && (selectedSession.predictedCsat === null || selectedSession.predictedCsat === undefined)
         && messages.some((message) => message.side === "client") ? (
           <div className="prediction-strip watch">
@@ -917,7 +947,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
                   </div>
                 </div>
                 <span>{poc.designation || "Designation not set"}</span>
-                {session && cycleIsOpen ? (
+                {session && cycleIsOpen && !selectedIsQuickCheckin ? (
                   <div className={`poc-reminder-status ${reminderCount >= 3 ? "exhausted" : ""}`}>
                     <Bell size={13} aria-hidden="true" />
                     <span>Reminders sent</span>
@@ -969,6 +999,13 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
             {bulkAction === "project_end" ? "Starting…" : `Send project-end feedback to ${actionPocs.length} POC${actionPocs.length === 1 ? "" : "s"}`}
           </Button>
           <Button
+            icon={Send}
+            onClick={() => requestFeedback("quick_checkin")}
+            disabled={!actionPocs.length || Boolean(bulkAction)}
+          >
+            {bulkAction === "quick_checkin" ? "Starting..." : `Send quick check-in to ${actionPocs.length} POC${actionPocs.length === 1 ? "" : "s"}`}
+          </Button>
+          <Button
             icon={Bell}
             onClick={sendReminder}
             disabled={!reminderTargets.length || Boolean(bulkAction)}
@@ -989,7 +1026,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           </Button>
         </div>
         <p className="form-note">
-          Monthly and project-end buttons create a new cycle for exactly the selected POCs. Reminder and stop buttons
+          Monthly, project-end and quick check-in buttons create a new cycle for exactly the selected POCs. Quick check-ins do not ask for a rating and do not use reminders. Reminder and stop buttons
           use the clearly selected cycle above. Stopping preserves existing feedback and affects only those POCs in
           that cycle; if every remaining open session is stopped, the cycle closes automatically.
         </p>

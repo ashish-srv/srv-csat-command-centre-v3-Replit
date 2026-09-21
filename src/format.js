@@ -115,6 +115,7 @@ export function npsClass(score) {
  * reads "30-Day Feedback" and a 45-day one reads "45-Day Feedback".
  */
 export function formatCycleType(value, intervalDays) {
+  if (value === "quick_checkin") return "Quick Check-in";
   if (value === "project_end") return "Project-End Feedback";
   return intervalDays ? `${intervalDays}-Day Feedback` : "Monthly Feedback";
 }
@@ -142,6 +143,18 @@ export function formatSessionStatus(value) {
 
 export function formatSessionOutcome(session) {
   if (!session) return "Unknown";
+  if (session.sessionType === "quick_checkin") {
+    const outcome = session.conversationState?.quickCheckinOutcome;
+    const labels = {
+      awaiting_response: "Awaiting response",
+      needs_improvement: "Awaiting details",
+      all_good: "All good",
+      feedback_shared: "Feedback shared",
+      no_response: "No response - closed",
+      awaiting_details_expired: "Details not received - closed"
+    };
+    if (labels[outcome]) return labels[outcome];
+  }
   if (session.conversationState && session.conversationState.stoppedByAdmin) {
     return "Stopped for this cycle";
   }
