@@ -4521,6 +4521,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   let replyText;
   let alertText = null;
   let postCompletionHandoff = false;
+  let postCompletionHandoffEvent = null;
 
   const interpretAndRecord = async () => {
     let interpretation = await interpretReply({
@@ -4608,15 +4609,28 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   }
 
   if (postCompletionHandoff) {
-    notifyAutomationAsync(store, "post_completion_message", {
-      project,
-      poc,
-      session: result.session,
-      clientText: text,
-      guardrail: "quick_checkin_post_completion",
-      state: result.session.conversationState?.state || "completed",
-      resumeUrl: buildResumeUrl(baseUrl, project, result.session)
-    }, `post_completion_message:quick_checkin:${clientMessage.id}`, waitUntil);
+    try {
+      // This event cannot be fire-and-forget on Replit. The request may finish
+      // before an untracked promise reserves its audit row or reaches n8n,
+      // leaving the client with a false "passed to the team" confirmation.
+      postCompletionHandoffEvent = await notifyAutomation(store, "post_completion_message", {
+        project,
+        poc,
+        session: result.session,
+        clientText: text,
+        guardrail: "quick_checkin_post_completion",
+        state: result.session.conversationState?.state || "completed",
+        resumeUrl: buildResumeUrl(baseUrl, project, result.session)
+      }, `post_completion_message:quick_checkin:${clientMessage.id}`);
+    } catch (handoffError) {
+      console.warn("[automation] quick-check-in post-completion handoff failed:", handoffError.message);
+      postCompletionHandoffEvent = { status: "failed", error: handoffError.message };
+    }
+
+    const handoffAccepted = ["sent", "duplicate"].includes(postCompletionHandoffEvent?.status);
+    replyText = handoffAccepted
+      ? "This automated quick check-in has closed, so I cannot add this message to it. I have passed your message to the SRV team, and someone will respond directly."
+      : "This automated quick check-in has closed, and I could not pass this new message to the team automatically. Please contact your SRV representative directly so it is not missed.";
   }
 
   const assistantMessage = await store.addMessage(session.id, {
@@ -4626,7 +4640,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     metadata: {
       source: "quick_checkin",
       outcome: result.session.conversationState?.quickCheckinOutcome || null,
-      postCompletionHandoff
+      postCompletionHandoff,
+      postCompletionHandoffStatus: postCompletionHandoffEvent?.status || null
     }
   });
   return json(201, {
@@ -4638,6 +4653,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     whatsappReplyText: replyText,
     sendToWhatsapp: true,
     guardrail: postCompletionHandoff ? "quick_checkin_post_completion" : null,
+    handoffStatus: postCompletionHandoffEvent?.status || null,
     state: result.session.conversationState?.state || null
   });
 }

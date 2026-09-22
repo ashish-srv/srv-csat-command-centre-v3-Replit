@@ -37,6 +37,12 @@ function webhookFor(eventType) {
   return null;
 }
 
+function webhookTimeoutMs() {
+  const configured = Number(process.env.N8N_WEBHOOK_TIMEOUT_MS);
+  if (!Number.isFinite(configured) || configured < 1000) return 20_000;
+  return Math.min(configured, 60_000);
+}
+
 async function emitAutomation(eventType, payload) {
   const webhookUrl = webhookFor(eventType);
   const event = {
@@ -55,6 +61,7 @@ async function emitAutomation(eventType, payload) {
         "content-type": "application/json",
         "x-csat-webhook-secret": process.env.N8N_WEBHOOK_SECRET || ""
       },
+      signal: AbortSignal.timeout(webhookTimeoutMs()),
       body: JSON.stringify({ eventType, ...payload })
     });
     event.status = response.ok ? "sent" : "failed";

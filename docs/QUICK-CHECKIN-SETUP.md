@@ -36,7 +36,7 @@ Configure workflow 13 with the same WhatsApp Graph API header credential used by
 
 Configure workflow 14 with the published Replit app URL and the same CSAT header-auth credential. It runs daily at 10:00 AM Asia/Kolkata, while the application creates check-ins only on the 11th and 21st and prevents duplicates for the same project/date.
 
-Activate workflows 1, 13, and 14 after the Meta template is approved. Workflow 1 keeps the existing Meta callback URL and verification configuration.
+Activate workflows 1, 13, and 14 after the Meta template is approved. Workflow 1 keeps the existing Meta callback URL and verification configuration. Keep the existing Human Handoff Workflow 3 active; its `Notify Team` node must run before its success response.
 
 ## Application behavior
 
@@ -47,5 +47,6 @@ Activate workflows 1, 13, and 14 after the Meta template is approved. Workflow 1
 - `Share feedback` asks for one free-text explanation, records it, and then opens the same 10-minute window.
 - Natural-language additions during that window are interpreted, recorded, and acknowledged without restarting the deadline.
 - After the window closes, acknowledgements do not create alerts; new feedback, questions, concerns, and requests are sent through the existing Human Handoff webhook without reopening the Quick Check-in.
+- The application waits for that critical handoff webhook and records its result before confirming delivery to the client; it never claims a failed or unconfigured handoff was accepted.
 - Unanswered quick check-ins expire after 48 hours without reminders.
 - Keep the existing workflow 09 reminder processor active; it also finalizes elapsed quick-check-in windows in the database. The application enforces the 10-minute deadline on inbound messages even between scheduler runs.

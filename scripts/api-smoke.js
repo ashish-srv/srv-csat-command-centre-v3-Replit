@@ -1692,6 +1692,8 @@ async function scenario(name, fn) {
   });
 
   await scenario("closed quick check-in routes substantive messages to human handoff", async () => {
+    const priorWebhook = process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+    const priorFetch = global.fetch;
     store._session = {
       ...store._session,
       status: "completed",
@@ -1704,18 +1706,94 @@ async function scenario(name, fn) {
       }
     };
     calls.automation.length = 0;
-    const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
-      text: "Can someone call me about a new concern?"
-    });
-    const payload = JSON.parse(res.body);
-    await new Promise((resolve) => setImmediate(resolve));
-    const event = calls.automation.find((item) => item.eventType === "post_completion_message");
-    assert.strictEqual(payload.state, "completed");
-    assert.strictEqual(payload.guardrail, "quick_checkin_post_completion");
-    assert.match(payload.whatsappReplyText, /passed your message to the SRV team/i);
-    assert.ok(event, JSON.stringify(calls.automation.map((item) => item.eventType)));
-    assert.strictEqual(event.payload.clientText, "Can someone call me about a new concern?");
-    assert.strictEqual(store._session.status, "completed", "closed quick check-in must not reopen");
+    process.env.N8N_HUMAN_HANDOFF_WEBHOOK = "https://n8n.example/webhook/csat-human-handoff";
+    global.fetch = async () => ({ ok: true, status: 200 });
+    try {
+      const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        text: "Can someone call me about a new concern?"
+      });
+      const payload = JSON.parse(res.body);
+      const event = calls.automation.find((item) => item.eventType === "post_completion_message");
+      assert.strictEqual(payload.state, "completed");
+      assert.strictEqual(payload.guardrail, "quick_checkin_post_completion");
+      assert.strictEqual(payload.handoffStatus, "sent");
+      assert.match(payload.whatsappReplyText, /passed your message to the SRV team/i);
+      assert.ok(event, JSON.stringify(calls.automation.map((item) => item.eventType)));
+      assert.strictEqual(event.status, "sent");
+      assert.strictEqual(event.statusCode, 200);
+      assert.strictEqual(event.payload.clientText, "Can someone call me about a new concern?");
+      assert.strictEqual(store._session.status, "completed", "closed quick check-in must not reopen");
+    } finally {
+      global.fetch = priorFetch;
+      if (priorWebhook === undefined) delete process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+      else process.env.N8N_HUMAN_HANDOFF_WEBHOOK = priorWebhook;
+    }
+  });
+
+  await scenario("closed quick check-in never claims an unconfigured handoff succeeded", async () => {
+    const priorWebhook = process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+    delete process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+    store._session = {
+      ...store._session,
+      status: "completed",
+      completionStatus: "completed",
+      sessionType: "quick_checkin",
+      conversationState: {
+        state: "completed",
+        quickCheckinOutcome: "all_good",
+        closureReason: "quick_checkin_window_elapsed"
+      }
+    };
+    calls.automation.length = 0;
+    try {
+      const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        text: "I have another concern to share"
+      });
+      const payload = JSON.parse(res.body);
+      const event = calls.automation.find((item) => item.eventType === "post_completion_message");
+      assert.strictEqual(payload.handoffStatus, "skipped");
+      assert.match(payload.whatsappReplyText, /could not pass this new message/i);
+      assert.ok(event, "a skipped handoff must still have an audit event");
+      assert.strictEqual(event.status, "skipped");
+      assert.strictEqual(event.webhookUrlConfigured, false);
+    } finally {
+      if (priorWebhook !== undefined) process.env.N8N_HUMAN_HANDOFF_WEBHOOK = priorWebhook;
+    }
+  });
+
+  await scenario("closed quick check-in reports a failed human-handoff workflow honestly", async () => {
+    const priorWebhook = process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+    const priorFetch = global.fetch;
+    process.env.N8N_HUMAN_HANDOFF_WEBHOOK = "https://n8n.example/webhook/csat-human-handoff";
+    global.fetch = async () => ({ ok: false, status: 500 });
+    store._session = {
+      ...store._session,
+      status: "completed",
+      completionStatus: "completed",
+      sessionType: "quick_checkin",
+      conversationState: {
+        state: "completed",
+        quickCheckinOutcome: "all_good",
+        closureReason: "quick_checkin_window_elapsed"
+      }
+    };
+    calls.automation.length = 0;
+    try {
+      const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        text: "Wrong creatives went live last time"
+      });
+      const payload = JSON.parse(res.body);
+      const event = calls.automation.find((item) => item.eventType === "post_completion_message");
+      assert.strictEqual(payload.handoffStatus, "failed");
+      assert.match(payload.whatsappReplyText, /could not pass this new message/i);
+      assert.ok(event, "a failed handoff must still have an audit event");
+      assert.strictEqual(event.status, "failed");
+      assert.strictEqual(event.statusCode, 500);
+    } finally {
+      global.fetch = priorFetch;
+      if (priorWebhook === undefined) delete process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+      else process.env.N8N_HUMAN_HANDOFF_WEBHOOK = priorWebhook;
+    }
   });
 
   await scenario("closed quick check-in acknowledgement does not alert a human", async () => {
