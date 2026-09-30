@@ -2478,6 +2478,45 @@ async function scenario(name, fn) {
     assert.strictEqual(JSON.parse(res.body).cycles.length, 1);
   });
 
+  await scenario("automatic project-end feedback can be disabled without blocking monthly or manual cycles", async () => {
+    const priorSetting = process.env.AUTO_PROJECT_END_FEEDBACK;
+    const originalTargets = store.getDueFeedbackTargets;
+    process.env.AUTO_PROJECT_END_FEEDBACK = "false";
+    store.getDueFeedbackTargets = async () => [
+      { projectKey: project.key, cycleType: "project_end" },
+      { projectKey: project.key, cycleType: "pulse" }
+    ];
+    calls.createdCycleRequests.length = 0;
+
+    try {
+      const due = await req("GET", "/api/automation/due-feedback");
+      assert.deepStrictEqual(
+        JSON.parse(due.body).targets.map((target) => target.cycleType),
+        ["pulse"]
+      );
+
+      const scheduled = await req("POST", "/api/automation/create-due-sessions", {});
+      assert.strictEqual(scheduled.statusCode, 201);
+      assert.deepStrictEqual(
+        calls.createdCycleRequests.map((item) => item.options.cycleType),
+        ["pulse"]
+      );
+
+      const manual = await req("POST", `/api/projects/${project.key}/request-feedback`, {
+        cycleType: "project_end"
+      });
+      assert.strictEqual(manual.statusCode, 201);
+      assert.deepStrictEqual(
+        calls.createdCycleRequests.map((item) => item.options.cycleType),
+        ["pulse", "project_end"]
+      );
+    } finally {
+      store.getDueFeedbackTargets = originalTargets;
+      if (priorSetting === undefined) delete process.env.AUTO_PROJECT_END_FEEDBACK;
+      else process.env.AUTO_PROJECT_END_FEEDBACK = priorSetting;
+    }
+  });
+
   await scenario("process-due-reminders skips opted-out sessions", async () => {
     store._session = { ...store._session, conversationState: { state: "opted_out", optedOut: true, mentionedServices: {} } };
     const res = await req("POST", "/api/automation/process-due-reminders", {});

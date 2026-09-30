@@ -9,6 +9,17 @@ const { importAdminWorkbook } = require("../lib/admin-import");
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_MANUAL_WHATSAPP_TEXT_LENGTH = 4096;
 
+function automaticProjectEndFeedbackEnabled() {
+  const configured = String(process.env.AUTO_PROJECT_END_FEEDBACK || "").trim().toLowerCase();
+  if (!configured) return true;
+  return !["0", "false", "no", "off"].includes(configured);
+}
+
+function automaticFeedbackTargets(targets = []) {
+  if (automaticProjectEndFeedbackEnabled()) return targets;
+  return targets.filter((target) => target.cycleType !== "project_end");
+}
+
 function requiredConversationAction(checklist, conversationState) {
   const pendingServiceKey = conversationState.pendingServiceKey;
   const pendingFirst = (items = []) => items.find((item) => item.serviceKey === pendingServiceKey) || items[0];
@@ -3510,12 +3521,13 @@ async function handleApiRequest(request) {
   // ---- Automation / scheduler
   if (method === "GET" && pathname === "/api/automation/due-feedback") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
-    return json(200, { targets: await store.getDueFeedbackTargets(searchParams.get("now") || undefined) });
+    const targets = await store.getDueFeedbackTargets(searchParams.get("now") || undefined);
+    return json(200, { targets: automaticFeedbackTargets(targets) });
   }
 
   if (method === "POST" && pathname === "/api/automation/create-due-sessions") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
-    const targets = await store.getDueFeedbackTargets(body.now);
+    const targets = automaticFeedbackTargets(await store.getDueFeedbackTargets(body.now));
     const cycles = [];
     const skipped = [];
 
