@@ -13,7 +13,7 @@ const EMPTY_SETUP_POC = {
   name: "", designation: "", contactWhatsapp: "", contactEmail: "",
   birthDate: "", salutation: "", honorific: "", levelId: "", weightPercentage: 100, active: true
 };
-const EMPTY_SETUP_SERVICE = { name: "", kpis: "", internalPocId: "" };
+const EMPTY_SETUP_SERVICE = { serviceCatalogId: "", name: "", kpis: "", internalPocId: "" };
 
 const EMPTY_CLIENT = { key: "", name: "", clusterId: "", activeStatus: "active" };
 const EMPTY_CLUSTER = { name: "" };
@@ -118,6 +118,35 @@ function Field({ label, children, hint }) {
   );
 }
 
+function ServiceCatalogForm({ value, onChange, onSave, onCancel, saving }) {
+  const isNew = !value.id;
+  return (
+    <div className="edit-form">
+      <div className="edit-form-head">
+        <strong>{isNew ? "Add a standard service" : `Edit ${value.name}`}</strong>
+        <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
+      </div>
+      <div className="form-grid">
+        <Field label="Service name" hint="this name is used consistently on every project">
+          <input value={value.name || ""} onChange={(event) => onChange({ ...value, name: event.target.value })} />
+        </Field>
+        {!isNew ? (
+          <Field label="Available for new projects">
+            <select value={value.active ? "yes" : "no"} onChange={(event) => onChange({ ...value, active: event.target.value === "yes" })}>
+              <option value="yes">Yes</option>
+              <option value="no">No — archived</option>
+            </select>
+          </Field>
+        ) : null}
+      </div>
+      <div className="button-row">
+        <Button onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving…" : isNew ? "Add service" : "Save service"}</Button>
+      </div>
+    </div>
+  );
+}
+
 function InternalPocForm({ value, clusters, departments, subDepartments, people, onChange, onSave, onCancel, saving }) {
   const isNew = !value.id;
   const subs = subDepartments.filter(
@@ -188,6 +217,7 @@ function serviceRowsForProject(services, projectId) {
     id: service.id,
     projectId: service.projectId,
     serviceKey: service.serviceKey,
+    serviceCatalogId: service.serviceCatalogId || "",
     name: service.name,
     kpis: service.kpis || "",
     internalPocId: service.internalPocId || ""
@@ -553,7 +583,7 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
   );
 }
 
-function ServiceBatchForm({ value, projects, services, people, onChange, onSave, onCancel, saving }) {
+function ServiceBatchForm({ value, projects, services, serviceCatalog, people, onChange, onSave, onCancel, saving }) {
   const rows = value.rows || [];
   function updateRow(index, patch) {
     onChange({ ...value, rows: rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row) });
@@ -580,12 +610,25 @@ function ServiceBatchForm({ value, projects, services, people, onChange, onSave,
       </div>
       <div className="batch-editor">
         {rows.map((row, index) => {
-          const generatedKey = row.id ? row.serviceKey : serviceIdentifier(row.name);
+          const selectedCatalog = serviceCatalog.find((item) => item.id === row.serviceCatalogId);
+          const generatedKey = selectedCatalog?.serviceKey || row.serviceKey || "";
           return (
             <div className="batch-editor-row" key={row.id || `new-service-${index}`}>
               <div className="form-grid">
-                <Field label={`Service ${index + 1} name`}>
-                  <input value={row.name || ""} onChange={(event) => updateRow(index, { name: event.target.value })} />
+                <Field label={`Service ${index + 1}`}>
+                  <select value={row.serviceCatalogId || ""} onChange={(event) => {
+                    const selected = serviceCatalog.find((item) => item.id === event.target.value);
+                    updateRow(index, {
+                      serviceCatalogId: event.target.value,
+                      name: selected?.name || "",
+                      serviceKey: selected?.serviceKey || ""
+                    });
+                  }}>
+                    <option value="">Select from service catalogue</option>
+                    {serviceCatalog.filter((item) => item.active || item.id === row.serviceCatalogId).map((item) => (
+                      <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
+                    ))}
+                  </select>
                 </Field>
                 <Field label="Generated service key" hint="automatic and not editable">
                   <input value={generatedKey} readOnly placeholder="generated_automatically" />
@@ -749,7 +792,7 @@ function ProjectForm({ value, clients, onChange, onSave, onCancel, saving }) {
   );
 }
 
-function ProjectSetupForm({ value, clients, levels, people, onChange, onSave, onCancel, saving }) {
+function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copySource, onClientChange, onChange, onSave, onCancel, saving }) {
   const pocs = value.pocs || [];
   const services = value.services || [];
   const activePocWeightTotal = Math.round(pocs.reduce(
@@ -766,6 +809,39 @@ function ProjectSetupForm({ value, clients, levels, people, onChange, onSave, on
     services: services.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row)
   });
 
+  function copyProject(projectId) {
+    if (!projectId) {
+      onChange({ ...value, copyProjectId: "" });
+      return;
+    }
+    const sourcePocs = (copySource?.pocs || []).filter((poc) => poc.projectId === projectId && poc.active !== false);
+    const sourceServices = (copySource?.services || []).filter((service) => service.projectId === projectId);
+    onChange({
+      ...value,
+      copyProjectId: projectId,
+      pocs: sourcePocs.map((poc) => ({
+        ...EMPTY_SETUP_POC,
+        name: poc.name || "",
+        designation: poc.designation || "",
+        contactWhatsapp: poc.contactWhatsapp || "",
+        contactEmail: poc.contactEmail || "",
+        birthDate: poc.birthDate || "",
+        salutation: poc.salutation || "",
+        honorific: poc.honorific || "",
+        levelId: poc.levelId || "",
+        weightPercentage: poc.weightPercentage ?? 0,
+        active: true
+      })),
+      services: sourceServices.map((service) => ({
+        ...EMPTY_SETUP_SERVICE,
+        serviceCatalogId: service.serviceCatalogId || "",
+        name: service.name || "",
+        kpis: service.kpis || "",
+        internalPocId: service.internalPocId || ""
+      }))
+    });
+  }
+
   return (
     <div className="edit-form complete-project-setup">
       <div className="edit-form-head">
@@ -779,12 +855,30 @@ function ProjectSetupForm({ value, clients, levels, people, onChange, onSave, on
       <h4>1. Project</h4>
       <div className="form-grid">
         <Field label="Client">
-          <select value={value.project.clientId || ""} onChange={(event) => updateProject({ clientId: event.target.value })}>
+          <select value={value.project.clientId || ""} onChange={(event) => {
+            const nextClientId = event.target.value;
+            onChange({
+              ...value,
+              project: { ...value.project, clientId: nextClientId },
+              copyProjectId: "",
+              pocs: [{ ...EMPTY_SETUP_POC, levelId: levels[0]?.id || "" }],
+              services: [{ ...EMPTY_SETUP_SERVICE }]
+            });
+            onClientChange(nextClientId);
+          }}>
             <option value="">Select client</option>
             {clients.map((client) => (
               <option key={client.id} value={client.id}>
                 {client.name}{client.activeStatus && client.activeStatus !== "active" ? ` - ${client.activeStatus}` : ""}
               </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Copy from an existing project" hint="copies POCs, services, owners and KPIs only; history and schedules are never copied">
+          <select value={value.copyProjectId || ""} disabled={!value.project.clientId} onChange={(event) => copyProject(event.target.value)}>
+            <option value="">Start with a blank project</option>
+            {(copySource?.projects || []).map((project) => (
+              <option key={project.id} value={project.id}>{project.name}</option>
             ))}
           </select>
         </Field>
@@ -871,7 +965,17 @@ function ProjectSetupForm({ value, clients, levels, people, onChange, onSave, on
         {services.map((service, index) => (
           <div className="batch-editor-row" key={`setup-service-${index}`}>
             <div className="form-grid">
-              <Field label={`Service ${index + 1} name`}><input value={service.name} onChange={(event) => updateService(index, { name: event.target.value })} /></Field>
+              <Field label={`Service ${index + 1}`}>
+                <select value={service.serviceCatalogId || ""} onChange={(event) => {
+                  const selected = serviceCatalog.find((item) => item.id === event.target.value);
+                  updateService(index, { serviceCatalogId: event.target.value, name: selected?.name || "" });
+                }}>
+                  <option value="">Select from service catalogue</option>
+                  {serviceCatalog.filter((item) => item.active || item.id === service.serviceCatalogId).map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
+                  ))}
+                </select>
+              </Field>
               <Field label="Generated key" hint="automatic and not editable">
                 <input value={serviceIdentifier(service.name)} readOnly placeholder="generated_automatically" />
               </Field>
@@ -916,7 +1020,9 @@ export default function Manage({ onReload }) {
   const [clientBatch, setClientBatch] = useState(null);
   const [pocBatch, setPocBatch] = useState(null);
   const [serviceBatch, setServiceBatch] = useState(null);
+  const [serviceCatalogForm, setServiceCatalogForm] = useState(null);
   const [setupForm, setSetupForm] = useState(null);
+  const [setupCopySource, setSetupCopySource] = useState(null);
   const [importing, setImporting] = useState(false);
   const [importErrors, setImportErrors] = useState([]);
   const [cleanupProjectId, setCleanupProjectId] = useState("");
@@ -943,7 +1049,9 @@ export default function Manage({ onReload }) {
     setClientBatch(null);
     setPocBatch(null);
     setServiceBatch(null);
+    setServiceCatalogForm(null);
     setSetupForm(null);
+    setSetupCopySource(null);
   }
 
   function showToast(message) {
@@ -957,7 +1065,7 @@ export default function Manage({ onReload }) {
     try {
       const data = await apiGet("/api/admin/directory");
       setDirectory(data);
-      const target = keepClient || (data.clients || [])[0]?.id || "";
+      const target = keepClient || "";
       setClientId(target);
       const clientDetail = target ? await apiGet(`/api/admin/clients/${encodeURIComponent(target)}`) : null;
       setDetail(clientDetail);
@@ -1010,9 +1118,9 @@ export default function Manage({ onReload }) {
   }, [unlocked, cleanupProjectId, detail]);
 
   useEffect(() => {
-    if (!projectForm && !clientForm && !clusterForm && !internalForm && !internalBatch && !clientBatch && !pocBatch && !serviceBatch && !setupForm) return;
+    if (!projectForm && !clientForm && !clusterForm && !internalForm && !internalBatch && !clientBatch && !pocBatch && !serviceBatch && !serviceCatalogForm && !setupForm) return;
     window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
-  }, [Boolean(projectForm), Boolean(clientForm), Boolean(clusterForm), Boolean(internalForm), Boolean(internalBatch), Boolean(clientBatch), Boolean(pocBatch), Boolean(serviceBatch), Boolean(setupForm)]);
+  }, [Boolean(projectForm), Boolean(clientForm), Boolean(clusterForm), Boolean(internalForm), Boolean(internalBatch), Boolean(clientBatch), Boolean(pocBatch), Boolean(serviceBatch), Boolean(serviceCatalogForm), Boolean(setupForm)]);
 
   async function selectClient(id) {
     setClientId(id);
@@ -1022,6 +1130,23 @@ export default function Manage({ onReload }) {
     setSelectedDeletePocIds([]);
     setSelectedDeleteProjectIds([]);
     setCleanupProjectId(clientDetail?.projects?.[0]?.id || "");
+  }
+
+  async function loadSetupCopySource(id) {
+    if (!id) {
+      setSetupCopySource(null);
+      return;
+    }
+    if (detail?.client?.id === id) {
+      setSetupCopySource(detail);
+      return;
+    }
+    try {
+      setSetupCopySource(await apiGet(`/api/admin/clients/${encodeURIComponent(id)}`));
+    } catch (copyError) {
+      setSetupCopySource(null);
+      showToast(copyError.message);
+    }
   }
 
   function issuesForCleanupCycles(cycleIds) {
@@ -1217,6 +1342,51 @@ export default function Manage({ onReload }) {
     }
   }
 
+  async function saveServiceCatalog() {
+    const name = String(serviceCatalogForm?.name || "").trim();
+    if (!name) {
+      showToast("Enter a service name.");
+      return;
+    }
+    setSaving(true);
+    try {
+      if (serviceCatalogForm.id) {
+        await apiWrite(`/api/admin/service-catalog/${encodeURIComponent(serviceCatalogForm.id)}`, {
+          name,
+          active: serviceCatalogForm.active
+        }, "PATCH");
+        showToast("Standard service updated across its projects.");
+      } else {
+        await apiWrite("/api/admin/service-catalog", { name, active: true }, "POST");
+        showToast("Standard service added.");
+      }
+      setServiceCatalogForm(null);
+      await loadAll(clientId);
+      onReload();
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeServiceCatalog(item) {
+    if (!window.confirm(`Remove ${item.name} from the service catalogue?\n\nIf a project already uses it, the service will be archived instead so historical records remain valid.`)) return;
+    setSaving(true);
+    try {
+      const result = await apiWrite(`/api/admin/service-catalog/${encodeURIComponent(item.id)}`, {}, "DELETE");
+      showToast(result.action === "archived"
+        ? `${item.name} is archived because existing projects use it.`
+        : `${item.name} was deleted from the catalogue.`);
+      await loadAll(clientId);
+      onReload();
+    } catch (removeError) {
+      showToast(removeError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function saveClient() {
     setSaving(true);
     try {
@@ -1285,7 +1455,7 @@ export default function Manage({ onReload }) {
     const allClients = directory?.clients || [];
     const available = id ? allClients.filter((client) => client.clusterId === id) : allClients;
     const currentStillAvailable = available.some((client) => client.id === clientId);
-    await selectClient(currentStillAvailable ? clientId : (available[0]?.id || ""));
+    await selectClient(currentStillAvailable ? clientId : "");
   }
 
   async function saveClientBatch() {
@@ -1458,6 +1628,7 @@ export default function Manage({ onReload }) {
     ? clients.filter((client) => client.clusterId === clusterFilterId)
     : clients;
   const levels = directory?.pocLevels || [];
+  const serviceCatalog = directory?.serviceCatalog || [];
   const normalLevel = levels.find((level) =>
     String(level.name || "").toLowerCase() === "normal"
   ) || levels[0] || null;
@@ -1514,7 +1685,7 @@ export default function Manage({ onReload }) {
           label="Client"
           value={clientId}
           onChange={selectClient}
-          placeholder="Select a client"
+          placeholder="All clients"
           options={filteredClients.map((client) => ({ value: client.id, label: client.name }))}
         />
       </div>
@@ -1735,6 +1906,52 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        title="Service catalogue"
+        badge={`${serviceCatalog.filter((item) => item.active).length} active · ${serviceCatalog.length} total`}
+        className="span-12"
+        action={<Button icon={Plus} onClick={() => { closeForms(); setServiceCatalogForm({ name: "", active: true }); }}>Add standard service</Button>}
+      >
+        <p className="form-note">
+          Projects select services from this controlled list. Renaming a service updates its name on every linked project. Services already used in history are archived instead of being deleted.
+        </p>
+        {serviceCatalogForm ? (
+          <div ref={formRef}>
+            <ServiceCatalogForm
+              value={serviceCatalogForm}
+              onChange={setServiceCatalogForm}
+              onSave={saveServiceCatalog}
+              onCancel={() => setServiceCatalogForm(null)}
+              saving={saving}
+            />
+          </div>
+        ) : null}
+        <div className="dtable manage-service-catalog">
+          <div className="dtable-head">
+            <span>Standard service</span>
+            <span>Service key</span>
+            <span>Status</span>
+            <span />
+          </div>
+          {serviceCatalog.map((item) => (
+            <div className="dtable-row" key={item.id}>
+              <strong>{item.name}</strong>
+              <span className="mono">{item.serviceKey}</span>
+              <span className={item.active ? "" : "missing"}>{item.active ? "Active" : "Archived"}</span>
+              <span className="button-row">
+                <button type="button" className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => {
+                  closeForms();
+                  setServiceCatalogForm({ ...item });
+                }}><Pencil size={14} aria-hidden="true" /></button>
+                <button type="button" className="icon-button danger" aria-label={`Delete or archive ${item.name}`} disabled={saving}
+                  onClick={() => removeServiceCatalog(item)}><Trash2 size={14} aria-hidden="true" /></button>
+              </span>
+            </div>
+          ))}
+          {!serviceCatalog.length ? <EmptyState title="No standard services" text="Add the services that projects can use." /> : null}
+        </div>
+      </Panel>
+
+      <Panel
         title="Projects"
         badge={`${projects.length} total`}
         className="span-12"
@@ -1748,9 +1965,11 @@ export default function Manage({ onReload }) {
                 closeForms();
                 setSetupForm({
                   project: { ...EMPTY_PROJECT, clientId },
+                  copyProjectId: "",
                   pocs: [{ ...EMPTY_SETUP_POC, levelId: normalLevel?.id || "" }],
                   services: [{ ...EMPTY_SETUP_SERVICE }]
                 });
+                loadSetupCopySource(clientId);
               }}
             >
               Add complete project
@@ -1772,6 +1991,9 @@ export default function Manage({ onReload }) {
               clients={clients}
               levels={levels}
               people={people}
+              serviceCatalog={serviceCatalog}
+              copySource={setupCopySource}
+              onClientChange={loadSetupCopySource}
               saving={saving}
               onChange={setSetupForm}
               onSave={saveCompleteProject}
@@ -1940,6 +2162,7 @@ export default function Manage({ onReload }) {
               value={serviceBatch}
               projects={projects}
               services={services}
+              serviceCatalog={serviceCatalog}
               people={people}
               saving={saving}
               onChange={setServiceBatch}

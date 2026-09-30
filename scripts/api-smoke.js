@@ -2305,7 +2305,7 @@ async function scenario(name, fn) {
       }
     ];
     dashboardStore.request = async (table, options = {}) => {
-      if (["clusters", "clients", "issues"].includes(table)) return [];
+      if (["clusters", "clients", "issues", "client_pocs", "automation_events"].includes(table)) return [];
       if (table === "feedback_cycles") return [cycleRow];
       if (table === "feedback_sessions") return sessionRows;
       if (table === "messages") {

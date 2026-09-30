@@ -16,6 +16,27 @@ const RESPONSE_LABELS = {
   stopped: "Stopped"
 };
 
+const SCHEDULE_STATUS_LABELS = {
+  upcoming: "Upcoming",
+  upcoming_manual: "Upcoming · manual send",
+  due: "Due now",
+  manual_required: "Manual send required",
+  blocked: "Blocked / skipped",
+  open: "Cycle open",
+  requested: "Already requested"
+};
+
+function scheduleStatusLabel(value) {
+  return SCHEDULE_STATUS_LABELS[value] || value || "Unknown";
+}
+
+function scheduleStatusTone(value) {
+  if (["blocked", "manual_required"].includes(value)) return "weak";
+  if (["due", "upcoming_manual"].includes(value)) return "watch";
+  if (["open", "requested"].includes(value)) return "strong";
+  return "neutral";
+}
+
 function responseLabel(value) {
   return RESPONSE_LABELS[value] || "Awaiting First Reply";
 }
@@ -113,6 +134,8 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
   const [expanded, setExpanded] = useState({});
   const [visibleRows, setVisibleRows] = useState(ROW_STEP);
   const [responseFilter, setResponseFilter] = useState("all");
+  const [scheduleTypes, setScheduleTypes] = useState([]);
+  const [scheduleStatuses, setScheduleStatuses] = useState([]);
 
   const allProjects = dashboard?.projects || [];
   const allCycles = dashboard?.cycles || [];
@@ -204,6 +227,18 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
       startedAt: session.cycleStartedAt || session.startedAt,
       closedAt: session.cycleClosedAt || session.closedAt
     }, range));
+  const feedbackSchedule = (dashboard.feedbackSchedule || [])
+    .filter((item) => visibleIds.has(item.projectId))
+    .filter((item) => !scheduleTypes.length || scheduleTypes.includes(item.cycleType))
+    .filter((item) => !scheduleStatuses.length || scheduleStatuses.includes(item.status));
+  const recentScheduleSkips = (dashboard.scheduleEvents || [])
+    .map((event) => ({
+      ...event,
+      project: allProjects.find((project) => project.key === event.projectKey) || null
+    }))
+    .filter((event) => event.project && visibleIds.has(event.project.id))
+    .filter((event) => !scheduleTypes.length || scheduleTypes.includes(event.cycleType))
+    .slice(0, 20);
   const responseCounts = responseTracker.reduce((counts, session) => {
     const key = session.responseStatus || (
       session.completionStatus === "completed" ? "completed"
@@ -430,6 +465,67 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
           <button type="button" className="show-more" onClick={() => setVisibleRows((value) => value + ROW_STEP)}>
             Show {Math.min(ROW_STEP, visibleProjects.length - rows.length)} more
           </button>
+        ) : null}
+      </Panel>
+
+      <Panel
+        title="Feedback schedule & delivery"
+        badge={`${feedbackSchedule.length} scheduled · ${recentScheduleSkips.length} recent skips`}
+        className="span-12"
+      >
+        <div className="schedule-filter-row">
+          <MultiSelect
+            label="Feedback cycle"
+            allLabel="All cycle types"
+            selected={scheduleTypes}
+            onChange={setScheduleTypes}
+            options={["pulse", "project_end"]}
+            renderOption={(value) => formatCycleType(value)}
+          />
+          <MultiSelect
+            label="Delivery status"
+            allLabel="All delivery statuses"
+            selected={scheduleStatuses}
+            onChange={setScheduleStatuses}
+            options={[...new Set((dashboard.feedbackSchedule || []).map((item) => item.status))]}
+            renderOption={scheduleStatusLabel}
+          />
+        </div>
+        <div className="schedule-table" role="region" aria-label="Upcoming feedback schedule" tabIndex={0}>
+          <div className="schedule-table-head">
+            <span>Client & project</span>
+            <span>Feedback cycle</span>
+            <span>Due date</span>
+            <span>POCs</span>
+            <span>Delivery status</span>
+            <span />
+          </div>
+          {feedbackSchedule.map((item) => (
+            <div className={`schedule-table-row ${scheduleStatusTone(item.status)}`} key={item.id}>
+              <span><strong>{item.projectName}</strong><small>{item.clientName || "No client"} · {item.clusterName || "No cluster"}</small></span>
+              <span>{formatCycleType(item.cycleType)}</span>
+              <span>{formatDate(item.dueAt)}</span>
+              <span>{item.activePocCount} active</span>
+              <span>
+                <StatusPill value={scheduleStatusLabel(item.status)} tone={scheduleStatusTone(item.status)} />
+                {item.blockedReason ? <small title={item.blockedReason}>{item.blockedReason}</small> : null}
+              </span>
+              <button type="button" className="row-link" onClick={() => onOpenProject(item.projectKey)}>Open</button>
+            </div>
+          ))}
+          {!feedbackSchedule.length ? <EmptyState title="No scheduled feedback matches" text="Adjust the dashboard or schedule filters." /> : null}
+        </div>
+
+        {recentScheduleSkips.length ? (
+          <div className="schedule-skip-history">
+            <h4>Recent skipped attempts</h4>
+            {recentScheduleSkips.map((event) => (
+              <button type="button" key={event.id} onClick={() => onOpenProject(event.projectKey)}>
+                <span><strong>{event.project?.name || event.projectKey}</strong><small>{formatCycleType(event.cycleType)} · {formatDateTime(event.attemptedAt)}</small></span>
+                <span>{event.reason || "The scheduler could not start this cycle."}</span>
+              </button>
+            ))}
+          </div>
         ) : null}
       </Panel>
 

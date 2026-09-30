@@ -2968,7 +2968,59 @@ async function handleApiRequest(request) {
         clientName: owner ? owner.clientName : null
       };
     });
-    return json(200, { ...dashboard, openIssues, openCycles, cycles });
+    const nowMs = Date.now();
+    const openCycleKeys = new Set(openCycles.map((cycle) => `${cycle.projectId}|${cycle.cycleType}`));
+    const latestSkippedByProjectType = new Map();
+    for (const event of dashboard.scheduleEvents || []) {
+      const key = `${event.projectKey}|${event.cycleType}`;
+      if (!latestSkippedByProjectType.has(key)) latestSkippedByProjectType.set(key, event);
+    }
+    const feedbackSchedule = [];
+    for (const project of dashboard.projects || []) {
+      if (project.activeStatus !== "active") continue;
+      const activePocCount = Number(dashboard.projectPocCounts?.[project.id]) || 0;
+      const addScheduleRow = (cycleType, dueAt, baseStatus) => {
+        if (!dueAt) return;
+        const open = openCycleKeys.has(`${project.id}|${cycleType}`);
+        const skipped = latestSkippedByProjectType.get(`${project.key}|${cycleType}`) || null;
+        const lastStarted = Date.parse(project.lastCycleStartedAt || "");
+        const skipStillRelevant = skipped && (!Number.isFinite(lastStarted) || Date.parse(skipped.attemptedAt || "") > lastStarted);
+        feedbackSchedule.push({
+          id: `${project.id}-${cycleType}`,
+          projectId: project.id,
+          projectKey: project.key,
+          projectName: project.name,
+          clientName: project.clientName,
+          clusterName: project.clusterName,
+          cycleType,
+          dueAt,
+          activePocCount,
+          status: open ? "open" : skipStillRelevant ? "blocked" : baseStatus,
+          blockedReason: skipStillRelevant ? skipped.reason : null,
+          attemptedAt: skipStillRelevant ? skipped.attemptedAt : null
+        });
+      };
+
+      if (project.endDate) {
+        const due = new Date(project.endDate).getTime() <= nowMs;
+        const status = project.endFeedbackRequestedAt
+          ? "requested"
+          : automaticProjectEndFeedbackEnabled()
+            ? due ? "due" : "upcoming"
+            : due ? "manual_required" : "upcoming_manual";
+        addScheduleRow("project_end", project.endDate, status);
+      }
+      const ended = project.endDate && new Date(project.endDate).getTime() <= nowMs;
+      if (project.nextCycleDueAt && !ended) {
+        addScheduleRow(
+          "pulse",
+          project.nextCycleDueAt,
+          new Date(project.nextCycleDueAt).getTime() <= nowMs ? "due" : "upcoming"
+        );
+      }
+    }
+    feedbackSchedule.sort((left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime());
+    return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule });
   }
 
   if (method === "GET" && pathname === "/api/projects") {
@@ -3542,7 +3594,20 @@ async function handleApiRequest(request) {
         }));
       } catch (cycleError) {
         // A project with no reachable POC must not abort the whole run.
-        skipped.push({ projectKey: target.projectKey, cycleType: target.cycleType, reason: cycleError.message });
+        const skippedTarget = { projectKey: target.projectKey, cycleType: target.cycleType, reason: cycleError.message };
+        skipped.push(skippedTarget);
+        if (typeof store.recordAutomationEvent === "function") {
+          try {
+            await store.recordAutomationEvent({
+              eventType: "cycle_start_skipped",
+              status: "skipped",
+              payload: skippedTarget,
+              error: cycleError.message
+            });
+          } catch (auditError) {
+            console.error("[automation] could not save skipped cycle audit:", auditError.message);
+          }
+        }
       }
     }
 
@@ -3568,7 +3633,20 @@ async function handleApiRequest(request) {
           reason: "scheduled_11th_or_21st"
         }));
       } catch (cycleError) {
-        skipped.push({ projectKey: target.projectKey, reason: cycleError.message });
+        const skippedTarget = { projectKey: target.projectKey, cycleType: "quick_checkin", reason: cycleError.message };
+        skipped.push(skippedTarget);
+        if (typeof store.recordAutomationEvent === "function") {
+          try {
+            await store.recordAutomationEvent({
+              eventType: "quick_checkin_start_skipped",
+              status: "skipped",
+              payload: skippedTarget,
+              error: cycleError.message
+            });
+          } catch (auditError) {
+            console.error("[automation] could not save skipped quick check-in audit:", auditError.message);
+          }
+        }
       }
     }
 
@@ -3883,6 +3961,41 @@ async function handleApiRequest(request) {
     return json(201, { service: await store.createProjectService({ ...body, serviceKey: generatedKey }) });
   }
 
+  if (method === "POST" && pathname === "/api/admin/service-catalog") {
+    const name = String(body.name || "").trim();
+    if (!name) return error(400, "Service name is required");
+    const serviceKey = serviceIdentifier(name);
+    if (await store.serviceCatalogConflict(name, serviceKey)) {
+      return error(409, "That service already exists in the catalogue", name);
+    }
+    return json(201, {
+      service: await store.createServiceCatalogItem({ name, serviceKey, active: body.active !== false })
+    });
+  }
+
+  const serviceCatalogMatch = pathname.match(/^\/api\/admin\/service-catalog\/([^/]+)$/);
+  if (method === "PATCH" && serviceCatalogMatch) {
+    const serviceCatalogId = decodeURIComponent(serviceCatalogMatch[1]);
+    const current = await store.getServiceCatalogItem(serviceCatalogId);
+    if (!current) return error(404, "Catalogue service not found");
+    const name = body.name === undefined ? current.name : String(body.name || "").trim();
+    if (!name) return error(400, "Service name is required");
+    if (await store.serviceCatalogConflict(name, current.serviceKey, serviceCatalogId)) {
+      return error(409, "That service name is already used", name);
+    }
+    const service = await store.updateServiceCatalogItem(serviceCatalogId, {
+      name,
+      active: body.active === undefined ? current.active : body.active
+    });
+    return json(200, { service });
+  }
+
+  if (method === "DELETE" && serviceCatalogMatch) {
+    const result = await store.deleteOrArchiveServiceCatalogItem(decodeURIComponent(serviceCatalogMatch[1]));
+    if (result.action === "deleted" && !result.deleted) return error(404, "Catalogue service not found");
+    return json(200, result);
+  }
+
   const serviceUpdateMatch = pathname.match(/^\/api\/admin\/services\/([^/]+)$/);
   if (method === "PATCH" && serviceUpdateMatch) {
     const serviceId = decodeURIComponent(serviceUpdateMatch[1]);
@@ -4016,12 +4129,18 @@ async function handleApiRequest(request) {
     const preparedServices = [];
     for (let index = 0; index < services.length; index += 1) {
       const row = services[index] || {};
-      const name = String(row.name || "").trim();
+      const catalog = typeof store.getServiceCatalogItem === "function"
+        ? await store.getServiceCatalogItem(String(row.serviceCatalogId || "").trim())
+        : null;
+      if (typeof store.getServiceCatalogItem === "function" && (!catalog || !catalog.active)) {
+        return error(400, `Service ${index + 1}: select an active service from the catalogue`);
+      }
+      const name = catalog ? catalog.name : String(row.name || "").trim();
       if (!name) return error(400, `Service ${index + 1}: name is required`);
-      const serviceKey = serviceIdentifier(name);
+      const serviceKey = catalog ? catalog.serviceKey : serviceIdentifier(name);
       if (seenServiceKeys.has(serviceKey)) return error(400, `Service ${index + 1}: ${name} duplicates another service`);
       seenServiceKeys.add(serviceKey);
-      preparedServices.push({ ...row, name, serviceKey });
+      preparedServices.push({ ...row, name, serviceKey, serviceCatalogId: catalog?.id || null });
     }
 
     // Create the project paused so a scheduler cannot pick it up between the
@@ -4136,15 +4255,23 @@ async function handleApiRequest(request) {
     const prepared = [];
     for (let index = 0; index < requested.length; index += 1) {
       const row = requested[index] || {};
-      const name = String(row.name || "").trim();
+      const existing = row.id ? currentById.get(row.id) : null;
+      const requestedCatalogId = row.serviceCatalogId || existing?.serviceCatalogId || "";
+      const catalog = typeof store.getServiceCatalogItem === "function"
+        ? await store.getServiceCatalogItem(String(requestedCatalogId).trim())
+        : null;
+      if (typeof store.getServiceCatalogItem === "function" && (!catalog || !catalog.active)) {
+        return error(400, `Service ${index + 1}: select an active service from the catalogue`);
+      }
+      const name = catalog ? catalog.name : String(row.name || "").trim();
       if (!name) return error(400, `Service ${index + 1}: name is required`);
       if (row.id && !currentById.has(row.id)) return error(400, `Service ${index + 1} does not belong to this project`);
       if (row.id && seenIds.has(row.id)) return error(400, `Service ${index + 1} was included twice`);
-      const serviceKey = row.id ? currentById.get(row.id).serviceKey : serviceIdentifier(name);
+      const serviceKey = catalog ? catalog.serviceKey : row.id ? currentById.get(row.id).serviceKey : serviceIdentifier(name);
       if (seenKeys.has(serviceKey)) return error(400, `Service ${index + 1}: ${name} duplicates another service`);
       if (row.id) seenIds.add(row.id);
       seenKeys.add(serviceKey);
-      prepared.push({ ...row, name, serviceKey, projectId });
+      prepared.push({ ...row, name, serviceKey, serviceCatalogId: catalog?.id || null, projectId });
     }
 
     const removed = current.filter((service) => !seenIds.has(service.id));
@@ -4156,7 +4283,8 @@ async function handleApiRequest(request) {
           projectId,
           name: service.name,
           kpis: service.kpis,
-          internalPocId: service.internalPocId
+          internalPocId: service.internalPocId,
+          serviceCatalogId: service.serviceCatalogId
         }));
       } else {
         saved.push(await store.createProjectService(service));

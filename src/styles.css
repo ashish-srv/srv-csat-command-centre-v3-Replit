@@ -1455,6 +1455,47 @@ button.metric-card {
   box-shadow: var(--shadow);
 }
 
+.filter-search {
+  position: sticky;
+  top: -6px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -6px -6px 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.filter-search input {
+  min-width: 0;
+  width: 150px;
+  padding: 4px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.filter-search button {
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.filter-empty {
+  display: block;
+  padding: 10px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .filter-option {
   display: flex;
   align-items: center;
@@ -2875,10 +2916,78 @@ button.metric-card {
   grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.4fr) minmax(0, 0.9fr) minmax(0, 1.2fr) minmax(0, 1.2fr) 44px;
 }
 
+.dtable.manage-service-catalog .dtable-head,
+.dtable.manage-service-catalog .dtable-row {
+  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.4fr) 110px 90px;
+}
+
 .dtable.manage-internal .dtable-head,
 .dtable.manage-internal .dtable-row {
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.6fr) minmax(0, 1.2fr) minmax(0, 1.2fr) 64px 44px;
 }
+
+.schedule-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.schedule-table {
+  overflow-x: auto;
+  border: 1px solid var(--soft-line);
+  border-radius: 10px;
+}
+
+.schedule-table-head,
+.schedule-table-row {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.7fr) minmax(130px, 1fr) 110px 80px minmax(230px, 1.6fr) 56px;
+  align-items: center;
+  gap: 10px;
+  min-width: 900px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--soft-line);
+}
+
+.schedule-table-head {
+  background: var(--soft-line);
+  color: var(--label);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.schedule-table-row:last-child { border-bottom: 0; }
+.schedule-table-row > span { min-width: 0; font-size: 13px; }
+.schedule-table-row > span:first-child,
+.schedule-table-row > span:nth-child(5) { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.schedule-table-row small { display: block; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+.schedule-skip-history {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--soft-line);
+}
+
+.schedule-skip-history h4 { margin: 0 0 8px; color: var(--header); font-size: 13px; }
+.schedule-skip-history button {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(280px, 1.6fr);
+  gap: 12px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.schedule-skip-history button:hover { background: var(--red-soft); }
+.schedule-skip-history button span { display: flex; flex-direction: column; gap: 2px; }
+.schedule-skip-history small { color: var(--muted); font-size: 11px; }
 
 /* =====================================================================
    Dashboard open cycles / open issues: stack instead of overflowing

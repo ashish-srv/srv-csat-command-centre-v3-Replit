@@ -147,6 +147,16 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     return params.get("project") || params.get("client") || allProjects[0]?.key || "";
   }, [allProjects, locationTick]);
 
+  // A selected project has one client and one cluster. Keep those filters in
+  // sync so the bar never says "All clients" while showing a single project's
+  // workspace. Users can still clear or change them to navigate elsewhere.
+  useEffect(() => {
+    const project = allProjects.find((item) => item.key === projectKey);
+    if (!project) return;
+    setClusters(project.clusterName ? [project.clusterName] : []);
+    setClients(project.clientName ? [project.clientName] : []);
+  }, [allProjects, projectKey]);
+
   // Cluster and client narrow which projects are selectable.
   const selectableProjects = useMemo(() => allProjects.filter((project) => {
     if (clusters.length && !clusters.includes(project.clusterName)) return false;

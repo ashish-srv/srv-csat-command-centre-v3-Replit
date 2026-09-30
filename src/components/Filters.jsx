@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Calendar, Check, ChevronDown, X } from "lucide-react";
+import { Calendar, Check, ChevronDown, Search, X } from "lucide-react";
 
 function useOutsideClose(onClose) {
   const ref = useRef(null);
@@ -24,13 +24,18 @@ function useOutsideClose(onClose) {
  */
 export function MultiSelect({ label, options, selected, onChange, allLabel = "All", renderOption }) {
   const [open, setOpen] = useState(false);
-  const ref = useOutsideClose(() => setOpen(false));
+  const [query, setQuery] = useState("");
+  const ref = useOutsideClose(() => { setOpen(false); setQuery(""); });
 
   function toggle(value) {
     onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
   }
 
   const show = (value) => (renderOption ? renderOption(value) : value);
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleOptions = normalizedQuery
+    ? options.filter((option) => String(show(option) || "").toLowerCase().includes(normalizedQuery))
+    : options;
   const summary = !selected.length
     ? allLabel
     : selected.length === 1
@@ -43,7 +48,10 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
       <button
         type="button"
         className={`filter-trigger ${selected.length ? "active" : ""}`}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen((value) => {
+          if (value) setQuery("");
+          return !value;
+        })}
         aria-expanded={open}
       >
         <span>{summary}</span>
@@ -51,12 +59,27 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
       </button>
       {open ? (
         <div className="filter-menu" role="listbox">
+          <label className="filter-search">
+            <Search size={14} aria-hidden="true" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={`Search ${String(label || "options").toLowerCase()}`}
+              aria-label={`Search ${label}`}
+              autoFocus
+            />
+            {query ? (
+              <button type="button" onClick={() => setQuery("")} aria-label="Clear search">
+                <X size={12} aria-hidden="true" />
+              </button>
+            ) : null}
+          </label>
           {selected.length ? (
             <button type="button" className="filter-clear" onClick={() => onChange([])}>
               <X size={12} aria-hidden="true" /> Clear
             </button>
           ) : null}
-          {options.map((option) => (
+          {visibleOptions.map((option) => (
             <button
               key={option}
               type="button"
@@ -69,7 +92,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
               <span>{show(option)}</span>
             </button>
           ))}
-          {!options.length ? <span className="filter-empty">Nothing to filter</span> : null}
+          {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
         </div>
       ) : null}
     </div>
@@ -77,15 +100,81 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
 }
 
 export function SingleSelect({ label, options, value, onChange, placeholder = "Select" }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useOutsideClose(() => { setOpen(false); setQuery(""); });
+  const selectedOption = options.find((option) => String(option.value) === String(value));
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleOptions = normalizedQuery
+    ? options.filter((option) => String(option.label || "").toLowerCase().includes(normalizedQuery))
+    : options;
+
+  function choose(nextValue) {
+    onChange(nextValue);
+    setOpen(false);
+    setQuery("");
+  }
+
   return (
-    <div className="filter-field">
+    <div className="filter-field" ref={ref}>
       <span className="filter-label">{label}</span>
-      <select className="filter-select" value={value} onChange={(event) => onChange(event.target.value)}>
-        {placeholder ? <option value="">{placeholder}</option> : null}
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
+      <button
+        type="button"
+        className={`filter-trigger ${value ? "active" : ""}`}
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+      >
+        <span>{selectedOption?.label || placeholder || "Select"}</span>
+        <ChevronDown size={14} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="filter-menu filter-menu-single" role="listbox">
+          <label className="filter-search">
+            <Search size={14} aria-hidden="true" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={`Search ${String(label || "options").toLowerCase()}`}
+              aria-label={`Search ${label}`}
+              autoFocus
+            />
+            {query ? (
+              <button type="button" onClick={() => setQuery("")} aria-label="Clear search">
+                <X size={12} aria-hidden="true" />
+              </button>
+            ) : null}
+          </label>
+          {placeholder ? (
+            <button
+              type="button"
+              className={`filter-option single ${!value ? "checked" : ""}`}
+              onClick={() => choose("")}
+              role="option"
+              aria-selected={!value}
+            >
+              <i>{!value ? <Check size={12} aria-hidden="true" /> : null}</i>
+              <span>{placeholder}</span>
+            </button>
+          ) : null}
+          {visibleOptions.map((option) => {
+            const checked = String(option.value) === String(value);
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={`filter-option single ${checked ? "checked" : ""}`}
+                onClick={() => choose(option.value)}
+                role="option"
+                aria-selected={checked}
+              >
+                <i>{checked ? <Check size={12} aria-hidden="true" /> : null}</i>
+                <span>{option.label}</span>
+              </button>
+            );
+          })}
+          {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
+        </div>
+      ) : null}
     </div>
   );
 }

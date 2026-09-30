@@ -260,6 +260,28 @@ async function replaceDestination(client, destinationSchema, data) {
     await insertRows(client, table, columns, rows);
     console.log(`WRITE public.${table}: ${rows.length} rows`);
   }
+
+  // service_catalog is a Replit-side reference table and therefore is not
+  // copied from the old Supabase database. Rebuild/link it after every replace
+  // import so project services remain selectable in Manage.
+  if (destinationSchema.has("service_catalog")) {
+    await client.query(
+      `insert into public.service_catalog (service_key, name, active)
+       select distinct on (service_key) service_key, name, true
+         from public.project_services
+        where nullif(trim(service_key), '') is not null
+          and nullif(trim(name), '') is not null
+        order by service_key, created_at asc
+       on conflict do nothing`
+    );
+    await client.query(
+      `update public.project_services ps
+          set service_catalog_id = catalog.id
+         from public.service_catalog catalog
+        where ps.service_catalog_id is null
+          and catalog.service_key = ps.service_key`
+    );
+  }
 }
 
 function parseMode(argv) {

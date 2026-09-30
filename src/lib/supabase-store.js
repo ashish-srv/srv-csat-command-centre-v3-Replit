@@ -127,6 +127,7 @@ function toService(row, owner = null) {
     pulse: row.pulse,
     ownerAction: row.owner_action,
     internalPocId: row.internal_poc_id,
+    serviceCatalogId: row.service_catalog_id || null,
     ownerName: owner ? owner.name : null,
     ownerEmail: owner ? owner.email : null,
     managerEmail: owner && owner.manager ? owner.manager.email : null,
@@ -938,7 +939,13 @@ class SupabaseStore {
         ? activeSessions.some((activeSession) => activeSession.sessionType !== "quick_checkin")
         : activeSessions.length > 0;
       if (conflicts) {
-        throw new Error(`${poc.name} already has an active feedback request on another project. Finish or stop it before starting this cycle.`);
+        const blockingSession = activeSessions.find((activeSession) => (
+          isQuickCheckin ? activeSession.sessionType !== "quick_checkin" : true
+        ));
+        const blockingProject = blockingSession?.projectId
+          ? await this.getProjectById(blockingSession.projectId)
+          : null;
+        throw new Error(`${poc.name} already has an active feedback request${blockingProject ? ` on ${blockingProject.name}` : " on another project"}. Finish or stop it before starting this cycle.`);
       }
     }
 
@@ -1928,14 +1935,15 @@ class SupabaseStore {
   // -------------------------------------------------------------------
 
   async getDirectory() {
-    const [clusters, clients, projects, pocLevelRows, departments, subDepartments, internalPocs] = await Promise.all([
+    const [clusters, clients, projects, pocLevelRows, departments, subDepartments, internalPocs, serviceCatalog] = await Promise.all([
       this.request("clusters", { query: "select=*&order=name.asc" }),
       this.request("clients", { query: "select=*&order=name.asc" }),
       this.request("projects", { query: "select=*&order=name.asc" }),
       this.request("poc_levels", { query: "select=*&order=weight.desc" }),
       this.request("departments", { query: "select=*&order=name.asc" }),
       this.request("sub_departments", { query: "select=*&order=name.asc" }),
-      this.request("internal_pocs", { query: "select=*&order=name.asc" })
+      this.request("internal_pocs", { query: "select=*&order=name.asc" }),
+      this.request("service_catalog", { query: "select=*&order=name.asc" })
     ]);
 
     return {
@@ -1961,6 +1969,14 @@ class SupabaseStore {
         subDepartmentId: row.sub_department_id,
         reportingManagerId: row.reporting_manager_id,
         active: row.active
+      })),
+      serviceCatalog: serviceCatalog.map((row) => ({
+        id: row.id,
+        serviceKey: row.service_key,
+        name: row.name,
+        active: row.active,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
       }))
     };
   }
@@ -2024,10 +2040,12 @@ class SupabaseStore {
       : "project_id=is.null&";
 
     const levels = await this.pocLevels();
-    const [pocRows, serviceRows] = await Promise.all([
+    const [pocRows, serviceRows, catalogRows] = await Promise.all([
       this.request("client_pocs", { query: `${inList}order=name.asc` }),
-      this.request("project_services", { query: `${inList}order=name.asc` })
+      this.request("project_services", { query: `${inList}order=name.asc` }),
+      this.request("service_catalog", { query: "select=id,service_key,name,active" })
     ]);
+    const catalogByKey = new Map(catalogRows.map((item) => [item.service_key, item]));
 
     const internalIds = [...new Set(serviceRows.map((item) => item.internal_poc_id).filter(Boolean))];
     const owners = internalIds.length
@@ -2065,6 +2083,7 @@ class SupabaseStore {
           name: item.name,
           kpis: item.kpis,
           internalPocId: item.internal_poc_id,
+          serviceCatalogId: item.service_catalog_id || catalogByKey.get(item.service_key)?.id || null,
           ownerName: owner ? owner.name : null,
           managerName: manager ? manager.name : null,
           score: num(item.score)
@@ -2158,14 +2177,38 @@ class SupabaseStore {
   }
 
   async createProjectService(input) {
+    let catalog = input.serviceCatalogId
+      ? await this.getServiceCatalogItem(input.serviceCatalogId)
+      : null;
+    if (!catalog && input.serviceKey) {
+      const rows = await this.request("service_catalog", {
+        query: `service_key=eq.${encodeURIComponent(input.serviceKey)}&select=*&limit=1`
+      });
+      if (rows.length) {
+        catalog = {
+          id: rows[0].id,
+          serviceKey: rows[0].service_key,
+          name: rows[0].name,
+          active: rows[0].active
+        };
+      }
+    }
+    if (!catalog) {
+      catalog = await this.createServiceCatalogItem({
+        serviceKey: input.serviceKey,
+        name: input.name,
+        active: true
+      });
+    }
     const rows = await this.request("project_services", {
       method: "POST",
       body: [{
         project_id: input.projectId,
-        service_key: input.serviceKey,
-        name: input.name,
+        service_key: catalog.serviceKey,
+        name: catalog.name,
         kpis: input.kpis || null,
-        internal_poc_id: input.internalPocId || null
+        internal_poc_id: input.internalPocId || null,
+        service_catalog_id: catalog.id
       }]
     });
     return toService(rows[0]);
@@ -2178,6 +2221,16 @@ class SupabaseStore {
     if (input.kpis !== undefined) body.kpis = input.kpis || null;
     if (input.internalPocId !== undefined) body.internal_poc_id = input.internalPocId || null;
     if (input.projectId !== undefined) body.project_id = input.projectId;
+    if (input.serviceCatalogId !== undefined) {
+      const catalog = input.serviceCatalogId
+        ? await this.getServiceCatalogItem(input.serviceCatalogId)
+        : null;
+      body.service_catalog_id = catalog ? catalog.id : null;
+      if (catalog) {
+        body.service_key = catalog.serviceKey;
+        body.name = catalog.name;
+      }
+    }
 
     const rows = await this.request("project_services", {
       method: "PATCH",
@@ -2200,6 +2253,74 @@ class SupabaseStore {
       query: `project_id=eq.${encodeURIComponent(projectId)}&service_key=eq.${encodeURIComponent(serviceKey)}&select=id&limit=2`
     });
     return rows.some((row) => row.id !== exceptId);
+  }
+
+  async getServiceCatalogItem(serviceCatalogId) {
+    if (!serviceCatalogId) return null;
+    const rows = await this.request("service_catalog", {
+      query: `id=eq.${encodeURIComponent(serviceCatalogId)}&select=*&limit=1`
+    });
+    if (!rows.length) return null;
+    const row = rows[0];
+    return { id: row.id, serviceKey: row.service_key, name: row.name, active: row.active };
+  }
+
+  async serviceCatalogConflict(name, serviceKey, exceptId = null) {
+    const rows = await this.request("service_catalog", {
+      query: `service_key=eq.${encodeURIComponent(serviceKey)}&select=id,name,service_key&limit=5`
+    });
+    if (rows.some((row) => row.id !== exceptId)) return true;
+    const nameRows = await this.request("service_catalog", {
+      query: `name=ilike.${encodeURIComponent(name)}&select=id,name,service_key&limit=5`
+    });
+    return nameRows.some((row) => row.id !== exceptId);
+  }
+
+  async createServiceCatalogItem(input) {
+    const rows = await this.request("service_catalog", {
+      method: "POST",
+      body: [{ service_key: input.serviceKey, name: input.name, active: input.active !== false }]
+    });
+    const row = rows[0];
+    return { id: row.id, serviceKey: row.service_key, name: row.name, active: row.active };
+  }
+
+  async updateServiceCatalogItem(serviceCatalogId, input) {
+    const current = await this.getServiceCatalogItem(serviceCatalogId);
+    if (!current) return null;
+    const body = { updated_at: new Date().toISOString() };
+    if (input.name !== undefined) body.name = input.name;
+    if (input.active !== undefined) body.active = Boolean(input.active);
+    const rows = await this.request("service_catalog", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(serviceCatalogId)}`,
+      body
+    });
+    if (input.name !== undefined) {
+      await this.request("project_services", {
+        method: "PATCH",
+        query: `service_catalog_id=eq.${encodeURIComponent(serviceCatalogId)}`,
+        body: { name: input.name, updated_at: new Date().toISOString() }
+      });
+    }
+    const row = rows[0];
+    return row ? { id: row.id, serviceKey: row.service_key, name: row.name, active: row.active } : null;
+  }
+
+  async deleteOrArchiveServiceCatalogItem(serviceCatalogId) {
+    const usage = await this.request("project_services", {
+      query: `service_catalog_id=eq.${encodeURIComponent(serviceCatalogId)}&select=id&limit=1`
+    });
+    if (usage.length) {
+      const item = await this.updateServiceCatalogItem(serviceCatalogId, { active: false });
+      return { action: "archived", item };
+    }
+    const rows = await this.request("service_catalog", {
+      method: "DELETE",
+      query: `id=eq.${encodeURIComponent(serviceCatalogId)}&select=id`,
+      prefer: "return=representation"
+    });
+    return { action: "deleted", deleted: Array.isArray(rows) ? rows.length : 0 };
   }
 
   async createCluster(input) {
@@ -2776,6 +2897,12 @@ class SupabaseStore {
     const projects = await this.listProjects();
     const clusters = await this.request("clusters", { query: "select=*&order=name.asc" });
     const clients = await this.request("clients", { query: "select=id,client_key,name,cluster_id&order=name.asc" });
+    const [activePocRows, scheduleEventRows] = await Promise.all([
+      this.request("client_pocs", { query: "active=is.true&select=id,project_id,name,contact_whatsapp" }),
+      this.request("automation_events", {
+        query: "event_type=in.(cycle_start_skipped,quick_checkin_start_skipped)&select=*&order=created_at.desc&limit=200"
+      })
+    ]);
 
     const openIssues = await this.request("issues", {
       query: "status=neq.closed&select=id,project_id,session_id,client_poc_id,service_key,service_name,severity,title,root_cause,due_at,created_at,client_pocs(name)&order=created_at.desc"
@@ -2906,6 +3033,19 @@ class SupabaseStore {
       openCycles: openCycleRows.map(toCycle),
       cycles: allCycleRows.map(toCycle),
       responseTracker,
+      projectPocCounts: activePocRows.reduce((counts, row) => {
+        counts[row.project_id] = (counts[row.project_id] || 0) + 1;
+        return counts;
+      }, {}),
+      scheduleEvents: scheduleEventRows.map((row) => ({
+        id: row.id,
+        eventType: row.event_type,
+        status: row.status,
+        projectKey: row.payload?.projectKey || null,
+        cycleType: row.payload?.cycleType || null,
+        reason: row.payload?.reason || row.error || null,
+        attemptedAt: row.created_at
+      })),
       // Backward-compatible subset for the older follow-up panel/consumers.
       responseQueue: responseTracker.filter((session) =>
         ["started", "no_response", "partial"].includes(session.status)

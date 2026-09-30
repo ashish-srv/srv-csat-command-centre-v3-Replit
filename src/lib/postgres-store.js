@@ -5,7 +5,7 @@ const TABLES = new Set([
   "automation_events", "client_pocs", "clients", "clusters", "departments",
   "feedback_cycles", "feedback_sessions", "internal_pocs", "issue_events",
   "issues", "messages", "observations", "poc_levels", "project_services",
-  "projects", "service_feedback", "sub_departments"
+  "projects", "service_catalog", "service_feedback", "sub_departments"
 ]);
 
 const JSON_COLUMNS = {

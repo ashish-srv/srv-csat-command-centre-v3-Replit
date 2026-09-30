@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
 import { scoreClass, riskClass, formatTone } from "../format";
+import { SingleSelect } from "./Filters.jsx";
 
 /**
  * Drops in the real logo when public/srv-logo.svg (or .png) exists, and falls
@@ -22,17 +23,7 @@ export function BrandLogo({ alt = "SRV Media" }) {
 }
 
 export function SingleSelectRow({ label, options, value, onChange, placeholder }) {
-  return (
-    <div className="filter-field">
-      <span className="filter-label">{label}</span>
-      <select className="filter-select" value={value} onChange={(event) => onChange(event.target.value)}>
-        {placeholder ? <option value="">{placeholder}</option> : null}
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
-    </div>
-  );
+  return <SingleSelect label={label} options={options} value={value} onChange={onChange} placeholder={placeholder} />;
 }
 
 /** Tone sits beside the score, never inside it. */
