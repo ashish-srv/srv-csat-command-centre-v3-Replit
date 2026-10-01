@@ -133,8 +133,8 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const workspaceRequestRef = useRef(0);
   const messageRequestRef = useRef(0);
 
-  const [clusters, setClusters] = useState([]);
-  const [clients, setClients] = useState([]);
+  const [cluster, setCluster] = useState("");
+  const [client, setClient] = useState("");
   const [cycleTypes, setCycleTypes] = useState([]);
   const [quickOutcomes, setQuickOutcomes] = useState([]);
   const [completion, setCompletion] = useState("");
@@ -153,32 +153,56 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   useEffect(() => {
     const project = allProjects.find((item) => item.key === projectKey);
     if (!project) return;
-    setClusters(project.clusterName ? [project.clusterName] : []);
-    setClients(project.clientName ? [project.clientName] : []);
+    setCluster(project.clusterName || "");
+    setClient(project.clientName || "");
   }, [allProjects, projectKey]);
 
   // Cluster and client narrow which projects are selectable.
   const selectableProjects = useMemo(() => allProjects.filter((project) => {
-    if (clusters.length && !clusters.includes(project.clusterName)) return false;
-    if (clients.length && !clients.includes(project.clientName)) return false;
+    if (cluster && project.clusterName !== cluster) return false;
+    if (client && project.clientName !== client) return false;
     return true;
-  }), [allProjects, clusters, clients]);
+  }), [allProjects, cluster, client]);
+
+  const clusterProjects = useMemo(
+    () => allProjects.filter((project) => !cluster || project.clusterName === cluster),
+    [allProjects, cluster]
+  );
+
+  function selectCluster(nextCluster) {
+    const candidate = allProjects.find((project) => project.clusterName === nextCluster);
+    if (!candidate) {
+      showToast("No project is configured under that cluster.");
+      return;
+    }
+    setCluster(nextCluster);
+    setClient(candidate.clientName || "");
+    if (candidate.key !== projectKey) pushProject(candidate.key);
+  }
+
+  function selectClient(nextClient) {
+    const candidate = allProjects.find((project) => (
+      (!cluster || project.clusterName === cluster) && project.clientName === nextClient
+    ));
+    if (!candidate) {
+      showToast(`No project for ${nextClient} belongs to ${cluster || "the selected cluster"}.`);
+      return;
+    }
+    setClient(nextClient);
+    if (candidate.key !== projectKey) pushProject(candidate.key);
+  }
 
   // Cluster/client selection is navigation, not only dropdown decoration. The
   // old project used to remain loaded when it fell outside the chosen client,
   // so its CSAT, POCs and conversations appeared under the new filter.
   useEffect(() => {
-    const projectFiltersActive = Boolean(clusters.length || clients.length);
     const currentAllowed = selectableProjects.some((project) => project.key === projectKey);
     if (!selectableProjects.length) {
-      if (projectFiltersActive) {
-        workspaceRequestRef.current += 1;
-        messageRequestRef.current += 1;
-        setWorkspace(null);
-        setCycleId("");
-        setSessionId("");
-        setMessages([]);
-        setLoading(false);
+      const current = allProjects.find((project) => project.key === projectKey);
+      if (current) {
+        setCluster(current.clusterName || "");
+        setClient(current.clientName || "");
+        showToast("That filter combination has no project. The current project's client and cluster were restored.");
       }
       return;
     }
@@ -186,7 +210,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
       pushProject(selectableProjects[0].key);
       return;
     }
-  }, [clusters, clients, projectKey, selectableProjects]);
+  }, [allProjects, cluster, client, projectKey, selectableProjects]);
 
   function showToast(message) {
     setToast(message);
@@ -698,7 +722,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     return counts;
   }, {});
   const quickResponses = cycleSessions.filter((session) => Boolean(session.lastClientResponseAt)).length;
-  const filtersActive = Boolean(clusters.length || clients.length || cycleTypes.length || quickOutcomes.length || completion || range.from || range.to || feedbackPocId);
+  const filtersActive = Boolean(cycleTypes.length || quickOutcomes.length || completion || range.from || range.to || feedbackPocId);
 
   return (
     <>
@@ -712,12 +736,14 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
 
       <FilterBar
         showReset={filtersActive}
-        onReset={() => { setClusters([]); setClients([]); setCycleTypes([]); setQuickOutcomes([]); setCompletion(""); setFeedbackPocId(""); setRange({ from: "", to: "", basis: "started" }); }}
+        onReset={() => { setCycleTypes([]); setQuickOutcomes([]); setCompletion(""); setFeedbackPocId(""); setRange({ from: "", to: "", basis: "started" }); }}
       >
-        <MultiSelect label="Cluster" allLabel="All clusters" selected={clusters} onChange={setClusters}
-          options={[...new Set(allProjects.map((item) => item.clusterName).filter(Boolean))].sort()} />
-        <MultiSelect label="Client" allLabel="All clients" selected={clients} onChange={setClients}
-          options={[...new Set(allProjects.map((item) => item.clientName).filter(Boolean))].sort()} />
+        <SingleSelect label="Cluster" value={cluster} placeholder="" onChange={selectCluster}
+          options={[...new Set(allProjects.map((item) => item.clusterName).filter(Boolean))].sort()
+            .map((name) => ({ value: name, label: name }))} />
+        <SingleSelect label="Client" value={client} placeholder="" onChange={selectClient}
+          options={[...new Set(clusterProjects.map((item) => item.clientName).filter(Boolean))].sort()
+            .map((name) => ({ value: name, label: name }))} />
         <SingleSelect label="Project" value={project.key} placeholder="" onChange={pushProject}
           options={selectableProjects.map((item) => ({ value: item.key, label: item.name }))} />
         <SingleSelect label="Cycle" value={selectedCycle ? selectedCycle.id : ""} placeholder={cycles.length ? "" : "No cycle"}
@@ -1183,7 +1209,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
             </div>
             <p className={manualWhatsappBlockedReason ? "manual-whatsapp-warning" : "form-note"}>
               {manualWhatsappBlockedReason
-                || "This sends immediately through n8n using the existing Meta credential. It will appear in this transcript but will not change the feedback checklist, scores, reminders or cycle status. Gemini will read it as context when the client replies."}
+                || "This sends immediately through n8n using the existing Meta credential. A clearly worded overall-rating question will make the client's next 0–10 reply the active rating answer; a project-end recommendation question does the same for NPS. Other manual messages remain contextual and do not change scores, reminders or cycle status."}
             </p>
           </div>
         ) : null}

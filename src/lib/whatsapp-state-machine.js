@@ -1104,9 +1104,19 @@ function nextQuestionFor(conversationState, project, poc) {
   }
 
   if (conversationState.sessionType === "project_end" && conversationState.npsScore === null) {
+    conversationState.pendingQuestionType = "nps";
     return {
       state: STATES.WAITING_FOR_NPS,
       text: "Lastly — if someone in your network was looking for digital marketing support, how likely would you be to recommend SRV Media to them, out of 10?"
+    };
+  }
+
+  if (!conversationState.anythingElseAnswered) {
+    conversationState.askedForAnythingElse = true;
+    conversationState.pendingQuestionType = "final_sweep";
+    return {
+      state: STATES.WAITING_FOR_MORE_SERVICES,
+      text: "Before we finish, is there anything else you would like the Directors to know—such as an issue, an area for improvement, or any appreciation you would like us to record? If not, just reply no."
     };
   }
 
@@ -1383,12 +1393,9 @@ function isEverythingCovered(conversationState, project) {
   // mentioned somewhere — including one the client never actually answered.
   if (!conversationState.overallRatingAsked) return false;
 
-  // Praise must be covered before closing. If the client already volunteered
-  // it, asking them to repeat it is robotic; otherwise the explicit question
-  // still has to be asked and answered.
-  const praiseCovered = conversationState.appreciationAnswered
-    && (conversationState.askedForAppreciation || conversationState.appreciationVolunteered);
-  if (!praiseCovered) return false;
+  // Appreciation is captured whenever it is volunteered, but it is not a
+  // mandatory survey stage. One inclusive management question follows the
+  // rating (and project-end NPS) instead of asking which department was missed.
   if (!conversationState.askedForAnythingElse || !conversationState.anythingElseAnswered) return false;
 
   const hasOverall = conversationState.overallRating !== null
@@ -1482,12 +1489,9 @@ function buildChecklist(conversationState, project) {
   const hasOverall = conversationState.overallRating !== null
     && conversationState.overallRating !== undefined;
 
-  // Two things a survey should always ask before it ends. Praise is why a
-  // team hears they did well, and the final sweep is where the things that
-  // matter most tend to arrive — a client raised an absent AVP only after
-  // being asked whether there was anything else.
-  const askedForPraise = Boolean(conversationState.askedForAppreciation);
-  const appreciationAnswered = Boolean(conversationState.appreciationAnswered);
+  // After the rating (and NPS for project-end), ask one inclusive management
+  // question. Appreciations are still extracted and acknowledged whenever the
+  // client volunteers them; they are not a separate mandatory interview step.
   const askedForAnythingElse = Boolean(conversationState.askedForAnythingElse);
   const anythingElseAnswered = Boolean(conversationState.anythingElseAnswered);
   const serviceScopeChoiceStillNeeded = conversationState.serviceScopeStatus === "awaiting_choice";
@@ -1501,15 +1505,12 @@ function buildChecklist(conversationState, project) {
     projectEndReviewCaptured: projectEndOverall,
     serviceScopeChoiceStillNeeded,
     stillToAsk: [
-      ...(servicesFinished && !appreciationAnswered
-        ? [askedForPraise
-          ? "wait for their answer to the appreciation question"
-          : "whether they would like to appreciate any team or department"]
-        : []),
-      ...(servicesFinished && appreciationAnswered && !anythingElseAnswered
+      ...(servicesFinished && hasOverall
+        && (!isProjectEnd || conversationState.npsScore !== null)
+        && !anythingElseAnswered
         ? [askedForAnythingElse
-          ? "wait for their answer about anything missed or feedback for management"
-          : "whether any department was missed, or they have general feedback for management"]
+          ? "wait for their answer to the final management question"
+          : "whether they have an issue, improvement, appreciation or anything else for the Directors"]
         : [])
     ],
     servicesWhereWeStillDoNotKnowWhatIsWrong: needsMore,
@@ -1525,12 +1526,11 @@ function buildChecklist(conversationState, project) {
       })),
     // The ONLY rating we ask for. Per-service ratings turned the conversation
     // into a form, which is what made clients disengage.
-    overallRatingStillNeeded: !hasOverall && servicesFinished
-      && appreciationAnswered && anythingElseAnswered,
+    overallRatingStillNeeded: !hasOverall && servicesFinished,
     npsStillNeeded: isProjectEnd && hasOverall && conversationState.npsScore === null,
     cycleType: isProjectEnd ? "project end" : "monthly pulse",
     turnsSoFar: conversationState.turnCount || 0,
-    readyToClose: servicesFinished && appreciationAnswered && anythingElseAnswered && hasOverall
+    readyToClose: servicesFinished && anythingElseAnswered && hasOverall
       && (!isProjectEnd || conversationState.npsScore !== null)
   };
 }
@@ -1731,10 +1731,10 @@ function currentPendingQuestion(conversationState, project, poc) {
     return `How has ${name || "that service"} been for you?`;
   }
   if (type === "appreciation") {
-    return "Is there any team or department you would like to appreciate?";
+    return "Is there any appreciation you would like us to record? If not, just reply no.";
   }
   if (type === "final_sweep") {
-    return "Did we miss any department, or is there anything you would like to share with management?";
+    return "Is there anything else you would like the Directors to know—such as an issue, an area for improvement, or any appreciation you would like us to record? If not, just reply no.";
   }
   if (type === "overall_rating" || conversationState.state === STATES.WAITING_FOR_OVERALL_RATING) {
     return overallRatingQuestion(conversationState, project);
@@ -2572,6 +2572,20 @@ function processWhatsAppReply({
   // captured something. "geminiUnavailable" permits fallback matching; it must
   // never stand in for comprehension, or an unreadable reply gets silently
   // accepted and the client is asked the same question forever.
+  const answeredFinalSweep = answeredQuestionType === "final_sweep" && (
+    isMoveOnReply(text)
+    || soundsLikeFarewell(text)
+    || said.no
+    || interpretation?.intent === "feedback"
+    || interpretation?.isObservation === true
+    || detectedServiceKeys.length > 0
+  );
+  if (answeredFinalSweep) {
+    conversationState.askedForAnythingElse = true;
+    conversationState.anythingElseAnswered = true;
+    conversationState.pendingQuestionType = null;
+  }
+
   const keywordsCaptured = !guardrails.includes(GUARDRAILS.NO_SIGNAL);
   const understood = Boolean(interpretation)
     || Boolean(isUnambiguous(text))
@@ -2579,6 +2593,7 @@ function processWhatsAppReply({
 
   const materialProgress = conversationProgressSignature(conversationState) !== progressBefore;
   const next = nextQuestionFor(conversationState, project, poc);
+  if (next.state === STATES.CLOSING_GRACE) conversationState.pendingQuestionType = null;
 
   // Repeating a message word for word makes the bot look broken and leaves the
   // client with no idea what went wrong. Say we did not follow, then re-ask.

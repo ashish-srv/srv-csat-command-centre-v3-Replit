@@ -65,7 +65,8 @@ scenario("S1 full pulse: issue -> reason -> rating -> more -> overall -> complet
     "4",
     "8",
     "no",
-    "8"
+    "8",
+    "no"
   ]);
   assert.ok(!/rating from 1 to 5/i.test(turns[3].nextMessage.body) || !/other service/i.test(turns[3].nextMessage.body),
     "the other-services ask must not also ask for the overall rating");
@@ -123,7 +124,8 @@ scenario("S4 no infinite loop on vague / move-on replies", () => {
     "no",
     "6",
     "Apart from this nothing",
-    "4"
+    "4",
+    "no"
   ]);
   const states = turns.map((t) => t.snapshot.state);
   assert.ok(!states.slice(0, -1).every((s, i) => s === states[i + 1]), "states must advance");
@@ -1100,7 +1102,7 @@ scenario("The bot commits to acting, without promising an outcome", () => {
 
 scenario("The client is thanked after a rating, and at the close", () => {
   const { turns } = run(newSession(), [
-    "website has issues", "pages take ages to load", "no", "6", "no", "7"
+    "website has issues", "pages take ages to load", "no", "6", "no", "7", "no"
   ]);
   const afterServiceRating = turns[3].nextMessage.body;
   assert.ok(/^thank you/i.test(afterServiceRating),

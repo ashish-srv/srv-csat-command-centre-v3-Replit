@@ -9,6 +9,50 @@ const { importAdminWorkbook } = require("../lib/admin-import");
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_MANUAL_WHATSAPP_TEXT_LENGTH = 4096;
 
+function manualQuestionType(message, sessionType) {
+  if (!message?.metadata?.manualOutbound) return null;
+  const text = String(message.body || "").trim();
+  if (!text) return null;
+
+  const asksAQuestion = /\?\s*$/.test(text)
+    || /\b(?:how|what)\b.{0,100}\b(?:rate|rating|score|likely)\b/i.test(text)
+    || /\b(?:please|kindly)\s+(?:rate|score|give)\b/i.test(text);
+  if (!asksAQuestion) return null;
+
+  const recommendationQuestion = /\b(?:recommend|recommendation|nps|likely)\w*\b/i.test(text)
+    && /\b(?:srv(?: media)?|agency|services?|us|our)\b/i.test(text);
+  if (recommendationQuestion) {
+    return sessionType === "project_end" ? "nps" : null;
+  }
+
+  const asksForRating = /\b(?:rate|rating|score)\b/i.test(text);
+  const overallTarget = /\boverall\b|\bsrv(?: media)?\b|\b(?:our|the)\s+(?:work|delivery|services?|project|agency|team)\b/i.test(text);
+  return asksForRating && overallTarget ? "overall_rating" : null;
+}
+
+function applyManualQuestionContext(session, message) {
+  const type = message?.metadata?.manualQuestionType
+    || manualQuestionType(message, session?.sessionType);
+  if (!type) return session;
+
+  const conversationState = getConversationState({
+    ...session,
+    conversationState: JSON.parse(JSON.stringify(session.conversationState || {}))
+  });
+  conversationState.pendingServiceKey = null;
+  conversationState.pendingQuestionType = type;
+  conversationState.state = type === "nps"
+    ? STATES.WAITING_FOR_NPS
+    : STATES.WAITING_FOR_OVERALL_RATING;
+  conversationState.lastQuestionAsked = String(message.body || "").trim();
+  conversationState.manualQuestionType = type;
+  conversationState.manualQuestionAskedAt = message.createdAt || new Date().toISOString();
+  conversationState.deferredAt = null;
+  conversationState.repeatCount = 0;
+  if (type === "overall_rating") conversationState.overallRatingAsked = true;
+  return { ...session, conversationState };
+}
+
 function automaticProjectEndFeedbackEnabled() {
   const configured = String(process.env.AUTO_PROJECT_END_FEEDBACK || "").trim().toLowerCase();
   if (!configured) return true;
@@ -52,10 +96,9 @@ function requiredConversationAction(checklist, conversationState) {
   if (checklist.servicesNotYetDiscussedWithKeys?.length) {
     return { type: "service", ...checklist.servicesNotYetDiscussedWithKeys[0] };
   }
-  if (!conversationState.appreciationAnswered) return { type: "appreciation" };
-  if (!conversationState.anythingElseAnswered) return { type: "final_sweep" };
   if (checklist.overallRatingStillNeeded) return { type: "overall_rating" };
   if (checklist.npsStillNeeded) return { type: "nps" };
+  if (!conversationState.anythingElseAnswered) return { type: "final_sweep" };
   return { type: "close" };
 }
 
@@ -303,7 +346,7 @@ function appreciationAcknowledgement(context = {}, project = {}, conversationSta
   if (subject && !/^client appreciation$/i.test(subject)) {
     return `Thank you for that special mention for ${subject}. We will share your kind words with them.`;
   }
-  return "Thank you for sharing that appreciation. We will share your kind words with the team.";
+  return "Thank you for those kind words about SRV Media. We truly appreciate them.";
 }
 
 function suppressBroadOverallServiceGuess(conducted, interpretation, text, project) {
@@ -579,21 +622,12 @@ function baseFallbackForAction(action, conversationState, project, context = {})
     return `I am sorry to hear that. Our team will look into it. Is there anything else about ${action.topic} we should know?`;
   }
   if (action.type === "appreciation") {
-    return "Before the overall rating, is there any team or department you would like to appreciate?";
+    // Retained only for an older session that was already waiting on this
+    // question. New sessions use one inclusive final management question.
+    return "Is there any appreciation you would like us to record? If not, just reply no.";
   }
   if (action.type === "final_sweep") {
-    const discussedKeys = new Set(Object.values(conversationState.mentionedServices || {})
-      .filter((service) => service.status !== "declined")
-      .map((service) => service.serviceKey));
-    const discussed = (project.services || [])
-      .filter((service) => discussedKeys.has(service.serviceKey))
-      .map((service) => service.name)
-      .join(", ");
-    const lead = discussed ? `We have discussed ${discussed}. ` : "";
-    if ((context.appreciations || []).length) {
-      return `I have recorded that appreciation. ${lead}Is there an issue or feedback about another department we missed, or anything else you would like to share with management?`;
-    }
-    return `${lead}Is there an issue or feedback about another department we missed, or anything else you would like to share with management?`;
+    return "Before we finish, is there anything else you would like the Directors to know—such as an issue, an area for improvement, or any appreciation you would like us to record? If not, just reply no.";
   }
   if (action.type === "overall_rating") return overallRatingQuestion(conversationState, project);
   if (action.type === "nps") {
@@ -968,7 +1002,7 @@ function messageMatchesRequiredAction(action, message) {
       && /\b(?:team|department|person|anyone|who)\b/i.test(text);
   }
   if (action.type === "final_sweep") {
-    return /\b(?:department.*missed|missed.*department|management)\b/i.test(text);
+    return /\b(?:anything else|directors?|management|issue|area for improvement|appreciation)\b/i.test(text);
   }
   if (action.type === "overall_rating") {
     return /\b(?:rate|rating)\b/i.test(text)
@@ -1888,9 +1922,10 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   // advanced, so one message moves the conversation two steps: the client
   // named a service, was silently marked as having been asked for the reason,
   // and went straight to the rating.
-  const stateBefore = JSON.parse(JSON.stringify(session.conversationState || {}));
   const latestSrvMessage = [...previousMessages].reverse().find((message) => message.side === "srv");
   const manualContext = Boolean(latestSrvMessage?.metadata?.manualOutbound);
+  if (manualContext) session = applyManualQuestionContext(session, latestSrvMessage);
+  const stateBefore = JSON.parse(JSON.stringify(session.conversationState || {}));
   let turn = processWhatsAppReply({ session, project, poc, text, manualContext });
   const transcript = previousMessages.concat(clientMessage);
 
@@ -3192,6 +3227,10 @@ async function handleApiRequest(request) {
       return error(502, "WhatsApp message could not be sent", delivery.statusCode ? `n8n returned HTTP ${delivery.statusCode}.` : delivery.error || "The n8n workflow failed.");
     }
 
+    const detectedManualQuestionType = manualQuestionType({
+      body: text,
+      metadata: { manualOutbound: true }
+    }, session.sessionType);
     const message = await store.addMessage(session.id, {
       speaker: "SRV Media MD Office",
       side: "srv",
@@ -3199,6 +3238,7 @@ async function handleApiRequest(request) {
       metadata: {
         source: "dashboard_manual_whatsapp",
         manualOutbound: true,
+        manualQuestionType: detectedManualQuestionType,
         manualRequestId: requestId,
         deliveryStatus: "accepted",
         deliveryStatusCode: delivery.statusCode || 200
@@ -4103,24 +4143,29 @@ async function handleApiRequest(request) {
     let activePocWeightTotal = 0;
     for (let index = 0; index < pocs.length; index += 1) {
       const row = pocs[index] || {};
+      const active = row.active !== false;
       const number = String(row.contactWhatsapp || "").replace(/\D/g, "");
-      const weightPercentage = Number(row.weightPercentage);
+      const weightPercentage = active ? Number(row.weightPercentage) : 0;
       if (!String(row.name || "").trim()) return error(400, `POC ${index + 1}: name is required`);
       if (!validOptionalIsoDate(row.birthDate)) return error(400, `POC ${index + 1}: birthday must be YYYY-MM-DD`);
-      if (number.length < 10 || number.length > 15) return error(400, `POC ${index + 1}: WhatsApp number must be 10-15 digits including country code`);
-      if (seenPhones.has(number)) return error(400, `POC ${index + 1}: WhatsApp number appears twice on this project`);
+      if (active && (number.length < 10 || number.length > 15)) return error(400, `POC ${index + 1}: active POC needs a 10-15 digit WhatsApp number including country code`);
+      if (number && (number.length < 10 || number.length > 15)) return error(400, `POC ${index + 1}: WhatsApp number must be 10-15 digits including country code`);
+      if (number && seenPhones.has(number)) return error(400, `POC ${index + 1}: WhatsApp number appears twice on this project`);
       if (!String(row.levelId || "").trim() || (levels && !levels.has(row.levelId))) {
         return error(400, `POC ${index + 1}: select Normal or Important`);
       }
-      if (!Number.isFinite(weightPercentage) || weightPercentage <= 0 || weightPercentage > 100) {
+      if (active && (!Number.isFinite(weightPercentage) || weightPercentage <= 0 || weightPercentage > 100)) {
         return error(400, `POC ${index + 1}: influence must be more than 0% and no more than 100%`);
       }
-      const conflict = await pocWhatsappConflictForClient(store, number, input.clientId);
-      if (conflict) return error(409, `POC ${index + 1}: WhatsApp number belongs to another client`, conflict.owner?.name);
-      seenPhones.add(number);
-      activePocWeightTotal += weightPercentage;
-      preparedPocs.push({ ...row, name: String(row.name).trim(), contactWhatsapp: number, weightPercentage });
+      if (number) {
+        const conflict = await pocWhatsappConflictForClient(store, number, input.clientId);
+        if (conflict) return error(409, `POC ${index + 1}: WhatsApp number belongs to another client`, conflict.owner?.name);
+        seenPhones.add(number);
+      }
+      if (active) activePocWeightTotal += weightPercentage;
+      preparedPocs.push({ ...row, name: String(row.name).trim(), contactWhatsapp: number, weightPercentage, active });
     }
+    if (!preparedPocs.some((poc) => poc.active)) return error(400, "Add or activate at least one client POC before saving the project");
     if (Math.abs(activePocWeightTotal - 100) > 0.01) {
       return error(400, `Active POC influence must total exactly 100%; the current total is ${Math.round(activePocWeightTotal * 100) / 100}%`);
     }
@@ -4611,7 +4656,9 @@ module.exports = {
     applyDeferredInterpretation,
     isExplicitActionRequest,
     latestExplicitOverallRating,
-    clientBurstContext
+    clientBurstContext,
+    manualQuestionType,
+    applyManualQuestionContext
   }
 };
 

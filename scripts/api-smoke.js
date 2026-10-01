@@ -464,6 +464,108 @@ async function scenario(name, fn) {
     assert.strictEqual(JSON.parse(res.body).project.key, "acme-ug");
   });
 
+  await scenario("manual rating questions advance the correct survey state", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const { processWhatsAppReply, STATES } = require("../src/lib/whatsapp-state-machine");
+    const manualOverall = {
+      body: "How would you like to rate SRV Media out of 10?",
+      createdAt: new Date().toISOString(),
+      metadata: { manualOutbound: true }
+    };
+    assert.strictEqual(conversationFlow.manualQuestionType(manualOverall, "pulse"), "overall_rating");
+    assert.strictEqual(conversationFlow.manualQuestionType({
+      ...manualOverall,
+      body: "How would you like to rate SRV Media?"
+    }, "pulse"), "overall_rating", "the dashboard user's natural wording should be recognised");
+    assert.strictEqual(conversationFlow.manualQuestionType({
+      ...manualOverall,
+      body: "How likely are you to recommend SRV Media out of 10?"
+    }, "pulse"), null, "monthly feedback must never activate NPS");
+    assert.strictEqual(conversationFlow.manualQuestionType({
+      ...manualOverall,
+      body: "How likely are you to recommend SRV Media out of 10?"
+    }, "project_end"), "nps");
+
+    const projectEndSession = conversationFlow.applyManualQuestionContext({
+      id: "sess_manual_rating",
+      projectId: project.id,
+      clientPocId: poc.id,
+      sessionType: "project_end",
+      conversationState: {
+        sessionType: "project_end",
+        state: "waiting_for_more_services",
+        pendingQuestionType: "final_sweep",
+        mentionedServices: {},
+        projectEndReviewAsked: true,
+        projectEndReviewCaptured: true,
+        serviceScopeStatus: "overall_feedback",
+        overallRating: null,
+        npsScore: null,
+        anythingElseAnswered: false
+      }
+    }, manualOverall);
+    assert.strictEqual(projectEndSession.conversationState.state, STATES.WAITING_FOR_OVERALL_RATING);
+    assert.strictEqual(projectEndSession.conversationState.overallRatingAsked, true);
+
+    const ratingTurn = processWhatsAppReply({
+      session: projectEndSession,
+      project,
+      poc,
+      text: "8",
+      manualContext: true,
+      geminiUnavailable: true
+    });
+    assert.strictEqual(ratingTurn.conversationState.overallRating, 8);
+    assert.strictEqual(ratingTurn.conversationState.state, STATES.WAITING_FOR_NPS);
+
+    const npsTurn = processWhatsAppReply({
+      session: { ...projectEndSession, conversationState: ratingTurn.conversationState },
+      project,
+      poc,
+      text: "9",
+      geminiUnavailable: true
+    });
+    assert.strictEqual(npsTurn.conversationState.npsScore, 9);
+    assert.strictEqual(npsTurn.conversationState.pendingQuestionType, "final_sweep");
+    assert.match(npsTurn.nextMessage.body, /anything else.*Directors/i);
+
+    const closeTurn = processWhatsAppReply({
+      session: { ...projectEndSession, conversationState: npsTurn.conversationState },
+      project,
+      poc,
+      text: "No",
+      geminiUnavailable: true
+    });
+    assert.strictEqual(closeTurn.conversationState.anythingElseAnswered, true);
+    assert.strictEqual(closeTurn.conversationState.state, STATES.CLOSING_GRACE);
+
+    const monthlySession = conversationFlow.applyManualQuestionContext({
+      ...projectEndSession,
+      sessionType: "pulse",
+      conversationState: {
+        ...projectEndSession.conversationState,
+        sessionType: "pulse",
+        serviceScopeStatus: "skip_remaining_services",
+        readyForOverallRating: true,
+        projectEndReviewCaptured: false,
+        npsScore: null,
+        askedForAnythingElse: false,
+        anythingElseAnswered: false
+      }
+    }, manualOverall);
+    const monthlyRating = processWhatsAppReply({
+      session: monthlySession,
+      project,
+      poc,
+      text: "7.5",
+      manualContext: true,
+      geminiUnavailable: true
+    });
+    assert.strictEqual(monthlyRating.conversationState.overallRating, 7.5);
+    assert.strictEqual(monthlyRating.conversationState.pendingQuestionType, "final_sweep");
+    assert.notStrictEqual(monthlyRating.conversationState.state, STATES.WAITING_FOR_NPS);
+  });
+
   await scenario("dashboard manual WhatsApp sends through n8n and stores one contextual transcript message", async () => {
     const priorFetch = global.fetch;
     const priorWebhook = process.env.N8N_MANUAL_MESSAGE_WEBHOOK;
@@ -514,6 +616,7 @@ async function scenario(name, fn) {
       const saved = calls.messages.at(-1);
       assert.strictEqual(saved.side, "srv");
       assert.strictEqual(saved.metadata.manualOutbound, true);
+      assert.strictEqual(saved.metadata.manualQuestionType, null);
       assert.strictEqual(saved.metadata.manualRequestId, requestId);
       assert.strictEqual(store._session.conversationState.pendingServiceKey, "website");
     } finally {
@@ -723,7 +826,7 @@ async function scenario(name, fn) {
         providerMessageId: "wamid.overall-skip"
       });
       assert.strictEqual(skipped.statusCode, 201);
-      assert.match(JSON.parse(skipped.body).whatsappReplyText, /appreciate/i);
+      assert.match(JSON.parse(skipped.body).whatsappReplyText, /overall.*rate|rate.*overall/i);
       assert.strictEqual(store._session.conversationState.serviceScopeStatus, "skipped");
       assert.ok(Object.values(store._session.conversationState.mentionedServices)
         .every((service) => service.status === "declined" && service.sentiment === "neutral"),
@@ -3666,9 +3769,9 @@ async function scenario(name, fn) {
     const checklist = buildChecklist(state, withAllServices);
     assert.deepStrictEqual(checklist.servicesNotYetDiscussed, [],
       "a declined service must not be asked about again");
-    assert.strictEqual(checklist.overallRatingStillNeeded, false,
-      "appreciation and the final sweep must happen before the overall rating");
-    assert.ok(checklist.stillToAsk[0].includes("appreciate"));
+    assert.strictEqual(checklist.overallRatingStillNeeded, true,
+      "the overall rating follows service coverage without a separate department interview");
+    assert.deepStrictEqual(checklist.stillToAsk, []);
     assert.strictEqual(isEverythingCovered(state, withAllServices), false,
       "no overall rating means the cycle is not finished");
 
@@ -4102,7 +4205,17 @@ async function scenario(name, fn) {
     assert.strictEqual(state.projectEndReviewCaptured, true);
     assert.deepStrictEqual(state.mentionedServices, {});
     assert.deepStrictEqual(checklist.servicesNotYetDiscussedWithKeys, []);
-    assert.deepStrictEqual(action, { type: "appreciation" });
+    assert.deepStrictEqual(action, { type: "overall_rating" });
+    const praiseReply = conversationFlow.fallbackForAction(action, state, project, {
+      appreciations: [{
+        subject: "Client appreciation",
+        detail: "India's best agency. Keep it up.",
+        serviceKey: null
+      }]
+    });
+    assert.match(praiseReply, /kind words about SRV Media/i);
+    assert.match(praiseReply, /overall.*rate|rate.*overall/i);
+    assert.doesNotMatch(praiseReply, /missed.*department|department.*missed/i);
   });
 
   await scenario("Project-end accepts natural refusal without requiring the word skip", async () => {
@@ -4181,7 +4294,8 @@ async function scenario(name, fn) {
       });
       const payload = JSON.parse(response.body);
       assert.strictEqual(response.statusCode, 201);
-      assert.match(payload.whatsappReplyText, /appreciate/i);
+      assert.match(payload.whatsappReplyText, /overall.*rate|rate.*overall/i);
+      assert.doesNotMatch(payload.whatsappReplyText, /missed.*department|department.*missed/i);
       assert.doesNotMatch(payload.whatsappReplyText, /services one by one|How has .* been for you/i);
       assert.strictEqual(payload.session.conversationState.projectEndReviewCaptured, true);
       assert.strictEqual(payload.session.conversationState.serviceScopeStatus, "project_end_overall");
@@ -4365,7 +4479,7 @@ async function scenario(name, fn) {
     assert.strictEqual(latest.text, "The team has been proactive.\nThank you");
   });
 
-  await scenario("Skipping service questions still requires appreciation before rating", async () => {
+  await scenario("Skipping service questions proceeds directly to the overall rating", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const { applyServiceScopeDecision, buildChecklist, SERVICE_SCOPE_DECISIONS } =
       require("../src/lib/whatsapp-state-machine");
@@ -4383,7 +4497,7 @@ async function scenario(name, fn) {
       SERVICE_SCOPE_DECISIONS.SKIP_REMAINING_SERVICES
     );
     const action = conversationFlow.requiredConversationAction(buildChecklist(state, project), state);
-    assert.deepStrictEqual(action, { type: "appreciation" });
+    assert.deepStrictEqual(action, { type: "overall_rating" });
     assert.strictEqual(state.overallRating, null);
   });
 
@@ -4558,9 +4672,11 @@ async function scenario(name, fn) {
       },
       project
     );
-    assert.match(finalReply, /We have discussed PPC \/ Media, Website \/ SEO/i);
-    assert.match(finalReply, /issue or feedback about another department we missed/i);
-    assert.match(finalReply, /share with management/i);
+    assert.match(finalReply, /anything else.*Directors/i);
+    assert.match(finalReply, /issue/i);
+    assert.match(finalReply, /area for improvement/i);
+    assert.match(finalReply, /appreciation/i);
+    assert.doesNotMatch(finalReply, /department.*missed|missed.*department/i);
 
     const skippedReply = conversationFlow.fallbackForAction(
       { type: "final_sweep" },
@@ -4572,8 +4688,8 @@ async function scenario(name, fn) {
       },
       project
     );
-    assert.match(skippedReply, /We have discussed PPC \/ Media/i);
-    assert.doesNotMatch(skippedReply, /Website \/ SEO/i);
+    assert.strictEqual(skippedReply, finalReply,
+      "the final management question should not recite departments or services");
   });
 
   await scenario("Fallback acknowledgements are empathetic without repeating Understood", async () => {

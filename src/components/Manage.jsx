@@ -796,7 +796,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
   const pocs = value.pocs || [];
   const services = value.services || [];
   const activePocWeightTotal = Math.round(pocs.reduce(
-    (sum, poc) => sum + (Number(poc.weightPercentage) || 0),
+    (sum, poc) => sum + (poc.active !== false ? Number(poc.weightPercentage) || 0 : 0),
     0
   ) * 100) / 100;
   const updateProject = (patch) => onChange({ ...value, project: { ...value.project, ...patch } });
@@ -814,7 +814,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
       onChange({ ...value, copyProjectId: "" });
       return;
     }
-    const sourcePocs = (copySource?.pocs || []).filter((poc) => poc.projectId === projectId && poc.active !== false);
+    const sourcePocs = (copySource?.pocs || []).filter((poc) => poc.projectId === projectId);
     const sourceServices = (copySource?.services || []).filter((service) => service.projectId === projectId);
     onChange({
       ...value,
@@ -829,8 +829,8 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
         salutation: poc.salutation || "",
         honorific: poc.honorific || "",
         levelId: poc.levelId || "",
-        weightPercentage: poc.weightPercentage ?? 0,
-        active: true
+        weightPercentage: poc.active === false ? 0 : poc.weightPercentage ?? 0,
+        active: poc.active !== false
       })),
       services: sourceServices.map((service) => ({
         ...EMPTY_SETUP_SERVICE,
@@ -933,12 +933,22 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
               <Field label="CSAT influence (%)" hint="all POCs on this project must total 100%">
                 <input
                   type="number"
-                  min="0.01"
+                  min="0"
                   max="100"
                   step="0.01"
-                  value={poc.weightPercentage}
+                  value={poc.active !== false ? poc.weightPercentage : 0}
+                  disabled={poc.active === false}
                   onChange={(event) => updatePoc(index, { weightPercentage: event.target.value })}
                 />
+              </Field>
+              <Field label="Active" hint="inactive POCs are copied for reference but receive no feedback">
+                <select value={poc.active !== false ? "yes" : "no"} onChange={(event) => {
+                  const active = event.target.value === "yes";
+                  updatePoc(index, { active, weightPercentage: active ? poc.weightPercentage : 0 });
+                }}>
+                  <option value="yes">Yes — include in future sends</option>
+                  <option value="no">No — keep inactive</option>
+                </select>
               </Field>
             </div>
             <button type="button" className="icon-button danger" disabled={pocs.length === 1}
@@ -951,7 +961,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
         <Button disabled={!pocs.length} onClick={() => onChange({ ...value, pocs: distributePocWeights(pocs) })}>
           Distribute equally
         </Button>
-        <span className={Math.abs(activePocWeightTotal - 100) <= 0.01 ? "" : "missing"}>
+        <span className={pocs.some((poc) => poc.active !== false) && Math.abs(activePocWeightTotal - 100) <= 0.01 ? "" : "missing"}>
           Active POC influence total: <strong>{activePocWeightTotal}%</strong>
         </span>
       </div>
