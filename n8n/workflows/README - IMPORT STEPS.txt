@@ -86,3 +86,12 @@ for the POC salutation, plus All good and Share feedback buttons.
 Set Replit deployment secret N8N_QUICK_CHECKIN_WEBHOOK to workflow 13's
 production webhook URL. Keep the existing Meta callback URL; workflow 01's path
 has not changed. See docs/QUICK-CHECKIN-SETUP.md for the exact template text.
+
+
+SIX-HOUR FINAL RESPONSE COMPLETION
+----------------------------------
+Import workflow 15 and replace only CSAT_APP_URL with the published Replit URL.
+Select the existing CSAT Webhook Secret credential and activate the workflow.
+Workflow 11 must remain active and N8N_MANUAL_MESSAGE_WEBHOOK must keep pointing
+to its production webhook URL. No new Meta template or Replit secret is needed.
+See docs/SIX-HOUR-FINAL-RESPONSE-COMPLETION.md.

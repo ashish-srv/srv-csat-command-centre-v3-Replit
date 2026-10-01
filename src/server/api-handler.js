@@ -7,6 +7,7 @@ const { emitAutomation } = require("../lib/n8n");
 const { importAdminWorkbook } = require("../lib/admin-import");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
 const MAX_MANUAL_WHATSAPP_TEXT_LENGTH = 4096;
 
 function manualQuestionType(message, sessionType) {
@@ -671,6 +672,126 @@ function closingGraceMessage(poc, conversationState = {}, context = {}) {
   return `Thank you, ${salutation}. Your feedback and ${ratingText} have been successfully recorded for confidential review by the Directors.\n\nIf your feedback includes a concern or an area for improvement, the system has created the necessary action item and notified the Directors. It will be handled constructively and discreetly.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
 }
 
+function numericScore(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const score = Number(value);
+  return Number.isFinite(score) && score >= 0 && score <= 10 ? score : null;
+}
+
+function hasMandatoryFinalSweepScores(session) {
+  const state = session?.conversationState || {};
+  const overallRating = numericScore(state.overallRating)
+    ?? (session?.csatSource === "stated" ? numericScore(session.csatScore) : null);
+  if (overallRating === null) return false;
+  if (session?.sessionType !== "project_end") return true;
+  const npsScore = numericScore(state.npsScore)
+    ?? (session?.npsSource === "stated" ? numericScore(session.npsScore) : null);
+  return npsScore !== null;
+}
+
+function finalSweepPromptMessage(session, messages = []) {
+  const state = session?.conversationState || {};
+  const lastQuestion = String(state.lastQuestionAsked || "").trim();
+  return [...messages].reverse().find((message) => {
+    if (message.side !== "srv") return false;
+    const text = String(message.body || "").trim();
+    if (!text) return false;
+    if (lastQuestion && text === lastQuestion) return true;
+    return (/\bbefore we finish\b[\s\S]{0,260}\bDirectors\b/i.test(text)
+      && /\banything else\b/i.test(text))
+      || /\b(?:team|department|person|appreciation)\b[\s\S]{0,180}\bappreciat\w*\b/i.test(text);
+  }) || null;
+}
+
+/**
+ * Decide whether the six-hour fallback may close this session. The database
+ * claim prevents two schedulers from sending; this pure check also protects
+ * against a client reply or normal completion arriving between scans.
+ */
+function inactiveFinalSweepEligibility(session, messages = [], nowValue = new Date()) {
+  const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  if (Number.isNaN(now.getTime())) return { eligible: false, reason: "invalid_now" };
+  if (!session || session.sessionType === "quick_checkin") {
+    return { eligible: false, reason: "unsupported_session" };
+  }
+
+  const state = session.conversationState || {};
+  if (
+    state.sixHourAutoCompletionClaimedAt
+    || state.sixHourAutoCompletionSentAt
+    || state.sixHourAutoCompletionSkippedAt
+    || state.closingGraceExpiresAt
+    || [STATES.CLOSING_GRACE, STATES.COMPLETED, STATES.OPTED_OUT, STATES.HANDED_OFF].includes(state.state)
+  ) {
+    return { eligible: false, reason: "already_completed_or_claimed" };
+  }
+  const pendingOptionalQuestion = state.pendingQuestionType;
+  const finalSweepPending = pendingOptionalQuestion === "final_sweep"
+    && state.askedForAnythingElse === true
+    && state.anythingElseAnswered !== true;
+  const legacyAppreciationPending = pendingOptionalQuestion === "appreciation"
+    && state.askedForAppreciation === true
+    && state.appreciationAnswered !== true;
+  if (!finalSweepPending && !legacyAppreciationPending) {
+    return { eligible: false, reason: "final_sweep_not_pending" };
+  }
+  if (state.pendingGeneralIssue || state.pendingObservation || state.pendingServiceKey) {
+    return { eligible: false, reason: "required_followup_pending" };
+  }
+  if (!hasMandatoryFinalSweepScores(session)) {
+    return { eligible: false, reason: "mandatory_score_missing" };
+  }
+
+  const finalPrompt = finalSweepPromptMessage(session, messages);
+  const finalPromptAt = Date.parse(finalPrompt?.createdAt || "");
+  if (!Number.isFinite(finalPromptAt)) {
+    return { eligible: false, reason: "final_sweep_prompt_not_found" };
+  }
+
+  const latestClientMessage = [...messages].reverse().find((message) => message.side === "client");
+  const latestClientAt = Date.parse(latestClientMessage?.createdAt || session.lastClientResponseAt || "");
+  if (!Number.isFinite(latestClientAt)) {
+    return { eligible: false, reason: "client_message_not_found" };
+  }
+  // A newer reply must always be processed by the normal conversation flow.
+  if (latestClientAt > finalPromptAt) {
+    return { eligible: false, reason: "client_replied_after_final_sweep" };
+  }
+
+  const dueAt = finalPromptAt + INACTIVE_FINAL_SWEEP_MS;
+  if (now.getTime() < dueAt) {
+    return {
+      eligible: false,
+      reason: "not_due",
+      dueAt: new Date(dueAt).toISOString(),
+      finalPromptAt: new Date(finalPromptAt).toISOString(),
+      latestClientAt: new Date(latestClientAt).toISOString()
+    };
+  }
+
+  const serviceWindowClosesAt = latestClientAt + WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS;
+  if (now.getTime() >= serviceWindowClosesAt) {
+    return {
+      eligible: false,
+      closeWithoutMessage: true,
+      reason: "outside_whatsapp_service_window",
+      dueAt: new Date(dueAt).toISOString(),
+      finalPromptAt: new Date(finalPromptAt).toISOString(),
+      latestClientAt: new Date(latestClientAt).toISOString(),
+      serviceWindowClosesAt: new Date(serviceWindowClosesAt).toISOString()
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: "due",
+    dueAt: new Date(dueAt).toISOString(),
+    finalPromptAt: new Date(finalPromptAt).toISOString(),
+    latestClientAt: new Date(latestClientAt).toISOString(),
+    serviceWindowClosesAt: new Date(serviceWindowClosesAt).toISOString()
+  };
+}
+
 function recordRequiredQuestion(conversationState, project, action) {
   const markers = {
     askedForProjectEndReview: action.type === "project_end_review",
@@ -1309,6 +1430,7 @@ function applyDeferredInterpretation(turn, stateBefore, interpretation, text, pr
 //   POST /api/automation/create-due-sessions
 //   GET  /api/automation/due-reminders
 //   POST /api/automation/process-due-reminders
+//   POST /api/automation/complete-inactive-final-responses
 //   POST /api/issues/:issueId/(close|reopen|progress)
 // =====================================================================
 
@@ -1567,6 +1689,62 @@ async function notifyAutomation(store, eventType, payload, dedupeKey = null) {
   } finally {
     if (dedupeKey) pendingAutomationKeys.delete(dedupeKey);
   }
+}
+
+async function completeAutomationClaim(store, claim, event) {
+  if (!claim || typeof store.completeAutomationEvent !== "function") return;
+  try {
+    await store.completeAutomationEvent(claim.id, event);
+  } catch (error) {
+    console.warn("[automation] could not complete six-hour audit event:", error.message);
+  }
+}
+
+function claimedInactiveFinalSweepState(session, nowIso) {
+  const state = { ...(session.conversationState || {}) };
+  if (numericScore(state.overallRating) === null && session.csatSource === "stated") {
+    state.overallRating = numericScore(session.csatScore);
+  }
+  if (
+    session.sessionType === "project_end"
+    && numericScore(state.npsScore) === null
+    && session.npsSource === "stated"
+  ) {
+    state.npsScore = numericScore(session.npsScore);
+  }
+  return {
+    ...state,
+    sessionType: state.sessionType || session.sessionType,
+    state: STATES.CLOSING_GRACE,
+    pendingQuestionType: null,
+    pendingServiceKey: null,
+    askedForAnythingElse: true,
+    anythingElseAnswered: true,
+    askedForAppreciation: true,
+    appreciationAnswered: true,
+    sixHourAutoCompletionClaimedAt: nowIso,
+    closingGraceExpiresAt: new Date(new Date(nowIso).getTime() + CLOSING_GRACE_MS).toISOString()
+  };
+}
+
+async function notifyCycleSummaryAfterAutomaticCompletion(store, session, baseUrl) {
+  if (
+    !session?.cycleId
+    || typeof store.isCycleComplete !== "function"
+    || typeof store.cycleSummary !== "function"
+    || !(await store.isCycleComplete(session.cycleId))
+  ) return;
+  const summary = await store.cycleSummary(session.cycleId);
+  if (!summary || !(summary.sessions || []).length) return;
+  await notifyAutomation(
+    store,
+    "cycle_completed",
+    cycleCompletedPayload(
+      summary,
+      buildResumeUrl(baseUrl, summary.project, session)
+    ),
+    `cycle_completed:cycle:${session.cycleId}`
+  );
 }
 
 function clientQuestionsFromSessions(sessions = []) {
@@ -3611,6 +3789,224 @@ async function handleApiRequest(request) {
   }
 
   // ---- Automation / scheduler
+  if (method === "POST" && pathname === "/api/automation/complete-inactive-final-responses") {
+    if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    if (
+      typeof store.getInactiveFinalSweepCandidates !== "function"
+      || typeof store.claimAutomationEvent !== "function"
+      || typeof store.markInactiveFinalSweepClaimed !== "function"
+      || typeof store.completeInactiveFinalSweep !== "function"
+    ) {
+      return error(503, "Six-hour completion is not supported by the configured data provider");
+    }
+
+    const now = body.now ? new Date(body.now) : new Date();
+    if (Number.isNaN(now.getTime())) return error(400, "Invalid automation time");
+    const nowIso = now.toISOString();
+    const closed = typeof store.finalizeExpiredInactiveFinalSweeps === "function"
+      ? await store.finalizeExpiredInactiveFinalSweeps(nowIso)
+      : [];
+    const candidates = await store.getInactiveFinalSweepCandidates(nowIso);
+    const sent = [];
+    const closedWithoutMessage = [];
+    const duplicates = [];
+    const failed = [];
+    let ignored = 0;
+
+    for (const initialSession of candidates) {
+      const initialMessages = typeof store.getMessagesForSession === "function"
+        ? await store.getMessagesForSession(initialSession.id)
+        : [];
+      let assessment = inactiveFinalSweepEligibility(initialSession, initialMessages, now);
+      if (!assessment.eligible && !assessment.closeWithoutMessage) {
+        ignored += 1;
+        continue;
+      }
+
+      const [initialProject, initialPoc] = await Promise.all([
+        store.getProjectById(initialSession.projectId),
+        store.getClientPocById(initialSession.clientPocId)
+      ]);
+      const dedupeKey = `six_hour_completion:${initialSession.id}`;
+      const auditPayload = {
+        sessionId: initialSession.id,
+        cycleId: initialSession.cycleId,
+        projectId: initialSession.projectId,
+        clientPocId: initialSession.clientPocId,
+        reason: assessment.reason,
+        dueAt: assessment.dueAt || null
+      };
+      const claim = await store.claimAutomationEvent(
+        "six_hour_final_response_completion",
+        auditPayload,
+        dedupeKey
+      );
+      if (!claim) {
+        duplicates.push({ sessionId: initialSession.id, dedupeKey });
+        continue;
+      }
+
+      // Re-read after the unique claim. A client may have answered or the
+      // normal flow may have completed while this scheduler was selecting rows.
+      const session = await store.getSession(initialSession.id);
+      const messages = typeof store.getMessagesForSession === "function"
+        ? await store.getMessagesForSession(initialSession.id)
+        : [];
+      assessment = inactiveFinalSweepEligibility(session, messages, now);
+      if (!assessment.eligible && !assessment.closeWithoutMessage) {
+        await completeAutomationClaim(store, claim, {
+          eventType: "six_hour_final_response_completion",
+          payload: { ...auditPayload, reason: assessment.reason },
+          status: "skipped",
+          webhookUrlConfigured: false,
+          sentAt: nowIso
+        });
+        ignored += 1;
+        continue;
+      }
+
+      const project = session.projectId === initialProject?.id
+        ? initialProject
+        : await store.getProjectById(session.projectId);
+      const poc = session.clientPocId === initialPoc?.id
+        ? initialPoc
+        : await store.getClientPocById(session.clientPocId);
+
+      // If the free-text service window has expired (or delivery details are
+      // no longer available), close the completed feedback without trying an
+      // impermissible or impossible WhatsApp send.
+      if (
+        assessment.closeWithoutMessage
+        || !project
+        || !poc
+        || poc.active === false
+        || !poc.contactWhatsapp
+      ) {
+        const reason = assessment.closeWithoutMessage
+          ? assessment.reason
+          : !poc?.contactWhatsapp
+            ? "client_whatsapp_missing"
+            : poc?.active === false
+              ? "client_poc_inactive"
+              : "project_or_poc_missing";
+        const skippedState = claimedInactiveFinalSweepState(session, nowIso);
+        delete skippedState.closingGraceExpiresAt;
+        skippedState.state = STATES.COMPLETED;
+        skippedState.sixHourAutoCompletionSkippedAt = nowIso;
+        skippedState.sixHourAutoCompletionSkipReason = reason;
+        skippedState.closureReason = "final_sweep_inactive_six_hours_no_message";
+        const completed = await store.completeInactiveFinalSweep(session.id, skippedState, nowIso);
+        await completeAutomationClaim(store, claim, {
+          eventType: "six_hour_final_response_completion",
+          payload: { ...auditPayload, reason },
+          status: "skipped",
+          webhookUrlConfigured: Boolean(process.env.N8N_MANUAL_MESSAGE_WEBHOOK),
+          sentAt: nowIso
+        });
+        closedWithoutMessage.push({ session: completed, reason });
+        await notifyCycleSummaryAfterAutomaticCompletion(store, completed, baseUrl);
+        continue;
+      }
+
+      const previousState = { ...(session.conversationState || {}) };
+      const claimedState = claimedInactiveFinalSweepState(session, nowIso);
+      await store.markInactiveFinalSweepClaimed(session.id, claimedState);
+      const text = closingGraceMessage(poc, claimedState);
+      const requestId = `six-hour-completion-${session.id}`;
+      const deliveryPayload = {
+        sessionId: session.id,
+        cycleId: session.cycleId,
+        project,
+        poc,
+        to: poc.contactWhatsapp,
+        text,
+        requestId,
+        reason: "final_sweep_inactive_six_hours"
+      };
+      const delivery = await emitAutomation("manual_whatsapp_message", deliveryPayload);
+      await completeAutomationClaim(store, claim, {
+        ...delivery,
+        eventType: "six_hour_final_response_completion",
+        payload: deliveryPayload,
+        dedupeKey
+      });
+
+      if (delivery.status === "sent") {
+        const sentAt = delivery.sentAt || nowIso;
+        const completedState = {
+          ...claimedState,
+          sixHourAutoCompletionSentAt: sentAt,
+          completionMessageSentAt: claimedState.completionMessageSentAt || sentAt,
+          sixHourAutoCompletionDeliveryStatus: "sent"
+        };
+        const completed = await store.completeInactiveFinalSweep(
+          session.id,
+          completedState,
+          sentAt
+        );
+        const message = await store.addMessage(session.id, {
+          speaker: "SRV Media MD Office",
+          side: "srv",
+          body: text,
+          metadata: {
+            source: "six_hour_final_response_completion",
+            state: STATES.CLOSING_GRACE,
+            requestId,
+            deliveryStatus: "accepted",
+            deliveryStatusCode: delivery.statusCode || 200
+          }
+        });
+        sent.push({ session: completed, message, correctionWindowEndsAt: completedState.closingGraceExpiresAt });
+        await notifyCycleSummaryAfterAutomaticCompletion(store, completed, baseUrl);
+        continue;
+      }
+
+      const deliveryUncertain = delivery.status === "failed" && !delivery.statusCode && Boolean(delivery.error);
+      if (deliveryUncertain) {
+        // A timeout may occur after Meta accepted the message. Treat it as an
+        // uncertain one-time dispatch and never retry automatically: avoiding
+        // a duplicate client message is more important than guessing.
+        const uncertainState = {
+          ...claimedState,
+          sixHourAutoCompletionDeliveryUncertainAt: nowIso,
+          sixHourAutoCompletionDeliveryStatus: "uncertain",
+          sixHourAutoCompletionDeliveryError: delivery.error || null
+        };
+        const completed = await store.completeInactiveFinalSweep(session.id, uncertainState, nowIso);
+        failed.push({ session: completed, delivery, retrySuppressed: true });
+        await notifyCycleSummaryAfterAutomaticCompletion(store, completed, baseUrl);
+      } else {
+        const failedState = {
+          ...previousState,
+          sixHourAutoCompletionClaimedAt: nowIso,
+          sixHourAutoCompletionFailedAt: nowIso,
+          sixHourAutoCompletionDeliveryStatus: delivery.status,
+          sixHourAutoCompletionDeliveryError: delivery.error || null,
+          sixHourAutoCompletionDeliveryStatusCode: delivery.statusCode || null
+        };
+        if (typeof store.markInactiveFinalSweepDeliveryFailure === "function") {
+          await store.markInactiveFinalSweepDeliveryFailure(
+            session.id,
+            failedState,
+            session.reminderDueAt
+          );
+        }
+        failed.push({ sessionId: session.id, delivery, retrySuppressed: true });
+      }
+    }
+
+    return json(200, {
+      now: nowIso,
+      inactivityHours: INACTIVE_FINAL_SWEEP_MS / (60 * 60 * 1000),
+      sent,
+      closedWithoutMessage,
+      closedExpiredCorrectionWindows: closed,
+      duplicates,
+      failed,
+      ignored
+    });
+  }
+
   if (method === "GET" && pathname === "/api/automation/due-feedback") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
     const targets = await store.getDueFeedbackTargets(searchParams.get("now") || undefined);
@@ -4658,7 +5054,11 @@ module.exports = {
     latestExplicitOverallRating,
     clientBurstContext,
     manualQuestionType,
-    applyManualQuestionContext
+    applyManualQuestionContext,
+    hasMandatoryFinalSweepScores,
+    finalSweepPromptMessage,
+    inactiveFinalSweepEligibility,
+    claimedInactiveFinalSweepState
   }
 };
 

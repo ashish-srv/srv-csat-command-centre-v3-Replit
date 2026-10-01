@@ -59,3 +59,12 @@ the session. **Stop Feedback** does not invoke this workflow.
 ## Quick Check-in setup
 
 See [Quick Check-in setup](../../docs/QUICK-CHECKIN-SETUP.md) for the Meta template, workflows 13-14, Replit secret, and activation steps.
+
+## Six-hour final-response completion
+
+Workflow 15 calls the application every five minutes. It sends the normal
+thank-you and 10-minute correction-window message once when all mandatory
+feedback is complete but the final optional Directors question has been
+unanswered for six hours. It reuses workflow 11 for the WhatsApp delivery and
+does not require another Meta template or Replit secret. See
+[Six-hour final-response completion](../../docs/SIX-HOUR-FINAL-RESPONSE-COMPLETION.md).

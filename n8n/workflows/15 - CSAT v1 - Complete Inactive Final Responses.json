@@ -1,0 +1,145 @@
+{
+  "name": "15. CSAT v1 - Complete Inactive Final Responses",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "3f5a2a6f-b6f2-4490-bce5-22d0c271fdb2",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0467bde3-73d9-4945-9500-426d9a28eed0",
+              "name": "CSAT_APP_URL",
+              "value": "https://YOUR-REPLIT-APP.replit.app",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "a678cfd6-ef63-4508-a8c1-40a98983b7aa",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        288,
+        0
+      ],
+      "notes": "Replace only CSAT_APP_URL. Authentication uses the existing CSAT Webhook Secret credential."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.CSAT_APP_URL }}/api/automation/complete-inactive-final-responses",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { now: $now.toISO() } }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "87d9f907-b91c-4600-882c-02eb614ee628",
+      "name": "Complete Inactive Final Responses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        576,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "08efba4e-663e-4720-8978-a2bdf133f486",
+      "name": "Completion Scan Finished",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        864,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Complete Inactive Final Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Complete Inactive Final Responses": {
+      "main": [
+        [
+          {
+            "node": "Completion Scan Finished",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "timezone": "Asia/Kolkata"
+  }
+}

@@ -35,6 +35,9 @@ const calls = {
   deletedClients: [],
   deletedClusters: [],
   reminderOptions: [],
+  inactiveCompletionClaims: [],
+  inactiveCompletionFinishes: [],
+  inactiveCompletionFailures: [],
   automationClaims: new Map()
 };
 
@@ -229,6 +232,34 @@ const store = {
     return store._session;
   },
   getDueFeedbackTargets: async () => [{ projectKey: project.key, cycleType: "pulse" }],
+  getInactiveFinalSweepCandidates: async () => store._inactiveFinalSweepCandidates,
+  markInactiveFinalSweepClaimed: async (sessionId, conversationState) => {
+    calls.inactiveCompletionClaims.push({ sessionId, conversationState });
+    store._session = {
+      ...store._session,
+      conversationState,
+      reminderDueAt: null
+    };
+    return store._session;
+  },
+  completeInactiveFinalSweep: async (sessionId, conversationState, completedAt) => {
+    calls.inactiveCompletionFinishes.push({ sessionId, conversationState, completedAt });
+    store._session = {
+      ...store._session,
+      status: "completed",
+      completionStatus: "completed",
+      completedAt,
+      reminderDueAt: null,
+      conversationState
+    };
+    return store._session;
+  },
+  markInactiveFinalSweepDeliveryFailure: async (sessionId, conversationState, reminderDueAt) => {
+    calls.inactiveCompletionFailures.push({ sessionId, conversationState, reminderDueAt });
+    store._session = { ...store._session, conversationState, reminderDueAt };
+    return store._session;
+  },
+  finalizeExpiredInactiveFinalSweeps: async () => store._expiredInactiveFinalSweeps,
   getDueReminderTargets: async () => [{
     session: store._session,
     poc,
@@ -338,6 +369,8 @@ const store = {
   _atomicDuplicateIds: new Set(),
   _cycleComplete: false,
   _cycleSummary: null,
+  _inactiveFinalSweepCandidates: [],
+  _expiredInactiveFinalSweeps: [],
   _injectRapidRatingMessages: false,
   _rapidRatingMessagesInjected: false
 };
@@ -5218,6 +5251,252 @@ async function scenario(name, fn) {
       { id: "important", weight: 65 }
     ]);
     assert.strictEqual(levelStore._levels, null);
+  });
+
+  await scenario("six-hour completion accepts an existing monthly final-sweep session", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const question = "Before we finish, is there anything else you would like the Directors to know—such as an issue, an area for improvement, or any appreciation you would like us to record? If not, just reply no.";
+    const session = {
+      id: "sess_existing_final",
+      sessionType: "pulse",
+      status: "partial",
+      completionStatus: "partial",
+      csatScore: 8,
+      csatSource: "stated",
+      lastClientResponseAt: "2026-10-01T00:00:00.000Z",
+      conversationState: {
+        sessionType: "pulse",
+        state: "waiting_for_more_services",
+        pendingQuestionType: "final_sweep",
+        askedForAnythingElse: true,
+        anythingElseAnswered: false,
+        overallRating: 8,
+        lastQuestionAsked: question
+      }
+    };
+    const messages = [
+      { side: "client", body: "8", createdAt: "2026-10-01T00:00:00.000Z" },
+      { side: "srv", body: question, createdAt: "2026-10-01T00:00:05.000Z" }
+    ];
+    const eligible = conversationFlow.inactiveFinalSweepEligibility(
+      session,
+      messages,
+      "2026-10-01T06:01:00.000Z"
+    );
+    assert.strictEqual(eligible.eligible, true);
+    assert.strictEqual(eligible.reason, "due");
+    assert.strictEqual(eligible.dueAt, "2026-10-01T06:00:05.000Z");
+
+    const legacyQuestion = "Is there any specific team or department you would like to appreciate for their work?";
+    const legacyAppreciation = conversationFlow.inactiveFinalSweepEligibility({
+      ...session,
+      conversationState: {
+        ...session.conversationState,
+        pendingQuestionType: "appreciation",
+        askedForAnythingElse: false,
+        askedForAppreciation: true,
+        appreciationAnswered: false,
+        lastQuestionAsked: legacyQuestion
+      }
+    }, [
+      messages[0],
+      { side: "srv", body: legacyQuestion, createdAt: "2026-10-01T00:00:05.000Z" }
+    ], "2026-10-01T06:01:00.000Z");
+    assert.strictEqual(legacyAppreciation.eligible, true,
+      "an already-open legacy optional appreciation prompt must also time out safely");
+
+    const closing = conversationFlow.inactiveFinalSweepEligibility({
+      ...session,
+      conversationState: {
+        ...session.conversationState,
+        state: "closing_grace",
+        closingGraceExpiresAt: "2026-10-01T06:11:00.000Z"
+      }
+    }, messages, "2026-10-01T06:01:00.000Z");
+    assert.strictEqual(closing.eligible, false);
+    assert.strictEqual(closing.reason, "already_completed_or_claimed",
+      "the normal thank-you path must block the fallback send");
+  });
+
+  await scenario("six-hour completion requires project-end NPS and respects client replies", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const question = "Before we finish, is there anything else you would like the Directors to know? If not, just reply no.";
+    const base = {
+      id: "sess_project_end_final",
+      sessionType: "project_end",
+      csatScore: 8,
+      csatSource: "stated",
+      lastClientResponseAt: "2026-10-01T00:00:00.000Z",
+      conversationState: {
+        state: "waiting_for_more_services",
+        pendingQuestionType: "final_sweep",
+        askedForAnythingElse: true,
+        anythingElseAnswered: false,
+        overallRating: 8,
+        lastQuestionAsked: question
+      }
+    };
+    const messages = [
+      { side: "client", body: "8", createdAt: "2026-10-01T00:00:00.000Z" },
+      { side: "srv", body: question, createdAt: "2026-10-01T00:00:05.000Z" }
+    ];
+    const missingNps = conversationFlow.inactiveFinalSweepEligibility(
+      base,
+      messages,
+      "2026-10-01T07:00:00.000Z"
+    );
+    assert.strictEqual(missingNps.eligible, false);
+    assert.strictEqual(missingNps.reason, "mandatory_score_missing");
+
+    const withNps = {
+      ...base,
+      npsScore: 9,
+      npsSource: "stated",
+      conversationState: { ...base.conversationState, npsScore: 9 }
+    };
+    assert.strictEqual(conversationFlow.inactiveFinalSweepEligibility(
+      withNps,
+      messages,
+      "2026-10-01T07:00:00.000Z"
+    ).eligible, true);
+    const replied = conversationFlow.inactiveFinalSweepEligibility(
+      withNps,
+      [...messages, { side: "client", body: "One more point", createdAt: "2026-10-01T01:00:00.000Z" }],
+      "2026-10-01T07:00:00.000Z"
+    );
+    assert.strictEqual(replied.eligible, false);
+    assert.strictEqual(replied.reason, "client_replied_after_final_sweep");
+  });
+
+  await scenario("six-hour completion never sends free text outside WhatsApp's service window", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const question = "Before we finish, is there anything else you would like the Directors to know? If not, just reply no.";
+    const assessment = conversationFlow.inactiveFinalSweepEligibility({
+      id: "sess_old_final",
+      sessionType: "pulse",
+      csatScore: 7,
+      csatSource: "stated",
+      lastClientResponseAt: "2026-09-29T00:00:00.000Z",
+      conversationState: {
+        state: "waiting_for_more_services",
+        pendingQuestionType: "final_sweep",
+        askedForAnythingElse: true,
+        anythingElseAnswered: false,
+        overallRating: 7,
+        lastQuestionAsked: question
+      }
+    }, [
+      { side: "client", body: "7", createdAt: "2026-09-29T00:00:00.000Z" },
+      { side: "srv", body: question, createdAt: "2026-09-29T00:00:05.000Z" }
+    ], "2026-10-01T00:00:06.000Z");
+    assert.strictEqual(assessment.eligible, false);
+    assert.strictEqual(assessment.closeWithoutMessage, true);
+    assert.strictEqual(assessment.reason, "outside_whatsapp_service_window");
+  });
+
+  await scenario("six-hour scheduler sends once and repeated scans cannot duplicate it", async () => {
+    const priorWebhook = process.env.N8N_MANUAL_MESSAGE_WEBHOOK;
+    const priorSecret = process.env.N8N_WEBHOOK_SECRET;
+    const priorFetch = global.fetch;
+    const priorSession = store._session;
+    const priorCandidates = store._inactiveFinalSweepCandidates;
+    const priorMessages = [...calls.messages];
+    const priorClaims = new Map(calls.automationClaims);
+    const sends = [];
+    const question = "Before we finish, is there anything else you would like the Directors to know—such as an issue, an area for improvement, or any appreciation you would like us to record? If not, just reply no.";
+    process.env.N8N_MANUAL_MESSAGE_WEBHOOK = "https://n8n.example.test/webhook/csat-manual-whatsapp-message";
+    process.env.N8N_WEBHOOK_SECRET = "six-hour-secret";
+    calls.messages.length = 0;
+    calls.messages.push(
+      { id: "msg_rating", sessionId: "sess_six_hour", side: "client", body: "8", createdAt: "2026-10-01T00:00:00.000Z" },
+      { id: "msg_final", sessionId: "sess_six_hour", side: "srv", body: question, createdAt: "2026-10-01T00:00:05.000Z" }
+    );
+    store._session = {
+      id: "sess_six_hour", cycleId: "cyc_six_hour", projectId: project.id,
+      clientPocId: poc.id, status: "partial", completionStatus: "partial",
+      sessionType: "pulse", csatScore: 8, csatSource: "stated",
+      lastClientResponseAt: "2026-10-01T00:00:00.000Z",
+      reminderDueAt: "2026-10-02T00:00:00.000Z",
+      conversationState: {
+        sessionType: "pulse",
+        state: "waiting_for_more_services",
+        pendingQuestionType: "final_sweep",
+        askedForAnythingElse: true,
+        anythingElseAnswered: false,
+        overallRating: 8,
+        lastQuestionAsked: question
+      }
+    };
+    store._inactiveFinalSweepCandidates = [store._session];
+    calls.automationClaims.delete("six_hour_completion:sess_six_hour");
+    global.fetch = async (url, options) => {
+      sends.push({ url, body: JSON.parse(options.body) });
+      return { ok: true, status: 200 };
+    };
+    try {
+      const first = await rawReq("POST", "/api/automation/complete-inactive-final-responses", {
+        now: "2026-10-01T06:01:00.000Z"
+      }, { "x-csat-webhook-secret": "six-hour-secret" });
+      const firstPayload = JSON.parse(first.body);
+      assert.strictEqual(first.statusCode, 200);
+      assert.strictEqual(firstPayload.sent.length, 1);
+      assert.strictEqual(sends.length, 1);
+      assert.strictEqual(sends[0].body.eventType, "manual_whatsapp_message");
+      assert.match(sends[0].body.text, /remain active for the next 10 minutes/i);
+      assert.strictEqual(store._session.conversationState.state, "closing_grace");
+      assert.ok(store._session.conversationState.sixHourAutoCompletionSentAt);
+      assert.strictEqual(
+        calls.messages.filter((message) => message.metadata?.source === "six_hour_final_response_completion").length,
+        1
+      );
+
+      store._inactiveFinalSweepCandidates = [store._session];
+      const second = await rawReq("POST", "/api/automation/complete-inactive-final-responses", {
+        now: "2026-10-01T06:02:00.000Z"
+      }, { "x-csat-webhook-secret": "six-hour-secret" });
+      const secondPayload = JSON.parse(second.body);
+      assert.strictEqual(second.statusCode, 200);
+      assert.strictEqual(secondPayload.sent.length, 0);
+      assert.strictEqual(sends.length, 1, "the thank-you message must never be sent twice");
+    } finally {
+      if (priorWebhook === undefined) delete process.env.N8N_MANUAL_MESSAGE_WEBHOOK;
+      else process.env.N8N_MANUAL_MESSAGE_WEBHOOK = priorWebhook;
+      if (priorSecret === undefined) delete process.env.N8N_WEBHOOK_SECRET;
+      else process.env.N8N_WEBHOOK_SECRET = priorSecret;
+      global.fetch = priorFetch;
+      store._session = priorSession;
+      store._inactiveFinalSweepCandidates = priorCandidates;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      calls.automationClaims.clear();
+      for (const [key, value] of priorClaims) calls.automationClaims.set(key, value);
+    }
+  });
+
+  await scenario("expired automatic correction windows are finalized without another message", async () => {
+    const provider = Object.create(SupabaseStore.prototype);
+    const row = {
+      id: "sess_expired_auto", cycle_id: "cyc_1", project_id: project.id,
+      client_poc_id: poc.id, status: "completed", completion_status: "completed",
+      conversation_state: {
+        state: "closing_grace",
+        sixHourAutoCompletionSentAt: "2026-10-01T06:00:00.000Z",
+        closingGraceExpiresAt: "2026-10-01T06:10:00.000Z"
+      },
+      completed_at: "2026-10-01T06:00:00.000Z",
+      feedback_cycles: { cycle_type: "pulse" }
+    };
+    let savedState = null;
+    provider.request = async (table, options) => {
+      assert.strictEqual(table, "feedback_sessions");
+      if (!options.method) return [row];
+      savedState = options.body.conversation_state;
+      return [{ ...row, conversation_state: savedState }];
+    };
+    const closed = await provider.finalizeExpiredInactiveFinalSweeps("2026-10-01T06:11:00.000Z");
+    assert.strictEqual(closed.length, 1);
+    assert.strictEqual(savedState.state, "completed");
+    assert.strictEqual(savedState.closureReason, "final_sweep_inactive_six_hours");
   });
 
   let failed = 0;

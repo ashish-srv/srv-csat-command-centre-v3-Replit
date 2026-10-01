@@ -1748,6 +1748,118 @@ class SupabaseStore {
   // Scheduler targets
   // -------------------------------------------------------------------
 
+  async getInactiveFinalSweepCandidates(nowIso = new Date().toISOString()) {
+    const now = new Date(nowIso);
+    if (Number.isNaN(now.getTime())) throw new Error("Invalid automation time");
+    const cutoffIso = new Date(now.getTime() - (6 * 60 * 60 * 1000)).toISOString();
+    const rows = await this.request("feedback_sessions", {
+      query: `status=in.(started,partial,no_response,needs_attention)&last_client_response_at=lte.${encodeURIComponent(cutoffIso)}&select=*,feedback_cycles(cycle_type)&order=last_client_response_at.desc&limit=1000`
+    });
+    return rows.map((row) => toSession(row, {
+      cycleType: row.feedback_cycles ? row.feedback_cycles.cycle_type : null
+    }));
+  }
+
+  async markInactiveFinalSweepClaimed(sessionId, conversationState) {
+    const session = await this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    const rows = await this.request("feedback_sessions", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(sessionId)}`,
+      body: {
+        conversation_state: conversationState,
+        reminder_due_at: null
+      }
+    });
+    return toSession(rows[0], {
+      cycleType: session.sessionType,
+      pocName: session.pocName,
+      pocWeight: session.pocWeight
+    });
+  }
+
+  async completeInactiveFinalSweep(sessionId, conversationState, completedAt = new Date().toISOString()) {
+    const session = await this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    const rows = await this.request("feedback_sessions", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(sessionId)}`,
+      body: {
+        status: session.status === "needs_attention" ? "needs_attention" : "completed",
+        completion_status: "completed",
+        conversation_state: conversationState,
+        completed_at: completedAt,
+        reminder_due_at: null
+      }
+    });
+    const updated = toSession(rows[0], {
+      cycleType: session.sessionType,
+      pocName: session.pocName,
+      pocWeight: session.pocWeight
+    });
+    await this.recomputeCycle(session.cycleId, session.projectId);
+    return updated;
+  }
+
+  async markInactiveFinalSweepDeliveryFailure(sessionId, conversationState, reminderDueAt = null) {
+    const session = await this.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    const rows = await this.request("feedback_sessions", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(sessionId)}`,
+      body: {
+        conversation_state: conversationState,
+        reminder_due_at: reminderDueAt
+      }
+    });
+    return toSession(rows[0], {
+      cycleType: session.sessionType,
+      pocName: session.pocName,
+      pocWeight: session.pocWeight
+    });
+  }
+
+  async finalizeExpiredInactiveFinalSweeps(nowIso = new Date().toISOString()) {
+    const nowMs = new Date(nowIso).getTime();
+    if (!Number.isFinite(nowMs)) throw new Error("Invalid automation time");
+    const rows = await this.request("feedback_sessions", {
+      query: "completion_status=eq.completed&select=*,feedback_cycles(cycle_type)&order=completed_at.desc&limit=1000"
+    });
+    const closed = [];
+    for (const row of rows) {
+      const session = toSession(row, {
+        cycleType: row.feedback_cycles ? row.feedback_cycles.cycle_type : null
+      });
+      const state = session.conversationState || {};
+      const expiresAt = Date.parse(state.closingGraceExpiresAt || "");
+      if (
+        state.state !== "closing_grace"
+        || !(state.sixHourAutoCompletionSentAt || state.sixHourAutoCompletionDeliveryUncertainAt)
+        || !Number.isFinite(expiresAt)
+        || expiresAt > nowMs
+      ) continue;
+
+      const conversationState = {
+        ...state,
+        state: "completed",
+        pendingQuestionType: null,
+        closingGraceClosedAt: nowIso,
+        closureReason: "final_sweep_inactive_six_hours"
+      };
+      const updatedRows = await this.request("feedback_sessions", {
+        method: "PATCH",
+        query: `id=eq.${encodeURIComponent(session.id)}`,
+        body: { conversation_state: conversationState, reminder_due_at: null }
+      });
+      closed.push(toSession(updatedRows[0], {
+        cycleType: session.sessionType,
+        pocName: session.pocName,
+        pocWeight: session.pocWeight
+      }));
+    }
+    return closed;
+  }
+
   async getDueFeedbackTargets(nowIso = new Date().toISOString()) {
     const projects = await this.listProjects();
     const targets = [];

@@ -66,6 +66,28 @@ async function main() {
   assert.strictEqual(deleted.length, 1);
   assert.match(deletePool.calls[0].sql, /IN \(\$1, \$2\) RETURNING t\.\*/);
 
+  const finalSweepPool = new FakePool([
+    [{
+      id: "session-final", cycle_id: "cycle-final", project_id: "project-1",
+      client_poc_id: "poc-1", status: "partial", completion_status: "partial",
+      conversation_state: { pendingQuestionType: "final_sweep" },
+      last_client_response_at: "2026-10-01T00:00:00.000Z"
+    }],
+    [{ id: "cycle-final", cycle_type: "pulse" }]
+  ]);
+  const finalSweepStore = new PostgresStore({ pool: finalSweepPool });
+  const finalSweepSessions = await finalSweepStore.getInactiveFinalSweepCandidates(
+    "2026-10-01T07:00:00.000Z"
+  );
+  assert.strictEqual(finalSweepSessions.length, 1);
+  assert.strictEqual(finalSweepSessions[0].sessionType, "pulse");
+  assert.match(finalSweepPool.calls[0].sql, /t\."status" IN \(\$1, \$2, \$3, \$4\)/);
+  assert.match(finalSweepPool.calls[0].sql, /t\."last_client_response_at" <= \$5/);
+  assert.deepStrictEqual(finalSweepPool.calls[0].values, [
+    "started", "partial", "no_response", "needs_attention",
+    "2026-10-01T01:00:00.000Z", 1000
+  ]);
+
   console.log("PostgreSQL adapter smoke tests passed.");
 }
 
