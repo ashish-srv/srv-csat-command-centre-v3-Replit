@@ -8,6 +8,7 @@ import {
   formatSessionOutcome, riskClass, scoreClass
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill, TonePill } from "./Ui.jsx";
+import ReportDownloads from "./ReportDownloads.jsx";
 
 const COMPLETION_OPTIONS = [
   { value: "", label: "Any completion" },
@@ -729,6 +730,269 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const quickResponses = cycleSessions.filter((session) => Boolean(session.lastClientResponseAt)).length;
   const filtersActive = Boolean(cycleTypes.length || quickOutcomes.length || completion || range.from || range.to || feedbackPocId);
 
+  async function buildProjectReport() {
+    const reportSessions = cycles.flatMap((cycle) => (cycle.sessions || [])
+      .filter((session) => !feedbackPocId || session.clientPocId === feedbackPocId)
+      .map((session) => ({ ...session, reportCycle: cycle })));
+    const conversationGroups = await Promise.all(reportSessions.map(async (session) => ({
+      session,
+      messages: await loadMessages(session.id)
+    })));
+    const reportPocs = feedbackPocId ? pocs.filter((poc) => poc.id === feedbackPocId) : pocs;
+    const cycleServiceRows = cycles.flatMap((cycle) => (
+      workspace.serviceFeedbackByCycle?.[cycle.id] || []
+    ).map((service) => ({
+      cycle: formatCycleType(cycle.cycleType, project.feedbackIntervalDays),
+      cycleStarted: formatDate(cycle.startedAt),
+      service: service.serviceName || service.name || service.serviceKey,
+      score: service.score,
+      source: service.source === "predicted" ? "Read from chat" : "Client rating",
+      owner: services.find((item) => item.serviceKey === service.serviceKey)?.managerName
+        || services.find((item) => item.serviceKey === service.serviceKey)?.ownerName
+        || "Not set"
+    })));
+    const serviceRows = cycleServiceRows.length ? cycleServiceRows : services.map((service) => ({
+      cycle: "Latest known",
+      cycleStarted: "--",
+      service: service.name,
+      score: service.score,
+      source: service.score === null || service.score === undefined ? "Not scored" : "Latest recorded",
+      owner: service.managerName || service.ownerName || "Not set"
+    }));
+    const filterText = (values, fallback = "All") => values.length ? values.map((value) => (
+      value === "pulse" || value === "project_end" || value === "quick_checkin"
+        ? formatCycleType(value, project.feedbackIntervalDays)
+        : value
+    )).join(", ") : fallback;
+
+    return {
+      title: `${project.name} CSAT report`,
+      subtitle: `${project.clientName || "Client"} · ${project.clusterName || "No cluster"} · Client / POC / Service detail`,
+      generatedAt: new Date().toISOString(),
+      filters: [
+        { label: "Cluster", value: project.clusterName || "No cluster" },
+        { label: "Client", value: project.clientName || "--" },
+        { label: "Project", value: project.name },
+        { label: "Cycle type", value: filterText(cycleTypes) },
+        { label: "Quick check-in result", value: filterText(quickOutcomes) },
+        { label: "Completion", value: completion || "Any completion" },
+        { label: "Date range", value: range.from || range.to ? `${range.from || "Any"} to ${range.to || "Any"}` : "All dates" },
+        { label: "Feedback by", value: feedbackPocId ? pocs.find((poc) => poc.id === feedbackPocId)?.name || "Selected POC" : "All POCs" }
+      ],
+      metrics: [
+        { label: selectedCycle ? "Selected cycle CSAT" : "Latest CSAT", value: formatScore(statedScore) },
+        { label: "Predicted CSAT", value: formatScore(predictedScore) },
+        { label: "NPS", value: formatNps(selectedCycle ? selectedCycle.npsScore : project.npsScore) },
+        { label: "Active POCs", value: pocs.filter((poc) => poc.active !== false).length },
+        { label: "Filtered cycles", value: cycles.length },
+        { label: "Open issues", value: openIssues.length }
+      ],
+      sections: [
+        {
+          title: "Project details",
+          sheetName: "Project",
+          columns: [
+            { key: "client", label: "Client", width: 24 },
+            { key: "project", label: "Project", width: 28 },
+            { key: "projectId", label: "Project ID", width: 22 },
+            { key: "status", label: "Status", width: 12 },
+            { key: "start", label: "Start", width: 14 },
+            { key: "end", label: "End", width: 14 },
+            { key: "interval", label: "Cycle interval", width: 16 },
+            { key: "nextDue", label: "Next pulse due", width: 16 },
+            { key: "csat", label: "Latest CSAT", width: 12, numberFormat: "0.0" },
+            { key: "risk", label: "Risk", width: 12 }
+          ],
+          rows: [{
+            client: project.clientName || "--",
+            project: project.name,
+            projectId: project.key,
+            status: project.activeStatus,
+            start: formatDate(project.startDate),
+            end: formatDate(project.endDate),
+            interval: `${project.feedbackIntervalDays || 30} days`,
+            nextDue: formatDate(project.nextCycleDueAt),
+            csat: project.csatScore,
+            risk: project.riskLevel || "Not scored"
+          }]
+        },
+        {
+          title: "Client POCs",
+          sheetName: "Client POCs",
+          columns: [
+            { key: "name", label: "POC", width: 24 },
+            { key: "designation", label: "Designation", width: 24 },
+            { key: "whatsapp", label: "WhatsApp", width: 18 },
+            { key: "email", label: "Email", width: 28 },
+            { key: "status", label: "Status", width: 12 },
+            { key: "level", label: "Level", width: 14 },
+            { key: "influence", label: "Influence", width: 12 }
+          ],
+          rows: reportPocs.map((poc) => ({
+            name: poc.name,
+            designation: poc.designation || "--",
+            whatsapp: poc.contactWhatsapp || "--",
+            email: poc.contactEmail || "--",
+            status: poc.active === false ? "Inactive" : "Active",
+            level: formatPocLevel(poc),
+            influence: `${Number(poc.weightPercentage) || 0}%`
+          }))
+        },
+        {
+          title: "Service feedback",
+          sheetName: "Service feedback",
+          note: cycleServiceRows.length ? "Scores captured in cycles matching the current workspace filters." : "Latest known project service scores.",
+          columns: [
+            { key: "cycle", label: "Cycle", width: 20 },
+            { key: "cycleStarted", label: "Cycle started", width: 14 },
+            { key: "service", label: "Service", width: 26 },
+            { key: "score", label: "Score", width: 10, numberFormat: "0.0" },
+            { key: "source", label: "Score source", width: 18 },
+            { key: "owner", label: "Internal owner", width: 26 }
+          ],
+          rows: serviceRows
+        },
+        {
+          title: "Feedback cycles",
+          sheetName: "Feedback cycles",
+          columns: [
+            { key: "cycle", label: "Cycle", width: 22 },
+            { key: "started", label: "Started", width: 18 },
+            { key: "closed", label: "Closed", width: 18 },
+            { key: "status", label: "Status", width: 14 },
+            { key: "pocs", label: "POCs", width: 10 },
+            { key: "responded", label: "Responded", width: 12 },
+            { key: "csat", label: "CSAT", width: 10, numberFormat: "0.0" },
+            { key: "nps", label: "NPS", width: 10, numberFormat: "0.0" }
+          ],
+          rows: cycles.map((cycle) => ({
+            cycle: formatCycleType(cycle.cycleType, project.feedbackIntervalDays),
+            started: formatDateTime(cycle.startedAt),
+            closed: cycle.closedAt ? formatDateTime(cycle.closedAt) : "Open",
+            status: formatCycleStatus(cycle),
+            pocs: cycle.pocTotal || (cycle.sessions || []).length,
+            responded: cycle.pocResponded || (cycle.sessions || []).filter((session) => session.lastClientResponseAt).length,
+            csat: cycle.csatScore,
+            nps: cycle.npsScore
+          }))
+        },
+        {
+          title: "POC session outcomes",
+          sheetName: "POC sessions",
+          columns: [
+            { key: "cycle", label: "Cycle", width: 20 },
+            { key: "poc", label: "POC", width: 24 },
+            { key: "outcome", label: "Outcome", width: 22 },
+            { key: "started", label: "Started", width: 18 },
+            { key: "completed", label: "Completed", width: 18 },
+            { key: "reminders", label: "Reminders", width: 12 },
+            { key: "statedCsat", label: "Stated CSAT", width: 12, numberFormat: "0.0" },
+            { key: "predictedCsat", label: "Predicted CSAT", width: 14, numberFormat: "0.0" },
+            { key: "nps", label: "NPS", width: 10, numberFormat: "0.0" }
+          ],
+          rows: reportSessions.map((session) => ({
+            cycle: formatCycleType(session.reportCycle.cycleType, project.feedbackIntervalDays),
+            poc: session.pocName || pocNameById.get(session.clientPocId) || "--",
+            outcome: formatSessionOutcome(session),
+            started: formatDateTime(session.startedAt),
+            completed: session.completedAt ? formatDateTime(session.completedAt) : "--",
+            reminders: Number(session.reminderCount) || 0,
+            statedCsat: session.csatSource === "predicted" ? null : session.csatScore,
+            predictedCsat: session.predictedCsat,
+            nps: session.npsScore
+          }))
+        },
+        {
+          title: "Issues",
+          sheetName: "Issues",
+          columns: [
+            { key: "status", label: "Status", width: 12 },
+            { key: "service", label: "Service", width: 22 },
+            { key: "issue", label: "Issue", width: 50 },
+            { key: "rootCause", label: "Root cause / detail", width: 50 },
+            { key: "severity", label: "Severity", width: 12 },
+            { key: "raisedBy", label: "Raised by", width: 22 },
+            { key: "raised", label: "Raised", width: 18 },
+            { key: "closed", label: "Closed", width: 18 },
+            { key: "resolution", label: "Resolution note", width: 45 }
+          ],
+          rows: scopedIssues.map((issue) => ({
+            status: issue.status || "open",
+            service: issue.serviceName || "--",
+            issue: issue.title,
+            rootCause: issue.rootCause && !isSameText(issue.rootCause, issue.title) ? issue.rootCause : "--",
+            severity: issue.severity || "--",
+            raisedBy: pocNameById.get(issue.clientPocId) || "Unknown POC",
+            raised: formatDateTime(issue.createdAt),
+            closed: issue.closedAt ? formatDateTime(issue.closedAt) : "--",
+            resolution: issue.resolutionNote || "--"
+          }))
+        },
+        {
+          title: "Appreciations",
+          sheetName: "Appreciations",
+          columns: [
+            { key: "subject", label: "Subject", width: 26 },
+            { key: "poc", label: "POC", width: 22 },
+            { key: "when", label: "Date", width: 18 },
+            { key: "detail", label: "Appreciation", width: 70 }
+          ],
+          rows: appreciations.map((item) => ({
+            subject: item.subject,
+            poc: item.pocName,
+            when: item.when ? formatDateTime(item.when) : "--",
+            detail: item.detail
+          }))
+        },
+        {
+          title: "Other feedback",
+          sheetName: "Other feedback",
+          columns: [
+            { key: "topic", label: "Topic", width: 26 },
+            { key: "poc", label: "POC", width: 22 },
+            { key: "sentiment", label: "Sentiment", width: 14 },
+            { key: "when", label: "Date", width: 18 },
+            { key: "detail", label: "Feedback", width: 70 }
+          ],
+          rows: observations.map((item) => ({
+            topic: item.topic,
+            poc: pocNameById.get(item.clientPocId) || "Unknown POC",
+            sentiment: item.sentiment || "neutral",
+            when: formatDateTime(item.createdAt),
+            detail: item.detail
+          }))
+        },
+        {
+          title: "Conversation transcripts",
+          sheetName: "Conversations",
+          note: "Saved WhatsApp messages for every POC session matching the current cycle, date and POC filters.",
+          columns: [
+            { key: "cycle", label: "Cycle", width: 20 },
+            { key: "poc", label: "POC", width: 22 },
+            { key: "time", label: "Time", width: 20 },
+            { key: "side", label: "Side", width: 12 },
+            { key: "speaker", label: "Speaker", width: 24 },
+            { key: "message", label: "Message", width: 85 },
+            { key: "interpretation", label: "Interpretation", width: 24 }
+          ],
+          rows: conversationGroups.flatMap(({ session, messages: sessionMessages }) => sessionMessages.map((message) => ({
+            cycle: formatCycleType(session.reportCycle.cycleType, project.feedbackIntervalDays),
+            poc: session.pocName || pocNameById.get(session.clientPocId) || "--",
+            time: formatDateTime(message.createdAt),
+            side: message.side === "client" ? "Client" : "SRV",
+            speaker: message.speaker || "Unknown",
+            message: message.body || "",
+            interpretation: [
+              message.metadata?.interpretedIntent ? `Read as ${message.metadata.interpretedIntent}` : "",
+              message.metadata?.manualOutbound ? "Sent manually" : "",
+              message.metadata?.fallbackReason || ""
+            ].filter(Boolean).join(" · ") || "--"
+          })))
+        }
+      ]
+    };
+  }
+
   return (
     <>
       <div className="topbar">
@@ -736,7 +1000,14 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           <h2>Project workspace</h2>
           <p className="topbar-sub">{project.clientName || "Client"} · {project.clusterName || "No cluster"} · {project.name}</p>
         </div>
-        <Button icon={RefreshCw} onClick={() => loadWorkspace(project.key)}>Refresh</Button>
+        <div className="button-row workspace-controls">
+          <ReportDownloads
+            getReport={buildProjectReport}
+            fileName={`csat-${project.key}-${new Date().toISOString().slice(0, 10)}`}
+            onError={showToast}
+          />
+          <Button icon={RefreshCw} onClick={() => loadWorkspace(project.key)}>Refresh</Button>
+        </div>
       </div>
 
       <FilterBar

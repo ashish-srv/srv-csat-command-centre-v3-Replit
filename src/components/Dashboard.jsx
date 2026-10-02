@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Power, RefreshCw, X } from "lucide-react";
-import { apiWriteWithAdminPin } from "../api";
+import { apiGet, apiWriteWithAdminPin } from "../api";
 import { cycleInRange, DateRange, FilterBar, MultiSelect } from "./Filters.jsx";
 import {
   formatCycleCoverage, formatCycleType, formatDate, formatDateTime,
   formatScore, riskClass, scoreClass
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill } from "./Ui.jsx";
+import ReportDownloads from "./ReportDownloads.jsx";
 
 const RISK_OPTIONS = ["High", "Watch", "Low", "Not scored"];
 const ROW_STEP = 15;
@@ -141,6 +142,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
   const [messagingPin, setMessagingPin] = useState("");
   const [messagingError, setMessagingError] = useState("");
   const [messagingSaving, setMessagingSaving] = useState(false);
+  const [reportError, setReportError] = useState("");
 
   const allProjects = dashboard?.projects || [];
   const allCycles = dashboard?.cycles || [];
@@ -290,6 +292,251 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
     }, 0);
   }
 
+  async function buildDashboardReport() {
+    setReportError("");
+    const rangeActive = Boolean(range.from || range.to);
+    const workspaceResults = await Promise.allSettled(visibleProjects.map(async (project) => ({
+      project,
+      workspace: await apiGet(`/api/projects/${encodeURIComponent(project.key)}/workspace`)
+    })));
+    const workspaceRows = workspaceResults
+      .filter((result) => result.status === "fulfilled")
+      .map((result) => result.value);
+
+    const clientGroups = new Map();
+    for (const project of visibleProjects) {
+      const key = project.clientName || "Unassigned";
+      if (!clientGroups.has(key)) clientGroups.set(key, []);
+      clientGroups.get(key).push(project);
+    }
+    const clientRows = [...clientGroups.entries()].map(([clientName, projects]) => {
+      const projectIds = new Set(projects.map((project) => project.id));
+      const ratedProjects = projects.filter((project) => project.csatScore !== null && project.csatScore !== undefined);
+      const clientScore = ratedProjects.length
+        ? Math.round((ratedProjects.reduce((sum, project) => sum + Number(project.csatScore), 0) / ratedProjects.length) * 10) / 10
+        : null;
+      return {
+        client: clientName,
+        cluster: projects[0]?.clusterName || "--",
+        projects: projects.length,
+        ratedProjects: ratedProjects.length,
+        avgCsat: clientScore,
+        cycles: rangeCycles.filter((cycle) => projectIds.has(cycle.projectId)).length,
+        openIssues: openIssues.filter((issue) => projectIds.has(issue.projectId)).length,
+        atRisk: projects.filter((project) => riskLabel(project, cyclesByProject.get(project.id) || []) === "High").length
+      };
+    });
+
+    const serviceRows = workspaceRows.flatMap(({ project, workspace }) => {
+      const cycleRows = cyclesByProject.get(project.id) || [];
+      if (rangeActive) {
+        return cycleRows.flatMap((cycle) => (workspace.serviceFeedbackByCycle?.[cycle.id] || []).map((service) => ({
+          client: project.clientName || "--",
+          project: project.name,
+          cycle: formatCycleType(cycle.cycleType, project.feedbackIntervalDays),
+          cycleStarted: formatDate(cycle.startedAt),
+          service: service.serviceName || service.name || service.serviceKey,
+          score: service.score,
+          source: service.source === "predicted" ? "Read from chat" : "Client rating",
+          owner: service.managerName || service.ownerName || "Not set"
+        })));
+      }
+      return (workspace.services || []).map((service) => ({
+        client: project.clientName || "--",
+        project: project.name,
+        cycle: "Latest known",
+        cycleStarted: "--",
+        service: service.name,
+        score: service.score,
+        source: service.score === null || service.score === undefined ? "Not scored" : "Latest recorded",
+        owner: service.managerName || service.ownerName || "Not set"
+      }));
+    });
+
+    const filterText = (values, fallback = "All") => values.length ? values.join(", ") : fallback;
+    const selectedResponseLabel = responseFilter === "all" ? "All responses" : responseLabel(responseFilter);
+    return {
+      title: "CSAT dashboard report",
+      subtitle: "Filtered client, project, POC and service results from the CSAT Command Centre",
+      generatedAt: new Date().toISOString(),
+      filters: [
+        { label: "Cluster", value: filterText(clusters) },
+        { label: "Client", value: filterText(clients) },
+        { label: "Project", value: filterText(projectNames) },
+        { label: "Risk", value: filterText(risks) },
+        { label: "Project status", value: filterText(statuses) },
+        { label: "Date range", value: range.from || range.to ? `${range.from || "Any"} to ${range.to || "Any"}` : "All dates" },
+        { label: "POC response", value: selectedResponseLabel },
+        { label: "Schedule cycle", value: filterText(scheduleTypes) },
+        { label: "Schedule status", value: filterText(scheduleStatuses) }
+      ],
+      metrics: [
+        { label: "Projects", value: visibleProjects.length },
+        { label: "Average CSAT", value: formatScore(avgCsat), detail: `${scored.length} rated projects` },
+        { label: "Cycles completed", value: completedCycles.length },
+        { label: "At risk", value: atRisk },
+        { label: "POC sessions", value: filteredResponseTracker.length },
+        { label: "Open issues", value: openIssues.length }
+      ],
+      sections: [
+        {
+          title: "Client summary",
+          sheetName: "Client summary",
+          columns: [
+            { key: "client", label: "Client", width: 24 },
+            { key: "cluster", label: "Cluster", width: 18 },
+            { key: "projects", label: "Projects", width: 12 },
+            { key: "ratedProjects", label: "Rated projects", width: 14 },
+            { key: "avgCsat", label: "Average CSAT", width: 14, numberFormat: "0.0" },
+            { key: "cycles", label: "Cycles", width: 10 },
+            { key: "openIssues", label: "Open issues", width: 12 },
+            { key: "atRisk", label: "At risk", width: 10 }
+          ],
+          rows: clientRows
+        },
+        {
+          title: "Project scores",
+          sheetName: "Project scores",
+          note: "Every project shown here matches the dashboard filters above.",
+          columns: [
+            { key: "cluster", label: "Cluster", width: 18 },
+            { key: "client", label: "Client", width: 24 },
+            { key: "project", label: "Project", width: 28 },
+            { key: "status", label: "Status", width: 12 },
+            { key: "cycles", label: "Cycles", width: 10 },
+            { key: "latestCycle", label: "Latest cycle", width: 18 },
+            { key: "latestStarted", label: "Latest started", width: 14 },
+            { key: "csat", label: "CSAT", width: 10, numberFormat: "0.0" },
+            { key: "risk", label: "Risk", width: 12 }
+          ],
+          rows: visibleProjects.map((project) => {
+            const projectCycles = cyclesByProject.get(project.id) || [];
+            const latest = projectCycles[0] || null;
+            return {
+              cluster: project.clusterName || "--",
+              client: project.clientName || "--",
+              project: project.name,
+              status: project.activeStatus,
+              cycles: projectCycles.length,
+              latestCycle: latest ? formatCycleType(latest.cycleType, project.feedbackIntervalDays) : "No cycle",
+              latestStarted: latest ? formatDate(latest.startedAt) : "--",
+              csat: project.csatScore,
+              risk: riskLabel(project, projectCycles)
+            };
+          })
+        },
+        {
+          title: "POC response tracker",
+          sheetName: "POC responses",
+          columns: [
+            { key: "client", label: "Client", width: 22 },
+            { key: "project", label: "Project", width: 26 },
+            { key: "poc", label: "POC", width: 22 },
+            { key: "cycle", label: "Cycle", width: 18 },
+            { key: "started", label: "Started", width: 18 },
+            { key: "response", label: "Response", width: 20 },
+            { key: "reminders", label: "Reminders", width: 12 },
+            { key: "csat", label: "CSAT", width: 10, numberFormat: "0.0" },
+            { key: "latestReply", label: "Latest client reply", width: 48 }
+          ],
+          rows: filteredResponseTracker.map((session) => {
+            const project = allProjects.find((item) => item.id === session.projectId);
+            return {
+              client: project?.clientName || "--",
+              project: session.projectName || project?.name || "--",
+              poc: session.pocName || "--",
+              cycle: formatCycleType(session.cycleType, project?.feedbackIntervalDays),
+              started: formatDateTime(session.cycleStartedAt || session.startedAt),
+              response: responseLabel(session.responseStatus),
+              reminders: Number(session.reminderCount) || 0,
+              csat: session.csatScore,
+              latestReply: session.latestClientReply || "--"
+            };
+          })
+        },
+        {
+          title: "Service scores",
+          sheetName: "Service scores",
+          note: rangeActive ? "Service feedback from cycles inside the selected date range." : "Latest recorded score for each service on the filtered projects.",
+          columns: [
+            { key: "client", label: "Client", width: 22 },
+            { key: "project", label: "Project", width: 26 },
+            { key: "cycle", label: "Cycle", width: 18 },
+            { key: "cycleStarted", label: "Cycle started", width: 14 },
+            { key: "service", label: "Service", width: 24 },
+            { key: "score", label: "Score", width: 10, numberFormat: "0.0" },
+            { key: "source", label: "Score source", width: 18 },
+            { key: "owner", label: "Internal owner", width: 24 }
+          ],
+          rows: serviceRows
+        },
+        {
+          title: "Open issues",
+          sheetName: "Open issues",
+          columns: [
+            { key: "client", label: "Client", width: 22 },
+            { key: "project", label: "Project", width: 26 },
+            { key: "service", label: "Service", width: 20 },
+            { key: "issue", label: "Issue", width: 52 },
+            { key: "severity", label: "Severity", width: 12 },
+            { key: "raisedBy", label: "Raised by", width: 20 },
+            { key: "raised", label: "Raised", width: 18 }
+          ],
+          rows: openIssues.map((issue) => {
+            const project = allProjects.find((item) => item.id === issue.projectId);
+            return {
+              client: project?.clientName || "--",
+              project: issue.projectName || project?.name || "--",
+              service: issue.serviceName || "--",
+              issue: issue.title,
+              severity: issue.severity || "--",
+              raisedBy: issue.raisedBy || "--",
+              raised: formatDateTime(issue.createdAt)
+            };
+          })
+        },
+        {
+          title: "Feedback schedule and delivery",
+          sheetName: "Schedule",
+          columns: [
+            { key: "client", label: "Client", width: 22 },
+            { key: "project", label: "Project", width: 26 },
+            { key: "cycle", label: "Feedback cycle", width: 20 },
+            { key: "due", label: "Due date", width: 14 },
+            { key: "pocs", label: "Active POCs", width: 12 },
+            { key: "status", label: "Delivery status", width: 20 },
+            { key: "reason", label: "Blocked / skipped reason", width: 48 }
+          ],
+          rows: feedbackSchedule.map((item) => ({
+            client: item.clientName || "--",
+            project: item.projectName,
+            cycle: formatCycleType(item.cycleType),
+            due: formatDate(item.dueAt),
+            pocs: item.activePocCount,
+            status: scheduleStatusLabel(item.status),
+            reason: item.blockedReason || "--"
+          }))
+        },
+        {
+          title: "Recent skipped attempts",
+          sheetName: "Skipped attempts",
+          columns: [
+            { key: "project", label: "Project", width: 26 },
+            { key: "cycle", label: "Feedback cycle", width: 20 },
+            { key: "attempted", label: "Attempted", width: 20 },
+            { key: "reason", label: "Reason", width: 58 }
+          ],
+          rows: recentScheduleSkips.map((event) => ({
+            project: event.project?.name || event.projectKey,
+            cycle: formatCycleType(event.cycleType),
+            attempted: formatDateTime(event.attemptedAt),
+            reason: event.reason || "The scheduler could not start this cycle."
+          }))
+        }
+      ]
+    };
+  }
+
   const rows = visibleProjects.slice(0, visibleRows);
 
   return (
@@ -308,6 +555,11 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
           ) : null}
         </div>
         <div className="button-row dashboard-controls">
+          <ReportDownloads
+            getReport={buildDashboardReport}
+            fileName={`csat-dashboard-${new Date().toISOString().slice(0, 10)}`}
+            onError={setReportError}
+          />
           <Button
             icon={Power}
             variant={messagingEnabled ? "primary" : "danger"}
@@ -320,6 +572,8 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
           </button>
         </div>
       </div>
+
+      {reportError ? <div className="report-export-error" role="alert">{reportError}</div> : null}
 
       {messagingPrompt ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {

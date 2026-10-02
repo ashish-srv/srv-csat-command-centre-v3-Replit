@@ -1416,6 +1416,8 @@ button.metric-card {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 36px;
+  box-sizing: border-box;
   min-width: 120px;
   max-width: 210px;
   padding: 7px 10px;
@@ -1581,7 +1583,10 @@ button.metric-card {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
+  min-height: 36px;
+  height: 36px;
+  box-sizing: border-box;
+  padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--panel);
@@ -1593,6 +1598,9 @@ button.metric-card {
 
 .date-range-inputs input,
 .date-range-inputs select {
+  min-width: 112px;
+  height: 32px;
+  padding: 0;
   border: none;
   outline: none;
   background: transparent;
@@ -2481,7 +2489,7 @@ button.metric-card {
 
 .dtable.manage-projects .dtable-head,
 .dtable.manage-projects .dtable-row {
-  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.2fr) 84px 96px 96px 88px 44px;
+  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.15fr) minmax(0, 1.4fr) 84px 96px 96px 88px 44px;
 }
 
 .dtable.manage-pocs .dtable-head,
@@ -2858,6 +2866,21 @@ button.metric-card {
   background: var(--panel);
 }
 
+.manage-projects-scroll {
+  max-height: min(500px, 58vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--soft-line);
+  border-radius: 10px;
+}
+
+.manage-projects-scroll .dtable-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+}
+
 .dtable-row.selected { background: var(--blue-soft); }
 
 .cluster-chips {
@@ -2934,7 +2957,9 @@ button.metric-card {
 }
 
 .schedule-table {
-  overflow-x: auto;
+  max-height: min(440px, 55vh);
+  overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--soft-line);
   border-radius: 10px;
 }
@@ -2951,6 +2976,9 @@ button.metric-card {
 }
 
 .schedule-table-head {
+  position: sticky;
+  z-index: 2;
+  top: 0;
   background: var(--soft-line);
   color: var(--label);
   font-size: 11px;
@@ -2966,12 +2994,25 @@ button.metric-card {
 .schedule-table-row small { display: block; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 
 .schedule-skip-history {
+  max-height: min(300px, 38vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   margin-top: 14px;
+  padding-right: 4px;
   padding-top: 12px;
   border-top: 1px solid var(--soft-line);
 }
 
-.schedule-skip-history h4 { margin: 0 0 8px; color: var(--header); font-size: 13px; }
+.schedule-skip-history h4 {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  margin: -12px 0 8px;
+  padding: 12px 0 8px;
+  background: var(--panel);
+  color: var(--header);
+  font-size: 13px;
+}
 .schedule-skip-history button {
   display: grid;
   grid-template-columns: minmax(180px, 0.7fr) minmax(280px, 1.6fr);
@@ -3585,6 +3626,50 @@ button.metric-card {
   z-index: 2;
   top: 0;
   background: var(--panel);
+}
+
+.report-downloads {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.report-downloads > span {
+  padding: 0 4px 0 6px;
+  color: var(--label);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.report-downloads .button {
+  min-height: 32px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.report-export-error {
+  padding: 10px 12px;
+  margin: -6px 0 14px;
+  border: 1px solid var(--red);
+  border-radius: 10px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+@media (max-width: 820px) {
+  .dashboard-controls,
+  .workspace-controls { align-items: flex-start; flex-direction: column; }
+  .report-downloads { width: 100%; }
+  .date-range-inputs { height: auto; min-height: 36px; flex-wrap: wrap; }
 }
 
 .compact-batch-editor { max-height: 340px; overflow-y: auto; }

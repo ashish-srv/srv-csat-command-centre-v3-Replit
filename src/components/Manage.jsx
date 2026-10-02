@@ -1861,6 +1861,13 @@ export default function Manage({ onReload }) {
   ) || levels[0] || null;
   const selectedClient = clients.find((item) => item.id === clientId) || null;
   const projects = detail?.projects || [];
+  const allProjects = directory?.projects || [];
+  const clientsById = new Map(clients.map((client) => [client.id, client]));
+  const visibleProjects = allProjects.filter((project) => {
+    if (clientId) return project.clientId === clientId;
+    if (!clusterFilterId) return true;
+    return clientsById.get(project.clientId)?.clusterId === clusterFilterId;
+  });
   const pocs = detail?.pocs || [];
   const services = detail?.services || [];
   const people = directory?.internalPocs || [];
@@ -2272,7 +2279,7 @@ export default function Manage({ onReload }) {
       <Panel
         id="manage-projects"
         title="Projects"
-        badge={`${projects.length} total`}
+        badge={`${visibleProjects.length} displayed · ${allProjects.length} total`}
         className="span-12"
         action={
           <div className="button-row">
@@ -2332,20 +2339,23 @@ export default function Manage({ onReload }) {
             />
           </div>
         ) : null}
+        <div className="manage-projects-scroll">
         <div className="dtable manage-projects">
           <div className="dtable-head">
             <span>Project</span>
             <span>Project ID</span>
+            <span>Client</span>
             <span>Status</span>
             <span>Start</span>
             <span>End</span>
             <span>Interval</span>
             <span />
           </div>
-          {projects.map((project) => (
+          {visibleProjects.map((project) => (
             <div key={project.id} className="dtable-row">
               <strong>{project.name}</strong>
               <span className="mono">{project.key}</span>
+              <span>{clientsById.get(project.clientId)?.name || "Client not found"}</span>
               <span>{project.activeStatus}</span>
               <span>{formatDate(project.startDate)}</span>
               <span>{formatDate(project.endDate)}</span>
@@ -2372,7 +2382,13 @@ export default function Manage({ onReload }) {
               </button>
             </div>
           ))}
-          {!projects.length ? <EmptyState title="No projects" text="Add one to start collecting feedback." /> : null}
+          {!visibleProjects.length ? (
+            <EmptyState
+              title="No projects match these filters"
+              text="Clear the client or cluster filter, or add a project for the selected client."
+            />
+          ) : null}
+        </div>
         </div>
       </Panel>
 
