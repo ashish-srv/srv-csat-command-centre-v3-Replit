@@ -217,6 +217,13 @@ export default function App({ onLogout }) {
           </button>
         </nav>
 
+        {dashboard?.messaging?.enabled === false ? (
+          <div className="messaging-paused-banner" role="status">
+            <strong>WhatsApp messaging is paused.</strong>
+            <span>No WhatsApp messages or automated replies will be sent. Email notifications remain active.</span>
+          </div>
+        ) : null}
+
         {error ? (
           <div className="error-block">
             <strong>Could not load data</strong>

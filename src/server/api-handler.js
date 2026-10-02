@@ -1626,6 +1626,77 @@ function isAutomationAuthorized(headers) {
   return headerValue(headers, "x-csat-webhook-secret") === expected;
 }
 
+const WHATSAPP_AUTOMATION_EVENTS = new Set([
+  "feedback_started",
+  "quick_checkin_started",
+  "no_response",
+  "feedback_session_closed",
+  "manual_whatsapp_message"
+]);
+
+async function messagingStatus(store) {
+  if (typeof store.getMessagingStatus !== "function") return { enabled: true, updatedAt: null, updatedBy: null };
+  try {
+    return await store.getMessagingStatus();
+  } catch (statusError) {
+    console.warn("[messaging] status unavailable; failing open:", statusError.message);
+    return { enabled: true, updatedAt: null, updatedBy: null };
+  }
+}
+
+async function whatsappMessagingEnabled(store) {
+  return (await messagingStatus(store)).enabled !== false;
+}
+
+async function pausedMessagingResponse(store) {
+  const status = await messagingStatus(store);
+  return error(423, "WhatsApp messaging is paused", {
+    updatedAt: status.updatedAt,
+    updatedBy: status.updatedBy,
+    emailAutomationUnaffected: true
+  });
+}
+
+async function recordPausedInbound(store, session, poc, body, text, channel = "whatsapp") {
+  const providerMessageId = body.providerMessageId || null;
+  if (providerMessageId && typeof store.hasProviderMessage === "function" && await store.hasProviderMessage(providerMessageId)) {
+    return json(200, { duplicate: true, sendToWhatsapp: false, sessionId: session.id, messagingPaused: true });
+  }
+  const inbound = {
+    speaker: body.fromName || poc?.salutation || poc?.name || "Client",
+    side: "client",
+    body: text,
+    providerMessageId,
+    metadata: {
+      source: channel,
+      from: body.from || null,
+      buttonPayload: body.buttonPayload || body.buttonId || null,
+      receivedWhileMessagingPaused: true
+    }
+  };
+  const message = providerMessageId && typeof store.addInboundMessage === "function"
+    ? await store.addInboundMessage(session.id, inbound)
+    : await store.addMessage(session.id, inbound);
+  if (message) {
+    const project = await store.getProjectById(session.projectId);
+    await notifyAutomation(store, "handoff", {
+      project,
+      poc,
+      session,
+      clientText: text,
+      reason: "whatsapp_messaging_paused",
+      note: "WhatsApp auto-replies are paused. Email notifications remain active, so this inbound message needs human review."
+    }, `handoff:messaging-paused:${message.id}`);
+  }
+  return json(200, {
+    duplicate: !message,
+    sendToWhatsapp: false,
+    messagingPaused: true,
+    sessionId: session.id,
+    receivedMessage: message || null
+  });
+}
+
 /**
  * Fire an automation event WITHOUT blocking the client's reply.
  *
@@ -1669,6 +1740,23 @@ async function notifyAutomation(store, eventType, payload, dedupeKey = null) {
     if (dedupeKey && typeof store.claimAutomationEvent === "function") {
       claim = await store.claimAutomationEvent(eventType, payload, dedupeKey);
       if (!claim) return { eventType, status: "duplicate", dedupeKey };
+    }
+
+    if (WHATSAPP_AUTOMATION_EVENTS.has(eventType) && !await whatsappMessagingEnabled(store)) {
+      const event = {
+        eventType,
+        payload: { ...payload, blockedReason: "whatsapp_messaging_paused" },
+        status: "paused",
+        webhookUrlConfigured: false,
+        sentAt: new Date().toISOString(),
+        dedupeKey
+      };
+      if (claim && typeof store.completeAutomationEvent === "function") {
+        await store.completeAutomationEvent(claim.id, event);
+      } else if (typeof store.recordAutomationEvent === "function") {
+        await store.recordAutomationEvent(event);
+      }
+      return event;
     }
 
     const event = { ...(await emitAutomation(eventType, payload)), dedupeKey };
@@ -3033,6 +3121,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 // ---------------------------------------------------------------------
 
 async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clientPocIds, scheduleKey }) {
+  if (!await whatsappMessagingEnabled(store)) throw new Error("WhatsApp messaging is paused");
   const result = await store.createCycle(projectKey, {
     cycleType,
     channel: "whatsapp",
@@ -3060,6 +3149,69 @@ async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clien
   }
 
   return { cycle, project, dispatched };
+}
+
+async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null) {
+  const projects = await store.listProjects();
+  const requested = Array.isArray(requestedProjectIds) && requestedProjectIds.length
+    ? new Set(requestedProjectIds.map((id) => String(id)))
+    : null;
+  const reservedPhones = new Map();
+  const rows = [];
+
+  for (const projectSummary of projects) {
+    if (requested && !requested.has(projectSummary.id)) continue;
+    const reasons = [];
+    if (projectSummary.activeStatus !== "active") reasons.push(`project is ${projectSummary.activeStatus}`);
+    if (projectSummary.clientActiveStatus && projectSummary.clientActiveStatus !== "active") {
+      reasons.push(`client is ${projectSummary.clientActiveStatus}`);
+    }
+    if (await store.hasOpenCycle(projectSummary.id, cycleType)) reasons.push("this cycle type is already open");
+
+    const allPocs = await store.pocsForProject(projectSummary.id, { activeOnly: false });
+    const invalidPocs = allPocs.filter((poc) => !poc.active || !String(poc.contactWhatsapp || "").replace(/\D/g, ""));
+    const eligiblePocs = [];
+    const conflicts = [];
+    const reachablePocs = reasons.length ? [] : allPocs.filter((item) => item.active && String(item.contactWhatsapp || "").replace(/\D/g, ""));
+    for (const poc of reachablePocs) {
+      const phone = String(poc.contactWhatsapp).replace(/\D/g, "");
+      if (reservedPhones.has(phone)) {
+        conflicts.push({ pocId: poc.id, pocName: poc.name, phone, reason: `same WhatsApp already selected for ${reservedPhones.get(phone)}` });
+        continue;
+      }
+      const routing = await store.getWhatsappRoutingContext(phone);
+      const activeSessions = routing.status === "ambiguous"
+        ? routing.candidates.map((candidate) => candidate.session)
+        : routing.status === "active" ? [routing.session] : [];
+      // Bulk sends must never create two simultaneous conversations for one
+      // WhatsApp number. Even another quick check-in is a conflict: without a
+      // button payload, a free-text reply could not be routed to one project
+      // unambiguously.
+      const blocks = activeSessions.length > 0;
+      if (blocks) {
+        const blocking = activeSessions[0];
+        const blockingProject = blocking?.projectId ? await store.getProjectById(blocking.projectId) : null;
+        conflicts.push({ pocId: poc.id, pocName: poc.name, phone, reason: `active session${blockingProject ? ` on ${blockingProject.name}` : ""}` });
+        continue;
+      }
+      reservedPhones.set(phone, projectSummary.name);
+      eligiblePocs.push(poc);
+    }
+    if (!eligiblePocs.length && !reasons.length) reasons.push("no eligible active POC with WhatsApp");
+    rows.push({
+      projectId: projectSummary.id,
+      projectKey: projectSummary.key,
+      projectName: projectSummary.name,
+      clientName: projectSummary.clientName,
+      clusterName: projectSummary.clusterName,
+      eligible: reasons.length === 0,
+      eligiblePocs: eligiblePocs.map((poc) => ({ id: poc.id, name: poc.name, whatsapp: poc.contactWhatsapp })),
+      invalidPocs: invalidPocs.map((poc) => ({ id: poc.id, name: poc.name, reason: poc.active ? "WhatsApp missing" : "inactive" })),
+      conflicts,
+      reasons
+    });
+  }
+  return rows;
 }
 
 // ---------------------------------------------------------------------
@@ -3137,7 +3289,7 @@ async function handleApiRequest(request) {
   }
 
   if (method === "GET" && pathname === "/api/dashboard") {
-    const dashboard = await store.getDashboard();
+    const [dashboard, messaging] = await Promise.all([store.getDashboard(), messagingStatus(store)]);
     // getDashboard returns open issues as raw Supabase rows. Normalise them and
     // attach the project they belong to so the UI never has to guess.
     const projectsById = new Map((dashboard.projects || []).map((item) => [item.id, item]));
@@ -3233,7 +3385,7 @@ async function handleApiRequest(request) {
       }
     }
     feedbackSchedule.sort((left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime());
-    return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule });
+    return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule, messaging });
   }
 
   if (method === "GET" && pathname === "/api/projects") {
@@ -3249,6 +3401,7 @@ async function handleApiRequest(request) {
 
   const requestFeedbackMatch = pathname.match(/^\/api\/projects\/([^/]+)\/request-feedback$/);
   if (method === "POST" && requestFeedbackMatch) {
+    if (!await whatsappMessagingEnabled(store)) return pausedMessagingResponse(store);
     const projectKey = decodeURIComponent(requestFeedbackMatch[1]);
     const allowedCycleTypes = new Set(["pulse", "project_end", "quick_checkin"]);
     const cycleType = allowedCycleTypes.has(body.cycleType) ? body.cycleType : "pulse";
@@ -3338,6 +3491,7 @@ async function handleApiRequest(request) {
   // stored outbound message becomes context for the client's next inbound turn.
   const manualWhatsappMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/manual-whatsapp-message$/);
   if (method === "POST" && manualWhatsappMatch) {
+    if (!await whatsappMessagingEnabled(store)) return pausedMessagingResponse(store);
     const text = String(body.text || "").trim();
     if (!text) return error(400, "WhatsApp message text is required");
     if (text.length > MAX_MANUAL_WHATSAPP_TEXT_LENGTH) {
@@ -3662,6 +3816,7 @@ async function handleApiRequest(request) {
 
   const reminderMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/(reminder|no-response)$/);
   if (method === "POST" && reminderMatch) {
+    if (!await whatsappMessagingEnabled(store)) return pausedMessagingResponse(store);
     const sessionId = decodeURIComponent(reminderMatch[1]);
     const existing = await store.getSession(sessionId);
     if (!existing) return error(404, "Session not found");
@@ -3752,6 +3907,9 @@ async function handleApiRequest(request) {
     if (!session) return error(404, `No feedback session found for POC ${poc.name}`);
 
     const project = await store.getProjectById(session.projectId);
+    if (!await whatsappMessagingEnabled(store)) {
+      return recordPausedInbound(store, session, poc, body, text);
+    }
     if (session.sessionType === "quick_checkin") {
       return handleQuickCheckinTurn({
         store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
@@ -3776,6 +3934,9 @@ async function handleApiRequest(request) {
 
     const project = await store.getProjectById(session.projectId);
     const poc = await store.getClientPocById(session.clientPocId);
+    if (!await whatsappMessagingEnabled(store)) {
+      return recordPausedInbound(store, session, poc, body, text);
+    }
     if (session.sessionType === "quick_checkin") {
       return handleQuickCheckinTurn({
         store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
@@ -3791,6 +3952,9 @@ async function handleApiRequest(request) {
   // ---- Automation / scheduler
   if (method === "POST" && pathname === "/api/automation/complete-inactive-final-responses") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    if (!await whatsappMessagingEnabled(store)) {
+      return json(200, { paused: true, sent: [], closedWithoutMessage: [], duplicates: [], failed: [], ignored: 0 });
+    }
     if (
       typeof store.getInactiveFinalSweepCandidates !== "function"
       || typeof store.claimAutomationEvent !== "function"
@@ -4015,6 +4179,7 @@ async function handleApiRequest(request) {
 
   if (method === "POST" && pathname === "/api/automation/create-due-sessions") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    if (!await whatsappMessagingEnabled(store)) return json(200, { paused: true, cycles: [], skipped: [] });
     const targets = automaticFeedbackTargets(await store.getDueFeedbackTargets(body.now));
     const cycles = [];
     const skipped = [];
@@ -4053,6 +4218,9 @@ async function handleApiRequest(request) {
 
   if (method === "POST" && pathname === "/api/automation/create-due-quick-checkins") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    if (!await whatsappMessagingEnabled(store)) {
+      return json(200, { paused: true, scheduleKey: null, cycles: [], skipped: [], expired: 0 });
+    }
     const expired = await store.expireDueQuickCheckins(body.now);
     const due = await store.getDueQuickCheckinTargets(body.now);
     const cycles = [];
@@ -4101,6 +4269,9 @@ async function handleApiRequest(request) {
 
   if (method === "POST" && pathname === "/api/automation/process-due-reminders") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    if (!await whatsappMessagingEnabled(store)) {
+      return json(200, { paused: true, reminders: [], closed: [], deferredClosures: [], failed: [] });
+    }
     const expiredQuickCheckins = typeof store.expireDueQuickCheckins === "function"
       ? await store.expireDueQuickCheckins(body.now)
       : { expired: 0 };
@@ -4306,7 +4477,11 @@ async function handleApiRequest(request) {
   // -------------------------------------------------------------------
 
   if (method === "GET" && pathname === "/api/admin/status") {
-    return json(200, { pinRequired: Boolean(process.env.ADMIN_PIN), authorized: isAdminAuthorized(request.headers) });
+    return json(200, {
+      pinRequired: Boolean(process.env.ADMIN_PIN),
+      authorized: isAdminAuthorized(request.headers),
+      messaging: await messagingStatus(store)
+    });
   }
 
   if (method === "GET" && pathname === "/api/admin/directory") {
@@ -4328,6 +4503,66 @@ async function handleApiRequest(request) {
     if (!isAdminAuthorized(request.headers)) {
       return error(403, "Incorrect PIN");
     }
+  }
+
+  if (method === "PATCH" && pathname === "/api/admin/messaging") {
+    if (typeof body.enabled !== "boolean") return error(400, "enabled must be true or false");
+    const messaging = await store.setMessagingStatus(body.enabled, "Manage admin");
+    if (typeof store.recordAutomationEvent === "function") {
+      await store.recordAutomationEvent({
+        eventType: body.enabled ? "whatsapp_messaging_resumed" : "whatsapp_messaging_paused",
+        status: "recorded",
+        payload: { ...messaging, emailAutomationUnaffected: true },
+        sentAt: messaging.updatedAt
+      });
+    }
+    return json(200, { messaging });
+  }
+
+  if (method === "POST" && pathname === "/api/admin/bulk-feedback/preview") {
+    const cycleType = body.cycleType === "quick_checkin" ? "quick_checkin" : "pulse";
+    const projectIds = Array.isArray(body.projectIds) ? body.projectIds : null;
+    const projects = await buildBulkSendPreview(store, cycleType, projectIds);
+    return json(200, {
+      cycleType,
+      messaging: await messagingStatus(store),
+      projects,
+      eligibleProjects: projects.filter((project) => project.eligible).length,
+      eligiblePocs: projects.reduce((sum, project) => sum + project.eligiblePocs.length, 0)
+    });
+  }
+
+  if (method === "POST" && pathname === "/api/admin/bulk-feedback/send") {
+    if (!await whatsappMessagingEnabled(store)) return pausedMessagingResponse(store);
+    const cycleType = body.cycleType === "quick_checkin" ? "quick_checkin" : "pulse";
+    const projectIds = Array.isArray(body.projectIds)
+      ? [...new Set(body.projectIds.map((id) => String(id || "").trim()).filter(Boolean))]
+      : [];
+    if (!projectIds.length) return error(400, "Select at least one project from the preview");
+    const preview = await buildBulkSendPreview(store, cycleType, projectIds);
+    const sent = [];
+    const skipped = preview.filter((project) => !project.eligible);
+    for (const row of preview.filter((project) => project.eligible)) {
+      try {
+        sent.push(await startCycle({
+          store,
+          projectKey: row.projectKey,
+          cycleType,
+          baseUrl,
+          reason: "manage_bulk_send",
+          clientPocIds: row.eligiblePocs.map((poc) => poc.id)
+        }));
+      } catch (sendError) {
+        skipped.push({ ...row, eligible: false, reasons: [sendError.message] });
+      }
+    }
+    return json(201, {
+      cycleType,
+      sent,
+      skipped,
+      projectsStarted: sent.length,
+      messagesQueued: sent.reduce((sum, item) => sum + item.dispatched.length, 0)
+    });
   }
 
   if (method === "PATCH" && pathname === "/api/admin/poc-levels") {
@@ -4407,6 +4642,32 @@ async function handleApiRequest(request) {
     return json(201, {
       service: await store.createServiceCatalogItem({ name, serviceKey, active: body.active !== false })
     });
+  }
+
+  if (method === "POST" && pathname === "/api/admin/service-catalog/bulk") {
+    const requested = Array.isArray(body.services) ? body.services : [];
+    if (!requested.length) return error(400, "Add at least one service");
+    if (requested.length > 100) return error(400, "Add no more than 100 services at once");
+    const prepared = [];
+    const seenNames = new Set();
+    const seenKeys = new Set();
+    for (let index = 0; index < requested.length; index += 1) {
+      const name = String(requested[index]?.name || "").trim();
+      if (!name) return error(400, `Service ${index + 1}: name is required`);
+      const serviceKey = serviceIdentifier(name);
+      if (seenNames.has(name.toLowerCase()) || seenKeys.has(serviceKey)) {
+        return error(400, `Service ${index + 1}: duplicates another service in this list`, name);
+      }
+      if (await store.serviceCatalogConflict(name, serviceKey)) {
+        return error(409, `Service ${index + 1}: already exists in the catalogue`, name);
+      }
+      seenNames.add(name.toLowerCase());
+      seenKeys.add(serviceKey);
+      prepared.push({ name, serviceKey, active: true });
+    }
+    const services = [];
+    for (const item of prepared) services.push(await store.createServiceCatalogItem(item));
+    return json(201, { services });
   }
 
   const serviceCatalogMatch = pathname.match(/^\/api\/admin\/service-catalog\/([^/]+)$/);
@@ -4529,7 +4790,6 @@ async function handleApiRequest(request) {
     if (!["active", "paused", "closed"].includes(finalStatus)) {
       return error(400, "Project status must be active, paused or closed");
     }
-    if (!pocs.length) return error(400, "Add at least one client POC before saving the project");
     if (!services.length) return error(400, "Add at least one service before saving the project");
     if (pocs.length > 50 || services.length > 50) return error(400, "A project setup can contain at most 50 POCs and 50 services");
 
@@ -4547,7 +4807,7 @@ async function handleApiRequest(request) {
       if (active && (number.length < 10 || number.length > 15)) return error(400, `POC ${index + 1}: active POC needs a 10-15 digit WhatsApp number including country code`);
       if (number && (number.length < 10 || number.length > 15)) return error(400, `POC ${index + 1}: WhatsApp number must be 10-15 digits including country code`);
       if (number && seenPhones.has(number)) return error(400, `POC ${index + 1}: WhatsApp number appears twice on this project`);
-      if (!String(row.levelId || "").trim() || (levels && !levels.has(row.levelId))) {
+      if (active && (!String(row.levelId || "").trim() || (levels && !levels.has(row.levelId)))) {
         return error(400, `POC ${index + 1}: select Normal or Important`);
       }
       if (active && (!Number.isFinite(weightPercentage) || weightPercentage <= 0 || weightPercentage > 100)) {
@@ -4561,8 +4821,7 @@ async function handleApiRequest(request) {
       if (active) activePocWeightTotal += weightPercentage;
       preparedPocs.push({ ...row, name: String(row.name).trim(), contactWhatsapp: number, weightPercentage, active });
     }
-    if (!preparedPocs.some((poc) => poc.active)) return error(400, "Add or activate at least one client POC before saving the project");
-    if (Math.abs(activePocWeightTotal - 100) > 0.01) {
+    if (preparedPocs.some((poc) => poc.active) && Math.abs(activePocWeightTotal - 100) > 0.01) {
       return error(400, `Active POC influence must total exactly 100%; the current total is ${Math.round(activePocWeightTotal * 100) / 100}%`);
     }
 
@@ -4646,7 +4905,7 @@ async function handleApiRequest(request) {
         return error(400, `POC ${index + 1}: active POC needs a 10-15 digit WhatsApp number including country code`);
       }
       if (phone && seenPhones.has(phone)) return error(400, `POC ${index + 1}: WhatsApp number appears twice on this project`);
-      if (!String(row.levelId || "").trim() || (levels && !levels.has(row.levelId))) {
+      if (active && (!String(row.levelId || "").trim() || (levels && !levels.has(row.levelId)))) {
         return error(400, `POC ${index + 1}: select a Normal or Important tag`);
       }
       if (active && (!Number.isFinite(weightPercentage) || weightPercentage <= 0 || weightPercentage > 100)) {
@@ -4681,6 +4940,65 @@ async function handleApiRequest(request) {
       if (!seenIds.has(pocId)) await store.updateClientPoc(pocId, { active: false, weightPercentage: 0 });
     }
     return json(200, { pocs: saved, removed: removedIds.length });
+  }
+
+  if (method === "PUT" && pathname === "/api/admin/pocs/bulk-control") {
+    const updates = Array.isArray(body.updates) ? body.updates : [];
+    if (!updates.length) return error(400, "Select at least one POC assignment to update");
+    if (updates.length > 1000) return error(400, "Update no more than 1000 POC assignments at once");
+
+    const seen = new Set();
+    const prepared = [];
+    const currentByProject = new Map();
+    const levels = typeof store.pocLevels === "function" ? await store.pocLevels() : null;
+    for (const item of updates) {
+      const id = String(item?.id || "").trim();
+      if (!id || seen.has(id)) return error(400, "Every POC update needs a unique ID");
+      seen.add(id);
+      const current = await store.getClientPocById(id);
+      if (!current) return error(404, "Client POC not found", id);
+      const active = item.active !== false;
+      const weightPercentage = active ? Number(item.weightPercentage) : 0;
+      if (active && (!Number.isFinite(weightPercentage) || weightPercentage <= 0 || weightPercentage > 100)) {
+        return error(400, `${current.name}: active influence must be more than 0% and no more than 100%`);
+      }
+      const phone = String(current.contactWhatsapp || "").replace(/\D/g, "");
+      if (active && (phone.length < 10 || phone.length > 15)) {
+        return error(400, `${current.name}: add a valid 10-15 digit WhatsApp number before activation`);
+      }
+      const levelId = String(item.levelId || current.levelId || "").trim();
+      if (active && (!levelId || (levels && !levels.has(levelId)))) {
+        return error(400, `${current.name}: select a Normal or Important tag before activation`);
+      }
+      prepared.push({ current, active, weightPercentage, levelId });
+      if (!currentByProject.has(current.projectId)) {
+        currentByProject.set(current.projectId, await store.pocsForProject(current.projectId, { activeOnly: false }));
+      }
+    }
+
+    const updateById = new Map(prepared.map((item) => [item.current.id, item]));
+    for (const [projectId, projectPocs] of currentByProject) {
+      const finalRows = projectPocs.map((poc) => {
+        const change = updateById.get(poc.id);
+        return change ? { ...poc, active: change.active, weightPercentage: change.weightPercentage } : poc;
+      });
+      const activeRows = finalRows.filter((poc) => poc.active);
+      const total = Math.round(activeRows.reduce((sum, poc) => sum + (Number(poc.weightPercentage) || 0), 0) * 100) / 100;
+      if (activeRows.length && Math.abs(total - 100) > 0.01) {
+        const project = await store.getProjectById(projectId);
+        return error(400, `${project?.name || "Project"}: active POC influence must total exactly 100%`, { total });
+      }
+    }
+
+    const pocs = [];
+    for (const item of prepared) {
+      pocs.push(await store.updateClientPoc(item.current.id, {
+        active: item.active,
+        weightPercentage: item.weightPercentage,
+        levelId: item.levelId || null
+      }));
+    }
+    return json(200, { pocs, updated: pocs.length });
   }
 
   const projectServicesMatch = pathname.match(/^\/api\/admin\/projects\/([^/]+)\/services$/);

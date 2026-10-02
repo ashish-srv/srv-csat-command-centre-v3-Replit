@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, RefreshCw, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Power, RefreshCw, X } from "lucide-react";
+import { apiWriteWithAdminPin } from "../api";
 import { cycleInRange, DateRange, FilterBar, MultiSelect } from "./Filters.jsx";
 import {
   formatCycleCoverage, formatCycleType, formatDate, formatDateTime,
   formatScore, riskClass, scoreClass
 } from "../format";
-import { EmptyState, LoadingBlock, MetricCard, Panel, StatusPill } from "./Ui.jsx";
+import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill } from "./Ui.jsx";
 
 const RISK_OPTIONS = ["High", "Watch", "Low", "Not scored"];
 const ROW_STEP = 15;
@@ -136,9 +137,29 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
   const [responseFilter, setResponseFilter] = useState("all");
   const [scheduleTypes, setScheduleTypes] = useState([]);
   const [scheduleStatuses, setScheduleStatuses] = useState([]);
+  const [messagingPrompt, setMessagingPrompt] = useState(false);
+  const [messagingPin, setMessagingPin] = useState("");
+  const [messagingError, setMessagingError] = useState("");
+  const [messagingSaving, setMessagingSaving] = useState(false);
 
   const allProjects = dashboard?.projects || [];
   const allCycles = dashboard?.cycles || [];
+  const messagingEnabled = dashboard?.messaging?.enabled !== false;
+
+  async function changeMessagingStatus() {
+    setMessagingSaving(true);
+    setMessagingError("");
+    try {
+      await apiWriteWithAdminPin("/api/admin/messaging", { enabled: !messagingEnabled }, "PATCH", messagingPin);
+      setMessagingPrompt(false);
+      setMessagingPin("");
+      await onReload();
+    } catch (changeError) {
+      setMessagingError(changeError.message);
+    } finally {
+      setMessagingSaving(false);
+    }
+  }
 
   const cyclesByProject = useMemo(() => {
     const map = new Map();
@@ -286,10 +307,51 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
             </p>
           ) : null}
         </div>
-        <button type="button" className="button primary" onClick={onReload}>
-          <RefreshCw size={16} aria-hidden="true" /><span>Refresh</span>
-        </button>
+        <div className="button-row dashboard-controls">
+          <Button
+            icon={Power}
+            variant={messagingEnabled ? "primary" : "danger"}
+            onClick={() => { setMessagingPrompt(true); setMessagingError(""); setMessagingPin(""); }}
+          >
+            WhatsApp {messagingEnabled ? "ON" : "PAUSED"}
+          </Button>
+          <button type="button" className="button primary" onClick={onReload}>
+            <RefreshCw size={16} aria-hidden="true" /><span>Refresh</span>
+          </button>
+        </div>
       </div>
+
+      {messagingPrompt ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !messagingSaving) setMessagingPrompt(false);
+        }}>
+          <div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="messaging-control-title">
+            <h3 id="messaging-control-title">{messagingEnabled ? "Pause" : "Resume"} WhatsApp messaging</h3>
+            <p>
+              {messagingEnabled
+                ? "No WhatsApp templates, reminders, quick check-ins, manual messages or bot replies will be sent. Incoming messages will still be stored."
+                : "WhatsApp activity will resume. Scheduled items that stayed pending while paused will be checked again by their normal workflows."}
+            </p>
+            <p><strong>Email notifications and alerts remain active.</strong></p>
+            <input
+              className="cleanup-pin-input"
+              type="password"
+              value={messagingPin}
+              onChange={(event) => setMessagingPin(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter" && messagingPin.trim() && !messagingSaving) changeMessagingStatus(); }}
+              placeholder="Manage admin PIN"
+              autoFocus
+            />
+            {messagingError ? <p className="pin-error">{messagingError}</p> : null}
+            <div className="modal-actions">
+              <Button onClick={() => setMessagingPrompt(false)} disabled={messagingSaving}>Cancel</Button>
+              <Button variant={messagingEnabled ? "danger" : "primary"} onClick={changeMessagingStatus} disabled={!messagingPin.trim() || messagingSaving}>
+                {messagingSaving ? "Saving…" : messagingEnabled ? "Pause WhatsApp" : "Resume WhatsApp"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <FilterBar onReset={resetFilters} showReset={filtersActive}>
         <MultiSelect

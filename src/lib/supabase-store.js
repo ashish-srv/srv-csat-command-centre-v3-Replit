@@ -483,9 +483,19 @@ class SupabaseStore {
 
   async getProjectRow(value, byId = false) {
     const field = byId ? "id" : "project_key";
-    const rows = await this.request("projects", {
+    let rows = await this.request("projects", {
       query: `${field}=eq.${encodeURIComponent(value)}&select=*,clients(id,client_key,name,cluster_id,active_status,clusters(id,name))&limit=1`
     });
+    if (!byId && !rows.length) {
+      const aliases = await this.request("project_key_aliases", {
+        query: `alias=ilike.${encodeURIComponent(value)}&select=project_id&limit=1`
+      });
+      if (aliases.length) {
+        rows = await this.request("projects", {
+          query: `id=eq.${encodeURIComponent(aliases[0].project_id)}&select=*,clients(id,client_key,name,cluster_id,active_status,clusters(id,name))&limit=1`
+        });
+      }
+    }
     return rows[0] || null;
   }
 
@@ -1693,6 +1703,42 @@ class SupabaseStore {
   // Automation
   // -------------------------------------------------------------------
 
+  async getMessagingStatus() {
+    const rows = await this.request("app_settings", {
+      query: "setting_key=eq.whatsapp_messaging&select=*&limit=1"
+    });
+    const value = rows[0]?.setting_value || {};
+    return {
+      enabled: value.enabled !== false,
+      updatedAt: value.updatedAt || rows[0]?.updated_at || null,
+      updatedBy: value.updatedBy || null
+    };
+  }
+
+  async setMessagingStatus(enabled, updatedBy = "Manage admin") {
+    const status = {
+      enabled: Boolean(enabled),
+      updatedAt: new Date().toISOString(),
+      updatedBy
+    };
+    const existing = await this.request("app_settings", {
+      query: "setting_key=eq.whatsapp_messaging&select=setting_key&limit=1"
+    });
+    if (existing.length) {
+      await this.request("app_settings", {
+        method: "PATCH",
+        query: "setting_key=eq.whatsapp_messaging",
+        body: { setting_value: status, updated_at: status.updatedAt }
+      });
+    } else {
+      await this.request("app_settings", {
+        method: "POST",
+        body: [{ setting_key: "whatsapp_messaging", setting_value: status, updated_at: status.updatedAt }]
+      });
+    }
+    return status;
+  }
+
   async recordAutomationEvent(event) {
     const rows = await this.request("automation_events", {
       method: "POST",
@@ -2047,10 +2093,11 @@ class SupabaseStore {
   // -------------------------------------------------------------------
 
   async getDirectory() {
-    const [clusters, clients, projects, pocLevelRows, departments, subDepartments, internalPocs, serviceCatalog] = await Promise.all([
+    const [clusters, clients, projects, clientPocRows, pocLevelRows, departments, subDepartments, internalPocs, serviceCatalog] = await Promise.all([
       this.request("clusters", { query: "select=*&order=name.asc" }),
       this.request("clients", { query: "select=*&order=name.asc" }),
       this.request("projects", { query: "select=*&order=name.asc" }),
+      this.request("client_pocs", { query: "select=*&order=name.asc" }),
       this.request("poc_levels", { query: "select=*&order=weight.desc" }),
       this.request("departments", { query: "select=*&order=name.asc" }),
       this.request("sub_departments", { query: "select=*&order=name.asc" }),
@@ -2058,6 +2105,9 @@ class SupabaseStore {
       this.request("service_catalog", { query: "select=*&order=name.asc" })
     ]);
 
+    const levelsById = new Map(pocLevelRows.map((row) => [row.id, { name: row.name, weight: Number(row.weight) }]));
+    const projectsById = new Map(projects.map((row) => [row.id, row]));
+    const clientsById = new Map(clients.map((row) => [row.id, row]));
     return {
       clusters: clusters.map((row) => ({ id: row.id, name: row.name })),
       clients: clients.map((row) => ({
@@ -2068,6 +2118,21 @@ class SupabaseStore {
         activeStatus: row.active_status
       })),
       projects: projects.map((row) => toProject(row)),
+      clientPocs: clientPocRows.map((row) => {
+        const poc = toClientPoc(row, levelsById.get(row.poc_level_id) || null);
+        const project = projectsById.get(row.project_id) || null;
+        const client = project ? clientsById.get(project.client_id) || null : null;
+        return {
+          ...poc,
+          projectKey: project?.project_key || null,
+          projectName: project?.name || null,
+          projectStatus: project?.active_status || null,
+          clientId: client?.id || null,
+          clientName: client?.name || null,
+          clientStatus: client?.active_status || null,
+          clusterId: client?.cluster_id || null
+        };
+      }),
       pocLevels: pocLevelRows.map((row) => ({ id: row.id, name: row.name, weight: Number(row.weight) })),
       departments: departments.map((row) => ({ id: row.id, name: row.name })),
       subDepartments: subDepartments.map((row) => ({ id: row.id, name: row.name, departmentId: row.department_id })),
@@ -2729,7 +2794,21 @@ class SupabaseStore {
   async updateProject(projectId, input) {
     const body = { updated_at: new Date().toISOString() };
     if (input.name !== undefined) body.name = input.name;
-    if (input.key !== undefined) body.project_key = input.key;
+    if (input.key !== undefined) {
+      const current = await this.request("projects", {
+        query: `id=eq.${encodeURIComponent(projectId)}&select=id,project_key&limit=1`
+      });
+      const oldKey = current[0]?.project_key || null;
+      if (oldKey && oldKey.toLowerCase() !== String(input.key).toLowerCase()) {
+        await this.request("project_key_aliases", {
+          method: "POST",
+          query: "on_conflict=alias",
+          prefer: "resolution=ignore-duplicates,return=representation",
+          body: [{ alias: oldKey, project_id: projectId }]
+        });
+      }
+      body.project_key = input.key;
+    }
     if (input.clientId !== undefined) body.client_id = input.clientId;
     if (input.goal !== undefined) body.goal = input.goal || null;
     if (input.activeStatus !== undefined) body.active_status = input.activeStatus;
@@ -2960,7 +3039,11 @@ class SupabaseStore {
     const rows = await this.request("projects", {
       query: `project_key=ilike.${encodeURIComponent(key)}&select=id&limit=2`
     });
-    return rows.some((row) => row.id !== exceptId);
+    if (rows.some((row) => row.id !== exceptId)) return true;
+    const aliases = await this.request("project_key_aliases", {
+      query: `alias=ilike.${encodeURIComponent(key)}&select=project_id&limit=2`
+    });
+    return aliases.some((row) => row.project_id !== exceptId);
   }
 
   async whatsappOwner(phone, exceptId = null) {

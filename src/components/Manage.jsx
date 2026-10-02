@@ -3,7 +3,8 @@ import { Download, Lock, Pencil, Plus, RefreshCw, Trash2, Upload, X } from "luci
 import { apiAdminGet, apiGet, apiWrite, apiWriteWithAdminPin, hasAdminPin, setAdminPin } from "../api";
 import { formatCycleType, formatDate, formatPocWeightShare } from "../format";
 import { parseCsatWorkbook } from "../lib/workbook-import";
-import { Button, EmptyState, LoadingBlock, Panel, SingleSelectRow } from "./Ui.jsx";
+import { FilterBar, SingleSelect } from "./Filters.jsx";
+import { Button, EmptyState, LoadingBlock, Panel } from "./Ui.jsx";
 
 const EMPTY_INTERNAL = {
   name: "", email: "", phone: "", clusterId: "",
@@ -142,6 +143,37 @@ function ServiceCatalogForm({ value, onChange, onSave, onCancel, saving }) {
       <div className="button-row">
         <Button onClick={onCancel}>Cancel</Button>
         <Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving…" : isNew ? "Add service" : "Save service"}</Button>
+      </div>
+    </div>
+  );
+}
+
+function ServiceCatalogBatchForm({ rows, onChange, onSave, onCancel, saving }) {
+  function updateRow(index, name) {
+    onChange(rows.map((row, rowIndex) => rowIndex === index ? { ...row, name } : row));
+  }
+  return (
+    <div className="edit-form">
+      <div className="edit-form-head">
+        <strong>Add standard services together</strong>
+        <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
+      </div>
+      <div className="batch-editor compact-batch-editor">
+        {rows.map((row, index) => (
+          <div className="batch-editor-row" key={`catalog-service-${index}`}>
+            <Field label={`Service ${index + 1}`}>
+              <input value={row.name || ""} onChange={(event) => updateRow(index, event.target.value)} autoFocus={index === 0} />
+            </Field>
+            <button type="button" className="icon-button danger" disabled={rows.length === 1}
+              onClick={() => onChange(rows.filter((_, rowIndex) => rowIndex !== index))}
+              aria-label={`Remove service ${index + 1}`}><Trash2 size={15} aria-hidden="true" /></button>
+          </div>
+        ))}
+      </div>
+      <Button icon={Plus} onClick={() => onChange([...rows, { name: "" }])}>Add another service</Button>
+      <div className="button-row">
+        <Button onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving…" : `Add ${rows.length} service${rows.length === 1 ? "" : "s"}`}</Button>
       </div>
     </div>
   );
@@ -444,6 +476,97 @@ function InternalPocBatchForm({ rows, clusters, departments, subDepartments, peo
         <Button variant="primary" onClick={onSave} disabled={saving || !rows.length}>{saving ? "Saving…" : "Save displayed internal POCs"}</Button>
       </div>
     </div>
+  );
+}
+
+function PocControlCentre({ rows, levels, onChange, onSave, saving }) {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
+  const [client, setClient] = useState("");
+  const [project, setProject] = useState("");
+  const [selected, setSelected] = useState([]);
+  const clients = [...new Set(rows.map((row) => row.clientName).filter(Boolean))].sort();
+  const projects = [...new Set(rows
+    .filter((row) => !client || row.clientName === client)
+    .map((row) => row.projectName).filter(Boolean))].sort();
+  const needle = query.trim().toLowerCase();
+  const visible = rows.filter((row) => (
+    (!status || (status === "active" ? row.active : !row.active))
+    && (!client || row.clientName === client)
+    && (!project || row.projectName === project)
+    && (!needle || [row.name, row.contactWhatsapp, row.clientName, row.projectName]
+      .some((value) => String(value || "").toLowerCase().includes(needle)))
+  ));
+  const visibleIds = visible.map((row) => row.id);
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.includes(id));
+  const selectedIds = new Set(selected);
+
+  function patchSelected(patch) {
+    onChange(rows.map((row) => selectedIds.has(row.id) ? { ...row, ...patch } : row));
+  }
+
+  function redistribute() {
+    const projectIds = new Set(rows.filter((row) => selectedIds.has(row.id)).map((row) => row.projectId));
+    onChange(rows.map((row) => {
+      if (!projectIds.has(row.projectId) || !row.active) return row;
+      const active = rows.filter((item) => item.projectId === row.projectId && item.active);
+      const index = active.findIndex((item) => item.id === row.id);
+      const share = Math.floor((10000 / active.length)) / 100;
+      const first = Math.round((100 - share * (active.length - 1)) * 100) / 100;
+      return { ...row, weightPercentage: index === 0 ? first : share };
+    }));
+  }
+
+  const activeCount = rows.filter((row) => row.active).length;
+  const inactiveCount = rows.length - activeCount;
+  const uniqueContacts = new Set(rows.map((row) => String(row.contactWhatsapp || "").replace(/\D/g, "")).filter(Boolean)).size;
+  const projectIds = new Set(rows.map((row) => row.projectId));
+  const projectsWithoutActive = [...projectIds].filter((id) => !rows.some((row) => row.projectId === id && row.active)).length;
+
+  return (
+    <>
+      <div className="metric-row four poc-control-metrics">
+        <div className="metric-card strong"><span>Active assignments</span><strong>{activeCount}</strong><small>eligible when WhatsApp is valid</small></div>
+        <div className="metric-card neutral"><span>Inactive assignments</span><strong>{inactiveCount}</strong><small>kept for history</small></div>
+        <div className="metric-card neutral"><span>Unique contacts</span><strong>{uniqueContacts}</strong><small>across every project</small></div>
+        <div className={`metric-card ${projectsWithoutActive ? "watch" : "strong"}`}><span>Projects without active POC</span><strong>{projectsWithoutActive}</strong><small>WhatsApp sends unavailable</small></div>
+      </div>
+      <div className="poc-control-filters">
+        <Field label="Search"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="POC, WhatsApp, client or project" /></Field>
+        <Field label="Status"><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select></Field>
+        <Field label="Client"><select value={client} onChange={(event) => { setClient(event.target.value); setProject(""); }}><option value="">All clients</option>{clients.map((name) => <option key={name} value={name}>{name}</option>)}</select></Field>
+        <Field label="Project"><select value={project} onChange={(event) => setProject(event.target.value)}><option value="">All projects</option>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></Field>
+        {(query || status || client || project) ? <Button onClick={() => { setQuery(""); setStatus(""); setClient(""); setProject(""); }}>Reset filters</Button> : null}
+      </div>
+      <div className="button-row poc-control-actions">
+        <Button onClick={() => setSelected(allVisibleSelected ? selected.filter((id) => !visibleIds.includes(id)) : [...new Set([...selected, ...visibleIds])])}>
+          {allVisibleSelected ? "Deselect displayed" : `Select all displayed (${visible.length})`}
+        </Button>
+        <Button onClick={() => patchSelected({ active: true })} disabled={!selected.length}>Activate selected</Button>
+        <Button onClick={() => patchSelected({ active: false, weightPercentage: 0 })} disabled={!selected.length}>Deactivate selected</Button>
+        <Button onClick={redistribute} disabled={!selected.length}>Redistribute affected projects equally</Button>
+        <Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save all changed POCs"}</Button>
+      </div>
+      <p className="form-note">For manual percentages, edit the Influence column and save. Equal redistribution includes every active POC on each affected project, not only displayed rows.</p>
+      <div className="poc-control-table">
+        <div className="poc-control-row head"><span /><span>POC</span><span>Client</span><span>Project</span><span>Tag</span><span>Status</span><span>Influence</span></div>
+        {visible.map((row) => (
+          <div className="poc-control-row" key={row.id}>
+            <input type="checkbox" checked={selected.includes(row.id)} onChange={() => setSelected(selected.includes(row.id) ? selected.filter((id) => id !== row.id) : [...selected, row.id])} aria-label={`Select ${row.name}`} />
+            <span><strong>{row.name}</strong><small>{row.contactWhatsapp || "No WhatsApp"}</small></span>
+            <span>{row.clientName || "--"}</span>
+            <span><strong>{row.projectName || "--"}</strong><small>{row.projectKey || ""}</small></span>
+            <select value={row.levelId || ""} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, levelId: event.target.value } : item))} aria-label={`POC tag for ${row.name}`}>
+              <option value="">Select tag</option>
+              {levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}
+            </select>
+            <select value={row.active ? "active" : "inactive"} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, active: event.target.value === "active", weightPercentage: event.target.value === "active" ? item.weightPercentage : 0 } : item))}><option value="active">Active</option><option value="inactive">Inactive</option></select>
+            <input type="number" min="0" max="100" step="0.01" disabled={!row.active} value={row.active ? row.weightPercentage ?? "" : 0} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, weightPercentage: event.target.value } : item))} />
+          </div>
+        ))}
+        {!visible.length ? <EmptyState title="No POC assignments match" text="Reset filters to see all client POCs." /> : null}
+      </div>
+    </>
   );
 }
 
@@ -752,11 +875,10 @@ function ProjectForm({ value, clients, onChange, onSave, onCancel, saving }) {
         <Field label="Project ID" hint="any stable ID using letters, numbers or hyphens; dates are not part of validation">
           <input
             value={value.key}
-            readOnly={!isNew}
             placeholder="MITWPU or mitwpu-website"
             onChange={(event) => onChange({
               ...value,
-              key: event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "")
+              key: event.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, "")
             })}
           />
         </Field>
@@ -782,7 +904,7 @@ function ProjectForm({ value, clients, onChange, onSave, onCancel, saving }) {
         </Field>
       </div>
       <p className="form-note">
-        Project IDs stay permanent because project URLs and feedback history use them. CSAT and risk are written by the feedback engine; the first pulse is scheduled for start date + feedback interval.
+        Changing a Project ID keeps the former ID as an alias, so existing links and feedback history continue to work. CSAT and risk are written by the feedback engine; the first pulse is scheduled for start date + feedback interval.
       </p>
       <div className="button-row">
         <Button onClick={onCancel}>Cancel</Button>
@@ -957,12 +1079,16 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
           </div>
         ))}
       </div>
+      <Button icon={Plus} onClick={() => onChange({
+        ...value,
+        pocs: [...pocs, { ...EMPTY_SETUP_POC, levelId: levels[0]?.id || "", weightPercentage: 0 }]
+      })}>Add another POC</Button>
       <div className="button-row">
         <Button disabled={!pocs.length} onClick={() => onChange({ ...value, pocs: distributePocWeights(pocs) })}>
           Distribute equally
         </Button>
-        <span className={pocs.some((poc) => poc.active !== false) && Math.abs(activePocWeightTotal - 100) <= 0.01 ? "" : "missing"}>
-          Active POC influence total: <strong>{activePocWeightTotal}%</strong>
+        <span className={!pocs.some((poc) => poc.active !== false) || Math.abs(activePocWeightTotal - 100) <= 0.01 ? "" : "missing"}>
+          Active POC influence total: <strong>{activePocWeightTotal}%</strong>{!pocs.some((poc) => poc.active !== false) ? " — allowed; messaging unavailable until a POC is activated" : ""}
         </span>
       </div>
       <p className="form-note">Normal and Important are tags only. Set each POC's direct influence so the project total is exactly 100%.</p>
@@ -1004,6 +1130,8 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
         ))}
       </div>
 
+      <Button icon={Plus} onClick={() => onChange({ ...value, services: [...services, { ...EMPTY_SETUP_SERVICE }] })}>Add another service</Button>
+
       <div className="button-row setup-save-row">
         <Button onClick={onCancel}>Cancel</Button>
         <Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving complete setup…" : "Save project, POCs and services"}</Button>
@@ -1024,13 +1152,19 @@ export default function Manage({ onReload }) {
   const [projectForm, setProjectForm] = useState(null);
   const [clientForm, setClientForm] = useState(null);
   const [clusterForm, setClusterForm] = useState(null);
-  const [showAllInternal, setShowAllInternal] = useState(false);
+  const [showAllInternal, setShowAllInternal] = useState(true);
   const [internalForm, setInternalForm] = useState(null);
   const [internalBatch, setInternalBatch] = useState(null);
   const [clientBatch, setClientBatch] = useState(null);
   const [pocBatch, setPocBatch] = useState(null);
   const [serviceBatch, setServiceBatch] = useState(null);
   const [serviceCatalogForm, setServiceCatalogForm] = useState(null);
+  const [serviceCatalogBatch, setServiceCatalogBatch] = useState(null);
+  const [pocControlRows, setPocControlRows] = useState([]);
+  const [bulkCycleType, setBulkCycleType] = useState("pulse");
+  const [bulkPreview, setBulkPreview] = useState(null);
+  const [bulkSelectedProjectIds, setBulkSelectedProjectIds] = useState([]);
+  const [bulkSending, setBulkSending] = useState(false);
   const [setupForm, setSetupForm] = useState(null);
   const [setupCopySource, setSetupCopySource] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -1060,6 +1194,7 @@ export default function Manage({ onReload }) {
     setPocBatch(null);
     setServiceBatch(null);
     setServiceCatalogForm(null);
+    setServiceCatalogBatch(null);
     setSetupForm(null);
     setSetupCopySource(null);
   }
@@ -1075,6 +1210,7 @@ export default function Manage({ onReload }) {
     try {
       const data = await apiGet("/api/admin/directory");
       setDirectory(data);
+      setPocControlRows((data.clientPocs || []).map((poc) => ({ ...poc })));
       const target = keepClient || "";
       setClientId(target);
       const clientDetail = target ? await apiGet(`/api/admin/clients/${encodeURIComponent(target)}`) : null;
@@ -1128,9 +1264,9 @@ export default function Manage({ onReload }) {
   }, [unlocked, cleanupProjectId, detail]);
 
   useEffect(() => {
-    if (!projectForm && !clientForm && !clusterForm && !internalForm && !internalBatch && !clientBatch && !pocBatch && !serviceBatch && !serviceCatalogForm && !setupForm) return;
+    if (!projectForm && !clientForm && !clusterForm && !internalForm && !internalBatch && !clientBatch && !pocBatch && !serviceBatch && !serviceCatalogForm && !serviceCatalogBatch && !setupForm) return;
     window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
-  }, [Boolean(projectForm), Boolean(clientForm), Boolean(clusterForm), Boolean(internalForm), Boolean(internalBatch), Boolean(clientBatch), Boolean(pocBatch), Boolean(serviceBatch), Boolean(serviceCatalogForm), Boolean(setupForm)]);
+  }, [Boolean(projectForm), Boolean(clientForm), Boolean(clusterForm), Boolean(internalForm), Boolean(internalBatch), Boolean(clientBatch), Boolean(pocBatch), Boolean(serviceBatch), Boolean(serviceCatalogForm), Boolean(serviceCatalogBatch), Boolean(setupForm)]);
 
   async function selectClient(id) {
     setClientId(id);
@@ -1380,6 +1516,30 @@ export default function Manage({ onReload }) {
     }
   }
 
+  async function saveServiceCatalogBatch() {
+    const names = (serviceCatalogBatch || []).map((row) => String(row.name || "").trim());
+    if (!names.length || names.some((name) => !name)) {
+      showToast("Enter a name for every service.");
+      return;
+    }
+    if (new Set(names.map((name) => name.toLowerCase())).size !== names.length) {
+      showToast("The same service appears more than once in this list.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await apiWrite("/api/admin/service-catalog/bulk", { services: names.map((name) => ({ name })) }, "POST");
+      setServiceCatalogBatch(null);
+      await loadAll(clientId);
+      onReload();
+      showToast(`${result.services.length} standard service${result.services.length === 1 ? "" : "s"} added.`);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function removeServiceCatalog(item) {
     if (!window.confirm(`Remove ${item.name} from the service catalogue?\n\nIf a project already uses it, the service will be archived instead so historical records remain valid.`)) return;
     setSaving(true);
@@ -1582,6 +1742,63 @@ export default function Manage({ onReload }) {
     }
   }
 
+  async function savePocControl() {
+    setSaving(true);
+    try {
+      const result = await apiWrite("/api/admin/pocs/bulk-control", {
+        updates: pocControlRows.map((row) => ({
+          id: row.id,
+          active: row.active,
+          levelId: row.levelId || "",
+          weightPercentage: row.active ? Number(row.weightPercentage) : 0
+        }))
+      }, "PUT");
+      await loadAll(clientId);
+      onReload();
+      showToast(`${result.updated} POC assignment${result.updated === 1 ? "" : "s"} saved.`);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function previewBulkSend() {
+    setBulkSending(true);
+    try {
+      const preview = await apiWrite("/api/admin/bulk-feedback/preview", { cycleType: bulkCycleType }, "POST");
+      setBulkPreview(preview);
+      setBulkSelectedProjectIds(preview.projects.filter((project) => project.eligible).map((project) => project.projectId));
+      if (!preview.messaging.enabled) showToast("WhatsApp messaging is paused. You can review the preview, but sending is disabled.");
+    } catch (previewError) {
+      showToast(previewError.message);
+    } finally {
+      setBulkSending(false);
+    }
+  }
+
+  async function executeBulkSend() {
+    if (!bulkSelectedProjectIds.length) { showToast("Select at least one eligible project from the preview."); return; }
+    const label = bulkCycleType === "quick_checkin" ? "quick check-in" : "30-day feedback";
+    if (!window.confirm(`Send ${label} for ${bulkSelectedProjectIds.length} selected project(s)?\n\nThe preview rules will be checked again before sending.`)) return;
+    setBulkSending(true);
+    try {
+      const result = await apiWrite("/api/admin/bulk-feedback/send", {
+        cycleType: bulkCycleType,
+        projectIds: bulkSelectedProjectIds
+      }, "POST");
+      showToast(`${result.projectsStarted} project${result.projectsStarted === 1 ? "" : "s"} started · ${result.messagesQueued} WhatsApp message${result.messagesQueued === 1 ? "" : "s"} queued.`);
+      setBulkPreview(null);
+      setBulkSelectedProjectIds([]);
+      await loadAll(clientId);
+      onReload();
+    } catch (sendError) {
+      showToast(sendError.message);
+    } finally {
+      setBulkSending(false);
+    }
+  }
+
   function downloadWorkbookTemplate() {
     const link = document.createElement("a");
     link.href = "/templates/csat-multi-client-import.xlsx";
@@ -1683,42 +1900,119 @@ export default function Manage({ onReload }) {
         <Button icon={RefreshCw} onClick={() => loadAll(clientId)}>Refresh</Button>
       </div>
 
-      <div className="filter-bar">
-        <SingleSelectRow
+      <FilterBar
+        showReset={Boolean(clusterFilterId || clientId)}
+        onReset={() => { setClusterFilterId(""); void selectClient(""); }}
+      >
+        <SingleSelect
           label="Cluster"
           value={clusterFilterId}
           onChange={selectCluster}
           placeholder="All clusters"
           options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
         />
-        <SingleSelectRow
+        <SingleSelect
           label="Client"
           value={clientId}
           onChange={selectClient}
           placeholder="All clients"
           options={filteredClients.map((client) => ({ value: client.id, label: client.name }))}
         />
-      </div>
+      </FilterBar>
+
+      <nav className="manage-section-nav" aria-label="Manage sections">
+        <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button>
+        <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button>
+        <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button>
+        <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button>
+        <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Project Services</button>
+        <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button>
+        <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button>
+      </nav>
 
       {/* Setting a project up has an order, and doing it out of order leaves
           a project that cannot be sent: no POC means no recipient, no service
           owner means an issue nobody hears about. */}
       {clientId ? (
-        <div className="setup-steps">
-          <span className={projects.length ? "done" : "todo"}>
+        <nav className="setup-steps" aria-label="Manage section shortcuts">
+          <button type="button" className={projects.length ? "done" : "todo"} onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>
             1. Projects{projects.length ? ` (${projects.length})` : ""}
-          </span>
-          <span className={pocs.length ? "done" : "todo"}>
+          </button>
+          <button type="button" className={pocs.length ? "done" : "todo"} onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>
             2. Client POCs{pocs.length ? ` (${pocs.length})` : ""}
-          </span>
-          <span className={services.length ? "done" : "todo"}>
+          </button>
+          <button type="button" className={services.length ? "done" : "todo"} onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>
             3. Services{services.length ? ` (${services.length})` : ""}
-          </span>
-          <span className={peopleOnThisClient.length ? "done" : "todo"}>
+          </button>
+          <button type="button" className={peopleOnThisClient.length ? "done" : "todo"} onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>
             4. Internal owners{peopleOnThisClient.length ? ` (${peopleOnThisClient.length})` : ""}
-          </span>
-        </div>
+          </button>
+        </nav>
       ) : null}
+
+      <Panel
+        id="manage-poc-control"
+        title="POC Control Centre"
+        badge={`${pocControlRows.filter((poc) => poc.active).length} active · ${pocControlRows.filter((poc) => !poc.active).length} inactive`}
+        className="span-12"
+      >
+        <PocControlCentre rows={pocControlRows} levels={levels} onChange={setPocControlRows} onSave={savePocControl} saving={saving} />
+      </Panel>
+
+      <Panel
+        id="manage-bulk-sends"
+        title="Bulk Feedback Sends"
+        badge="PIN protected · preview required"
+        className="span-12"
+      >
+        <p className="form-note">
+          Preview every active project before sending. Projects can be selected or deselected. The system blocks simultaneous sessions for the same WhatsApp number and rechecks eligibility immediately before sending.
+        </p>
+        <div className="bulk-send-controls">
+          <Field label="Feedback type">
+            <select value={bulkCycleType} onChange={(event) => { setBulkCycleType(event.target.value); setBulkPreview(null); setBulkSelectedProjectIds([]); }}>
+              <option value="pulse">30-day feedback</option>
+              <option value="quick_checkin">Quick check-in</option>
+            </select>
+          </Field>
+          <Button variant="primary" onClick={previewBulkSend} disabled={bulkSending}>{bulkSending ? "Checking…" : "Preview eligible projects"}</Button>
+        </div>
+        {bulkPreview ? (
+          <>
+            <div className="bulk-preview-summary">
+              <strong>{bulkSelectedProjectIds.length} selected projects</strong>
+              <span>{bulkPreview.eligiblePocs} eligible POC messages before your project selections</span>
+              <span>{bulkPreview.projects.filter((project) => !project.eligible).length} projects blocked</span>
+            </div>
+            {!bulkPreview.messaging.enabled ? (
+              <p className="manual-whatsapp-warning">WhatsApp messaging is paused. Email remains active. Resume WhatsApp from Dashboard before sending.</p>
+            ) : null}
+            <div className="bulk-preview-table">
+              <div className="bulk-preview-row head"><span /><span>Project</span><span>Client</span><span>Eligible POCs</span><span>Skipped / conflicts</span><span>Result</span></div>
+              {bulkPreview.projects.map((project) => {
+                const checked = bulkSelectedProjectIds.includes(project.projectId);
+                return (
+                  <div className={`bulk-preview-row ${project.eligible ? "" : "blocked"}`} key={project.projectId}>
+                    <input type="checkbox" checked={checked} disabled={!project.eligible} onChange={() => setBulkSelectedProjectIds(checked ? bulkSelectedProjectIds.filter((id) => id !== project.projectId) : [...bulkSelectedProjectIds, project.projectId])} aria-label={`Select ${project.projectName}`} />
+                    <span><strong>{project.projectName}</strong><small>{project.projectKey}</small></span>
+                    <span>{project.clientName || "--"}</span>
+                    <span>{project.eligiblePocs.length ? project.eligiblePocs.map((poc) => poc.name).join(", ") : "None"}</span>
+                    <span>{[...project.invalidPocs.map((poc) => `${poc.name}: ${poc.reason}`), ...project.conflicts.map((item) => `${item.pocName}: ${item.reason}`)].join(" · ") || "None"}</span>
+                    <span className={project.eligible ? "success" : "missing"}>{project.eligible ? "Ready" : project.reasons.join(" · ")}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="button-row section-bottom-actions">
+              <Button onClick={() => setBulkSelectedProjectIds(bulkPreview.projects.filter((project) => project.eligible).map((project) => project.projectId))}>Select all eligible</Button>
+              <Button onClick={() => setBulkSelectedProjectIds([])}>Deselect all</Button>
+              <Button variant="primary" onClick={executeBulkSend} disabled={bulkSending || !bulkSelectedProjectIds.length || !bulkPreview.messaging.enabled}>
+                {bulkSending ? "Sending…" : `Send to ${bulkSelectedProjectIds.length} selected project${bulkSelectedProjectIds.length === 1 ? "" : "s"}`}
+              </Button>
+            </div>
+          </>
+        ) : null}
+      </Panel>
 
       <Panel
         title="POC scoring influence"
@@ -1916,10 +2210,11 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-service-catalog"
         title="Service catalogue"
         badge={`${serviceCatalog.filter((item) => item.active).length} active · ${serviceCatalog.length} total`}
         className="span-12"
-        action={<Button icon={Plus} onClick={() => { closeForms(); setServiceCatalogForm({ name: "", active: true }); }}>Add standard service</Button>}
+        action={<Button icon={Plus} onClick={() => { closeForms(); setServiceCatalogBatch([{ name: "" }]); }}>Add standard services</Button>}
       >
         <p className="form-note">
           Projects select services from this controlled list. Renaming a service updates its name on every linked project. Services already used in history are archived instead of being deleted.
@@ -1935,6 +2230,18 @@ export default function Manage({ onReload }) {
             />
           </div>
         ) : null}
+        {serviceCatalogBatch ? (
+          <div ref={formRef}>
+            <ServiceCatalogBatchForm
+              rows={serviceCatalogBatch}
+              onChange={setServiceCatalogBatch}
+              onSave={saveServiceCatalogBatch}
+              onCancel={() => setServiceCatalogBatch(null)}
+              saving={saving}
+            />
+          </div>
+        ) : null}
+        <div className="manage-service-catalog-scroll">
         <div className="dtable manage-service-catalog">
           <div className="dtable-head">
             <span>Standard service</span>
@@ -1959,9 +2266,11 @@ export default function Manage({ onReload }) {
           ))}
           {!serviceCatalog.length ? <EmptyState title="No standard services" text="Add the services that projects can use." /> : null}
         </div>
+        </div>
       </Panel>
 
       <Panel
+        id="manage-projects"
         title="Projects"
         badge={`${projects.length} total`}
         className="span-12"
@@ -2068,6 +2377,7 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-client-pocs"
         title="Client POCs"
         badge={`${pocs.length} total`}
         className="span-12"
@@ -2149,6 +2459,7 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-services"
         title="Services and owners"
         badge={`${services.length} on this client`}
         className="span-12"
@@ -2225,6 +2536,7 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-internal-pocs"
         title="Internal POCs"
         badge={`${visiblePeople.length} displayed${showAllInternal ? ` · ${people.length} across the agency` : ` · ${peopleOnThisClient.length} on this client`}`}
         className="span-12"
@@ -2327,6 +2639,11 @@ export default function Manage({ onReload }) {
                 : "Internal POCs appear here once they own a service on one of this client's projects."}
             />
           ) : null}
+        </div>
+        <div className="button-row section-bottom-actions">
+          <Button icon={Plus} onClick={() => { closeForms(); setInternalForm({ ...EMPTY_INTERNAL, clusterId: clusterFilterId }); }}>
+            Add another internal POC
+          </Button>
         </div>
       </Panel>
 

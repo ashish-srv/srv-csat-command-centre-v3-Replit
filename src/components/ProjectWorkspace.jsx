@@ -141,6 +141,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const [range, setRange] = useState({ from: "", to: "", basis: "started" });
 
   const allProjects = dashboard?.projects || [];
+  const messagingEnabled = dashboard?.messaging?.enabled !== false;
 
   const projectKey = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -382,6 +383,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   }
 
   async function requestFeedback(cycleType) {
+    if (!messagingEnabled) { showToast("WhatsApp messaging is paused. Email notifications remain active."); return; }
     const project = workspace?.project;
     if (!project) return;
     if (!actionPocs.length) { showToast("Select at least one POC first."); return; }
@@ -411,6 +413,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   }
 
   async function sendReminder() {
+    if (!messagingEnabled) { showToast("WhatsApp messaging is paused. Email notifications remain active."); return; }
     if (!actionPocs.length) {
       showToast("Select at least one POC first.");
       return;
@@ -672,7 +675,9 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const latestClientAt = Date.parse(latestClientMessage?.createdAt || selectedSession?.lastClientResponseAt || "");
   const whatsappWindowOpen = Number.isFinite(latestClientAt)
     && Date.now() - latestClientAt < 24 * 60 * 60 * 1000;
-  const manualWhatsappBlockedReason = !selectedSession
+  const manualWhatsappBlockedReason = !messagingEnabled
+    ? "WhatsApp messaging is paused from the Dashboard. Email notifications remain active."
+    : !selectedSession
     ? "Select a POC conversation first."
     : !selectedConversationPoc?.contactWhatsapp
       ? "This POC has no WhatsApp number."
@@ -1023,28 +1028,28 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
             icon={Send}
             variant="primary"
             onClick={() => requestFeedback("pulse")}
-            disabled={!actionPocs.length || Boolean(bulkAction)}
+            disabled={!messagingEnabled || !actionPocs.length || Boolean(bulkAction)}
           >
             {bulkAction === "pulse" ? "Starting…" : `Send ${intervalLabel} feedback to ${actionPocs.length} POC${actionPocs.length === 1 ? "" : "s"}`}
           </Button>
           <Button
             icon={CheckCircle2}
             onClick={() => requestFeedback("project_end")}
-            disabled={!actionPocs.length || Boolean(bulkAction)}
+            disabled={!messagingEnabled || !actionPocs.length || Boolean(bulkAction)}
           >
             {bulkAction === "project_end" ? "Starting…" : `Send project-end feedback to ${actionPocs.length} POC${actionPocs.length === 1 ? "" : "s"}`}
           </Button>
           <Button
             icon={Send}
             onClick={() => requestFeedback("quick_checkin")}
-            disabled={!actionPocs.length || Boolean(bulkAction)}
+            disabled={!messagingEnabled || !actionPocs.length || Boolean(bulkAction)}
           >
             {bulkAction === "quick_checkin" ? "Starting..." : `Send quick check-in to ${actionPocs.length} POC${actionPocs.length === 1 ? "" : "s"}`}
           </Button>
           <Button
             icon={Bell}
             onClick={sendReminder}
-            disabled={!reminderTargets.length || Boolean(bulkAction)}
+            disabled={!messagingEnabled || !reminderTargets.length || Boolean(bulkAction)}
             title={finalResponseWindowActive
               ? "Some selected POCs have used all 3 reminders; only eligible selected POCs will be reminded."
               : !reminderTargets.length ? "No selected POC has an open session eligible for a reminder in this cycle." : undefined}

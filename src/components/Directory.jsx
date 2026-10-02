@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { apiGet } from "../api";
 import { formatDate, formatPocWeightShare } from "../format";
-import { MultiSelect } from "./Filters.jsx";
-import { Button, EmptyState, LoadingBlock, Panel, SingleSelectRow } from "./Ui.jsx";
+import { FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
+import { Button, EmptyState, LoadingBlock, Panel } from "./Ui.jsx";
 
 function statusLabel(value) {
   return String(value || "")
@@ -221,6 +221,15 @@ export default function Directory({ onOpenProject }) {
     )),
     [scopedClients, projectFilterActive, filteredProjectsByClient]
   );
+  const filtersActive = Boolean(clusterId || clientStatuses.length || clientId || projectStatuses.length || projectIds.length);
+
+  function resetFilters() {
+    setClusterId("");
+    setClientStatuses([]);
+    setClientId("");
+    setProjectStatuses([]);
+    setProjectIds([]);
+  }
 
   useEffect(() => {
     const validProjectIds = new Set(scopedProjects.map((project) => project.id));
@@ -292,8 +301,8 @@ export default function Directory({ onOpenProject }) {
         <Button icon={RefreshCw} onClick={loadDirectory}>Refresh</Button>
       </div>
 
-      <div className="filter-bar">
-        <SingleSelectRow
+      <FilterBar showReset={filtersActive} onReset={resetFilters}>
+        <SingleSelect
           label="Cluster"
           value={clusterId}
           onChange={changeCluster}
@@ -308,7 +317,7 @@ export default function Directory({ onOpenProject }) {
           options={clientStatusOptions}
           renderOption={statusLabel}
         />
-        <SingleSelectRow
+        <SingleSelect
           label="Client"
           value={clientId}
           onChange={setClientId}
@@ -331,7 +340,7 @@ export default function Directory({ onOpenProject }) {
           options={projectOptions.map((project) => project.id)}
           renderOption={(id) => projectNamesById.get(id) || id}
         />
-      </div>
+      </FilterBar>
 
       <Panel
         title="Client directory"

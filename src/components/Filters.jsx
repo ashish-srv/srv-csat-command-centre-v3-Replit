@@ -144,6 +144,11 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
               </button>
             ) : null}
           </label>
+          {value ? (
+            <button type="button" className="filter-clear" onClick={() => choose("")}>
+              <X size={12} aria-hidden="true" /> Clear
+            </button>
+          ) : null}
           {placeholder ? (
             <button
               type="button"

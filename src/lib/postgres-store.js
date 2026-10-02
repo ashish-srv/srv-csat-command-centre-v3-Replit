@@ -2,13 +2,14 @@ const { Pool } = require("pg");
 const { SupabaseStore } = require("./supabase-store");
 
 const TABLES = new Set([
-  "automation_events", "client_pocs", "clients", "clusters", "departments",
+  "app_settings", "automation_events", "client_pocs", "clients", "clusters", "departments",
   "feedback_cycles", "feedback_sessions", "internal_pocs", "issue_events",
   "issues", "messages", "observations", "poc_levels", "project_services",
-  "projects", "service_catalog", "service_feedback", "sub_departments"
+  "project_key_aliases", "projects", "service_catalog", "service_feedback", "sub_departments"
 ]);
 
 const JSON_COLUMNS = {
+  app_settings: new Set(["setting_value"]),
   automation_events: new Set(["payload"]),
   feedback_sessions: new Set(["conversation_state", "predicted_signals"]),
   messages: new Set(["metadata"])

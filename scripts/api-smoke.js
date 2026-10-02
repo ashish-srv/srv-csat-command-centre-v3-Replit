@@ -25,6 +25,7 @@ const calls = {
   createdCycleRequests: [],
   createdPocs: [],
   createdServices: [],
+  createdCatalogServices: [],
   deletedServices: [],
   updatedPocLevels: [],
   clearedProjectMessages: [],
@@ -274,6 +275,15 @@ const store = {
   getIssue: async () => ({ id: "iss_1", status: "open" }),
   updateIssueStatus: async (issueId, action) => ({ id: issueId, status: action === "close" ? "closed" : "open" }),
   getDashboard: async () => ({ projects: [project], metrics: { projectCount: 1 }, clusters: [], clients: [], openIssues: [], openCycles: [] }),
+  getMessagingStatus: async () => store._messagingStatus,
+  setMessagingStatus: async (enabled, updatedBy) => {
+    store._messagingStatus = {
+      enabled: Boolean(enabled),
+      updatedAt: new Date().toISOString(),
+      updatedBy
+    };
+    return store._messagingStatus;
+  },
   recordAutomationEvent: async (event) => { calls.automation.push(event); return event; },
   claimAutomationEvent: async (eventType, payload, dedupeKey) => {
     if (calls.automationClaims.has(dedupeKey)) return null;
@@ -338,6 +348,12 @@ const store = {
     calls.createdServices.push(created);
     return created;
   },
+  serviceCatalogConflict: async () => false,
+  createServiceCatalogItem: async (input) => {
+    const created = { id: `catalog_${calls.createdCatalogServices.length + 1}`, ...input };
+    calls.createdCatalogServices.push(created);
+    return created;
+  },
   updateProjectService: async (id, input) => ({ id, ...input }),
   deleteProjectService: async (id) => { calls.deletedServices.push(id); return true; },
   servicesForProject: async (projectId) => project.services.filter((service) => service.projectId === projectId),
@@ -371,6 +387,7 @@ const store = {
   _cycleSummary: null,
   _inactiveFinalSweepCandidates: [],
   _expiredInactiveFinalSweeps: [],
+  _messagingStatus: { enabled: true, updatedAt: null, updatedBy: null },
   _injectRapidRatingMessages: false,
   _rapidRatingMessagesInjected: false
 };
@@ -2911,6 +2928,83 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 403);
   });
 
+  await scenario("WhatsApp master control needs the PIN and leaves email events available", async () => {
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    const priorMessagingStatus = store._messagingStatus;
+    const wrong = await req("PATCH", "/api/admin/messaging", { enabled: false }, { "x-admin-pin": "9999" });
+    assert.strictEqual(wrong.statusCode, 403);
+    try {
+      const paused = await req("PATCH", "/api/admin/messaging", { enabled: false }, PIN);
+      assert.strictEqual(paused.statusCode, 200);
+      assert.strictEqual(JSON.parse(paused.body).messaging.enabled, false);
+
+      const cyclesBefore = calls.createdCycleRequests.length;
+      const blocked = await req("POST", `/api/projects/${project.key}/request-feedback`, { cycleType: "pulse" });
+      assert.strictEqual(blocked.statusCode, 423);
+      assert.strictEqual(calls.createdCycleRequests.length, cyclesBefore);
+
+      const scheduled = await rawReq("POST", "/api/automation/create-due-sessions", {}, {});
+      assert.strictEqual(scheduled.statusCode, 200);
+      assert.strictEqual(JSON.parse(scheduled.body).paused, true);
+
+      const priorAutomationCount = calls.automation.length;
+      store._session = {
+        id: "sess_paused_inbound", cycleId: "cyc_paused_inbound", projectId: project.id,
+        clientPocId: poc.id, status: "partial", completionStatus: "partial",
+        sessionType: "pulse", conversationState: { state: "waiting_for_overall_rating" }
+      };
+      const inbound = await rawReq("POST", `/api/whatsapp/sessions/${store._session.id}/reply`, {
+        from: poc.contactWhatsapp,
+        fromName: poc.name,
+        text: "Please ask the team to call me",
+        providerMessageId: "wamid-paused-1"
+      });
+      const inboundPayload = JSON.parse(inbound.body);
+      assert.strictEqual(inbound.statusCode, 200);
+      assert.strictEqual(inboundPayload.sendToWhatsapp, false);
+      assert.strictEqual(inboundPayload.messagingPaused, true);
+      assert.strictEqual(calls.messages.at(-1).metadata.receivedWhileMessagingPaused, true);
+      assert.ok(calls.automation.slice(priorAutomationCount).some((event) => event.eventType === "handoff"), "email handoff must remain available while WhatsApp is paused");
+
+      const resumed = await req("PATCH", "/api/admin/messaging", { enabled: true }, PIN);
+      assert.strictEqual(JSON.parse(resumed.body).messaging.enabled, true);
+    } finally {
+      store._messagingStatus = priorMessagingStatus;
+      store._session = priorSession;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+    }
+  });
+
+  await scenario("bulk preview blocks every already-active WhatsApp conversation", async () => {
+    const previousListProjects = store.listProjects;
+    const previousRouting = store.getWhatsappRoutingContext;
+    const previousSession = store._session;
+    store.listProjects = async () => [{ ...project, activeStatus: "active", clientActiveStatus: "active", clientName: "Test Client" }];
+    try {
+      store.getWhatsappRoutingContext = async () => ({ status: "no_session", poc, session: null });
+      const clear = await req("POST", "/api/admin/bulk-feedback/preview", { cycleType: "quick_checkin" }, PIN);
+      assert.strictEqual(clear.statusCode, 200);
+      assert.strictEqual(JSON.parse(clear.body).projects[0].eligible, true);
+
+      store.getWhatsappRoutingContext = async () => ({
+        status: "active",
+        poc,
+        session: { ...previousSession, sessionType: "quick_checkin", projectId: "another_project" }
+      });
+      const blocked = await req("POST", "/api/admin/bulk-feedback/preview", { cycleType: "quick_checkin" }, PIN);
+      const projectPreview = JSON.parse(blocked.body).projects[0];
+      assert.strictEqual(projectPreview.eligible, false);
+      assert.match(projectPreview.conflicts[0].reason, /active session/i);
+    } finally {
+      store.listProjects = previousListProjects;
+      if (previousRouting) store.getWhatsappRoutingContext = previousRouting;
+      else delete store.getWhatsappRoutingContext;
+      store._session = previousSession;
+    }
+  });
+
   await scenario("directory read needs no PIN", async () => {
     const res = await req("GET", "/api/admin/directory");
     assert.strictEqual(res.statusCode, 200);
@@ -2968,10 +3062,40 @@ async function scenario(name, fn) {
 
   await scenario("active projects may keep only inactive historical POCs", async () => {
     const res = await req("PUT", "/api/admin/projects/prj_1/pocs", {
-      pocs: [{ ...poc, active: false, weightPercentage: 0 }],
+      pocs: [{ ...poc, levelId: "", active: false, weightPercentage: 0 }],
       removedIds: []
     }, PIN);
     assert.strictEqual(res.statusCode, 200);
+  });
+
+  await scenario("POC Control Centre saves status, tag and manual influence together", async () => {
+    const res = await req("PUT", "/api/admin/pocs/bulk-control", {
+      updates: [{ id: poc.id, active: true, levelId: "important", weightPercentage: 100 }]
+    }, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(payload.updated, 1);
+    assert.strictEqual(payload.pocs[0].active, true);
+    assert.strictEqual(payload.pocs[0].levelId, "important");
+    assert.strictEqual(payload.pocs[0].weightPercentage, 100);
+  });
+
+  await scenario("POC Control Centre allows every POC on a project to be inactive", async () => {
+    const previousGet = store.getClientPocById;
+    const previousList = store.pocsForProject;
+    const untagged = { ...poc, levelId: null, active: false, weightPercentage: 0 };
+    store.getClientPocById = async () => untagged;
+    store.pocsForProject = async () => [untagged];
+    try {
+      const res = await req("PUT", "/api/admin/pocs/bulk-control", {
+        updates: [{ id: poc.id, active: false, levelId: "", weightPercentage: 0 }]
+      }, PIN);
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(JSON.parse(res.body).pocs[0].active, false);
+    } finally {
+      store.getClientPocById = previousGet;
+      store.pocsForProject = previousList;
+    }
   });
 
   await scenario("project POC percentages must total exactly 100", async () => {
@@ -3343,6 +3467,41 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 201);
   });
 
+  await scenario("editing a project ID preserves and resolves the former ID as an alias", async () => {
+    const provider = Object.create(SupabaseStore.prototype);
+    const requests = [];
+    provider.request = async (table, options = {}) => {
+      requests.push({ table, options });
+      if (table === "projects" && !options.method && options.query.startsWith("id=eq.prj_alias")) {
+        return [{ id: "prj_alias", project_key: "OLD-ID" }];
+      }
+      if (table === "project_key_aliases" && options.method === "POST") return options.body;
+      if (table === "projects" && options.method === "PATCH") {
+        return [{ id: "prj_alias", client_id: "cl_1", project_key: "NEW-ID", name: "Alias project", active_status: "active" }];
+      }
+      throw new Error(`Unexpected ${options.method || "GET"} ${table}: ${options.query || ""}`);
+    };
+    const updated = await provider.updateProject("prj_alias", { key: "NEW-ID" });
+    assert.strictEqual(updated.key, "NEW-ID");
+    const aliasWrite = requests.find((request) => request.table === "project_key_aliases");
+    assert.deepStrictEqual(aliasWrite.options.body, [{ alias: "OLD-ID", project_id: "prj_alias" }]);
+
+    const resolver = Object.create(SupabaseStore.prototype);
+    const lookupRequests = [];
+    resolver.request = async (table, options = {}) => {
+      lookupRequests.push({ table, options });
+      if (table === "projects" && options.query.startsWith("project_key=eq.OLD-ID")) return [];
+      if (table === "project_key_aliases") return [{ project_id: "prj_alias" }];
+      if (table === "projects" && options.query.startsWith("id=eq.prj_alias")) {
+        return [{ id: "prj_alias", project_key: "NEW-ID", name: "Alias project" }];
+      }
+      throw new Error(`Unexpected lookup ${table}: ${options.query || ""}`);
+    };
+    const resolved = await resolver.getProjectRow("OLD-ID");
+    assert.strictEqual(resolved.project_key, "NEW-ID");
+    assert.strictEqual(lookupRequests[1].table, "project_key_aliases");
+  });
+
   await scenario("complete project setup saves project POCs and services in one request", async () => {
     const res = await req("POST", "/api/admin/project-setups", {
       project: {
@@ -3360,6 +3519,35 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 201);
     assert.strictEqual(payload.pocs.length, 1);
     assert.deepStrictEqual(payload.services.map((service) => service.serviceKey), ["ppc", "website"]);
+  });
+
+  await scenario("complete project setup can be saved with no active POC", async () => {
+    const res = await req("POST", "/api/admin/project-setups", {
+      project: {
+        clientId: "cl_1", key: "inactive-poc-setup", name: "Inactive POC setup",
+        activeStatus: "active", startDate: "2026-09-01", endDate: "2027-08-31",
+        feedbackIntervalDays: 30
+      },
+      pocs: [{ name: "Historical contact", contactWhatsapp: "", levelId: "", weightPercentage: 0, active: false }],
+      services: [{ name: "SEO", internalPocId: "ip_1", kpis: "Rankings" }]
+    }, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 201);
+    assert.strictEqual(payload.pocs.length, 1);
+    assert.strictEqual(payload.pocs[0].active, false);
+    assert.strictEqual(payload.pocs[0].weightPercentage, 0);
+  });
+
+  await scenario("multiple standard services are validated then added together", async () => {
+    const before = calls.createdCatalogServices.length;
+    const res = await req("POST", "/api/admin/service-catalog/bulk", {
+      services: [{ name: "Influencer Marketing" }, { name: "Video Production" }]
+    }, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 201);
+    assert.strictEqual(payload.services.length, 2);
+    assert.strictEqual(calls.createdCatalogServices.length, before + 2);
+    assert.deepStrictEqual(payload.services.map((item) => item.serviceKey), ["influencer_marketing", "video_production"]);
   });
 
   await scenario("project ID and dates are required", async () => {
