@@ -4804,7 +4804,6 @@ async function handleApiRequest(request) {
       const weightPercentage = active ? Number(row.weightPercentage) : 0;
       if (!String(row.name || "").trim()) return error(400, `POC ${index + 1}: name is required`);
       if (!validOptionalIsoDate(row.birthDate)) return error(400, `POC ${index + 1}: birthday must be YYYY-MM-DD`);
-      if (active && (number.length < 10 || number.length > 15)) return error(400, `POC ${index + 1}: active POC needs a 10-15 digit WhatsApp number including country code`);
       if (number && (number.length < 10 || number.length > 15)) return error(400, `POC ${index + 1}: WhatsApp number must be 10-15 digits including country code`);
       if (number && seenPhones.has(number)) return error(400, `POC ${index + 1}: WhatsApp number appears twice on this project`);
       if (active && (!String(row.levelId || "").trim() || (levels && !levels.has(row.levelId)))) {
@@ -4901,8 +4900,8 @@ async function handleApiRequest(request) {
       if (id && seenIds.has(id)) return error(400, `POC ${index + 1}: record appears more than once`);
       if (!String(row.name || "").trim()) return error(400, `POC ${index + 1}: name is required`);
       if (!validOptionalIsoDate(row.birthDate)) return error(400, `POC ${index + 1}: birthday must be YYYY-MM-DD`);
-      if (active && (phone.length < 10 || phone.length > 15)) {
-        return error(400, `POC ${index + 1}: active POC needs a 10-15 digit WhatsApp number including country code`);
+      if (phone && (phone.length < 10 || phone.length > 15)) {
+        return error(400, `POC ${index + 1}: WhatsApp number must be 10-15 digits including country code`);
       }
       if (phone && seenPhones.has(phone)) return error(400, `POC ${index + 1}: WhatsApp number appears twice on this project`);
       if (active && (!String(row.levelId || "").trim() || (levels && !levels.has(row.levelId)))) {
@@ -4961,10 +4960,6 @@ async function handleApiRequest(request) {
       const weightPercentage = active ? Number(item.weightPercentage) : 0;
       if (active && (!Number.isFinite(weightPercentage) || weightPercentage <= 0 || weightPercentage > 100)) {
         return error(400, `${current.name}: active influence must be more than 0% and no more than 100%`);
-      }
-      const phone = String(current.contactWhatsapp || "").replace(/\D/g, "");
-      if (active && (phone.length < 10 || phone.length > 15)) {
-        return error(400, `${current.name}: add a valid 10-15 digit WhatsApp number before activation`);
       }
       const levelId = String(item.levelId || current.levelId || "").trim();
       if (active && (!levelId || (levels && !levels.has(levelId)))) {

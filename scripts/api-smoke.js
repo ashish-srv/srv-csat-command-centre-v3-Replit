@@ -3060,6 +3060,17 @@ async function scenario(name, fn) {
     assert.strictEqual(payload.pocs[0].birthDate, "1988-04-18");
   });
 
+  await scenario("an active client POC can be saved before their WhatsApp number is known", async () => {
+    const res = await req("PUT", "/api/admin/projects/prj_1/pocs", {
+      pocs: [{ ...poc, contactWhatsapp: "", levelId: "normal", weightPercentage: 100, active: true }],
+      removedIds: []
+    }, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(payload.pocs[0].active, true);
+    assert.strictEqual(payload.pocs[0].contactWhatsapp, "");
+  });
+
   await scenario("active projects may keep only inactive historical POCs", async () => {
     const res = await req("PUT", "/api/admin/projects/prj_1/pocs", {
       pocs: [{ ...poc, levelId: "", active: false, weightPercentage: 0 }],
@@ -3092,6 +3103,24 @@ async function scenario(name, fn) {
       }, PIN);
       assert.strictEqual(res.statusCode, 200);
       assert.strictEqual(JSON.parse(res.body).pocs[0].active, false);
+    } finally {
+      store.getClientPocById = previousGet;
+      store.pocsForProject = previousList;
+    }
+  });
+
+  await scenario("POC Control Centre can activate a POC whose WhatsApp number is still missing", async () => {
+    const previousGet = store.getClientPocById;
+    const previousList = store.pocsForProject;
+    const numberPending = { ...poc, contactWhatsapp: "", levelId: "normal", active: false, weightPercentage: 0 };
+    store.getClientPocById = async () => numberPending;
+    store.pocsForProject = async () => [numberPending];
+    try {
+      const res = await req("PUT", "/api/admin/pocs/bulk-control", {
+        updates: [{ id: poc.id, active: true, levelId: "normal", weightPercentage: 100 }]
+      }, PIN);
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(JSON.parse(res.body).pocs[0].active, true);
     } finally {
       store.getClientPocById = previousGet;
       store.pocsForProject = previousList;
@@ -3536,6 +3565,23 @@ async function scenario(name, fn) {
     assert.strictEqual(payload.pocs.length, 1);
     assert.strictEqual(payload.pocs[0].active, false);
     assert.strictEqual(payload.pocs[0].weightPercentage, 0);
+  });
+
+  await scenario("complete project setup accepts an active POC without a WhatsApp number", async () => {
+    const res = await req("POST", "/api/admin/project-setups", {
+      project: {
+        clientId: "cl_1", key: "number-pending-setup", name: "Number pending setup",
+        activeStatus: "active", startDate: "2026-09-01", endDate: "2027-08-31",
+        feedbackIntervalDays: 30
+      },
+      pocs: [{ name: "Contact pending", contactWhatsapp: "", levelId: "normal", weightPercentage: 100, active: true }],
+      services: [{ name: "SEO", internalPocId: "ip_1", kpis: "Rankings" }]
+    }, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 201);
+    assert.strictEqual(payload.pocs.length, 1);
+    assert.strictEqual(payload.pocs[0].active, true);
+    assert.strictEqual(payload.pocs[0].contactWhatsapp, "");
   });
 
   await scenario("multiple standard services are validated then added together", async () => {

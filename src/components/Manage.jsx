@@ -638,7 +638,7 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
                 <Field label="Designation">
                   <input value={row.designation} onChange={(event) => updateRow(index, { designation: event.target.value })} />
                 </Field>
-                <Field label="WhatsApp number" hint="country code + number">
+                <Field label="WhatsApp number" hint="optional; feedback cannot be sent until a valid number is added">
                   <input value={row.contactWhatsapp} onChange={(event) => updateRow(index, { contactWhatsapp: event.target.value })} />
                 </Field>
                 <Field label="Email">
@@ -1042,7 +1042,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
             <div className="form-grid">
               <Field label={`POC ${index + 1} name`}><input value={poc.name} onChange={(event) => updatePoc(index, { name: event.target.value })} /></Field>
               <Field label="Designation"><input value={poc.designation || ""} onChange={(event) => updatePoc(index, { designation: event.target.value })} /></Field>
-              <Field label="WhatsApp" hint="country code + digits"><input value={poc.contactWhatsapp || ""} onChange={(event) => updatePoc(index, { contactWhatsapp: event.target.value })} /></Field>
+              <Field label="WhatsApp" hint="optional; feedback sending stays unavailable without it"><input value={poc.contactWhatsapp || ""} onChange={(event) => updatePoc(index, { contactWhatsapp: event.target.value })} /></Field>
               <Field label="Email"><input value={poc.contactEmail || ""} onChange={(event) => updatePoc(index, { contactEmail: event.target.value })} /></Field>
               <Field label="Birthday" hint="optional"><input type="date" value={poc.birthDate || ""} onChange={(event) => updatePoc(index, { birthDate: event.target.value })} /></Field>
               <Field label="Salutation"><input value={poc.salutation || ""} onChange={(event) => updatePoc(index, { salutation: event.target.value })} /></Field>
@@ -2469,7 +2469,7 @@ export default function Manage({ onReload }) {
             );
           })}
           {!pocs.length ? (
-            <EmptyState title="No POCs" text="A project needs a POC with a WhatsApp number before a cycle can be sent." />
+            <EmptyState title="No POCs" text="POCs may be stored without a WhatsApp number. Add a valid number before sending feedback." />
           ) : null}
         </div>
       </Panel>
