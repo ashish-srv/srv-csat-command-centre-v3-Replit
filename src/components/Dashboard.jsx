@@ -562,7 +562,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
           />
           <Button
             icon={Power}
-            variant={messagingEnabled ? "primary" : "danger"}
+            variant={messagingEnabled ? "success" : "danger"}
             onClick={() => { setMessagingPrompt(true); setMessagingError(""); setMessagingPin(""); }}
           >
             WhatsApp {messagingEnabled ? "ON" : "PAUSED"}
