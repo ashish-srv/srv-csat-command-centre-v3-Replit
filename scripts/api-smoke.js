@@ -735,6 +735,28 @@ async function scenario(name, fn) {
     assert.deepStrictEqual(calls.createdCycleRequests.at(-1).options.clientPocIds, ["poc_1"]);
   });
 
+  await scenario("project-end feedback permanently blocks monthly and quick check-in sends", async () => {
+    const previous = project.endFeedbackRequestedAt;
+    project.endFeedbackRequestedAt = "2026-09-29T12:00:00.000Z";
+    try {
+      const monthly = await req("POST", "/api/projects/acme-ug/request-feedback", { cycleType: "pulse" });
+      assert.strictEqual(monthly.statusCode, 409);
+      assert.match(JSON.parse(monthly.body).error, /recurring feedback is closed/i);
+
+      const quick = await req("POST", "/api/projects/acme-ug/request-feedback", { cycleType: "quick_checkin" });
+      assert.strictEqual(quick.statusCode, 409);
+
+      const resendProjectEnd = await req("POST", "/api/projects/acme-ug/request-feedback", {
+        cycleType: "project_end",
+        clientPocIds: ["poc_1"]
+      });
+      assert.strictEqual(resendProjectEnd.statusCode, 201);
+    } finally {
+      if (previous === undefined) delete project.endFeedbackRequestedAt;
+      else project.endFeedbackRequestedAt = previous;
+    }
+  });
+
   await scenario("manual feedback rejects a selected POC from another project", async () => {
     const before = calls.createdCycleRequests.length;
     const res = await req("POST", "/api/projects/acme-ug/request-feedback", {

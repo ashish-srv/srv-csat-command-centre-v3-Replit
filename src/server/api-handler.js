@@ -65,6 +65,15 @@ function automaticFeedbackTargets(targets = []) {
   return targets.filter((target) => target.cycleType !== "project_end");
 }
 
+async function projectEndFeedbackStarted(store, project) {
+  if (!project) return false;
+  if (project.endFeedbackRequestedAt) return true;
+  if (typeof store.hasAnyCycle === "function") {
+    return store.hasAnyCycle(project.id, "project_end");
+  }
+  return false;
+}
+
 function requiredConversationAction(checklist, conversationState) {
   const pendingServiceKey = conversationState.pendingServiceKey;
   const pendingFirst = (items = []) => items.find((item) => item.serviceKey === pendingServiceKey) || items[0];
@@ -3166,6 +3175,9 @@ async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null
     if (projectSummary.clientActiveStatus && projectSummary.clientActiveStatus !== "active") {
       reasons.push(`client is ${projectSummary.clientActiveStatus}`);
     }
+    if (cycleType !== "project_end" && await projectEndFeedbackStarted(store, projectSummary)) {
+      reasons.push("project-end feedback has already been sent; recurring feedback is closed");
+    }
     if (await store.hasOpenCycle(projectSummary.id, cycleType)) reasons.push("this cycle type is already open");
 
     const allPocs = await store.pocsForProject(projectSummary.id, { activeOnly: false });
@@ -3324,6 +3336,9 @@ async function handleApiRequest(request) {
       };
     };
     const cycles = (dashboard.cycles || []).map(attachProject);
+    const projectEndProjectIds = new Set(
+      cycles.filter((cycle) => cycle.cycleType === "project_end").map((cycle) => cycle.projectId)
+    );
     const openCycles = (dashboard.openCycles || []).map((cycle) => {
       const owner = projectsById.get(cycle.projectId);
       return {
@@ -3376,7 +3391,9 @@ async function handleApiRequest(request) {
         addScheduleRow("project_end", project.endDate, status);
       }
       const ended = project.endDate && new Date(project.endDate).getTime() <= nowMs;
-      if (project.nextCycleDueAt && !ended) {
+      const projectEndStarted = Boolean(project.endFeedbackRequestedAt)
+        || projectEndProjectIds.has(project.id);
+      if (project.nextCycleDueAt && !ended && !projectEndStarted) {
         addScheduleRow(
           "pulse",
           project.nextCycleDueAt,
@@ -3408,6 +3425,13 @@ async function handleApiRequest(request) {
 
     const project = await store.getProject(projectKey);
     if (!project) return error(404, "Project not found");
+    if (cycleType !== "project_end" && await projectEndFeedbackStarted(store, project)) {
+      return error(
+        409,
+        "Recurring feedback is closed for this project",
+        "Project-end feedback has already been sent, so monthly feedback and quick check-ins cannot be started."
+      );
+    }
 
     const selectionProvided = Object.prototype.hasOwnProperty.call(body, "clientPocIds");
     if (selectionProvided && !Array.isArray(body.clientPocIds)) {

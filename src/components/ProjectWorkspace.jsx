@@ -387,6 +387,12 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     if (!messagingEnabled) { showToast("WhatsApp messaging is paused. Email notifications remain active."); return; }
     const project = workspace?.project;
     if (!project) return;
+    const projectEndStarted = Boolean(project.endFeedbackRequestedAt)
+      || (workspace?.cycles || []).some((cycle) => cycle.cycleType === "project_end");
+    if (cycleType !== "project_end" && projectEndStarted) {
+      showToast("Monthly feedback and quick check-ins are closed because project-end feedback has already been sent.");
+      return;
+    }
     if (!actionPocs.length) { showToast("Select at least one POC first."); return; }
     const unavailable = actionPocs.filter((poc) => !poc.active || !poc.contactWhatsapp);
     if (unavailable.length) {
@@ -587,6 +593,8 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   // unfiltered list, so a date range changed the dropdown and left the table
   // showing everything — the two disagreed about the same project.
   const allCycles = workspace.cycles || [];
+  const projectEndFeedbackLocked = Boolean(project.endFeedbackRequestedAt)
+    || allCycles.some((cycle) => cycle.cycleType === "project_end");
   // Feedback with no owner and no SLA: billing, a named person, a process.
   // It cannot be an issue, but dropping it loses real feedback — a client told
   // us his invoices were wrong and it went nowhere.
@@ -1299,7 +1307,10 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
             icon={Send}
             variant="primary"
             onClick={() => requestFeedback("pulse")}
-            disabled={!messagingEnabled || !actionPocs.length || Boolean(bulkAction)}
+            disabled={projectEndFeedbackLocked || !messagingEnabled || !actionPocs.length || Boolean(bulkAction)}
+            title={projectEndFeedbackLocked
+              ? "Monthly feedback is closed because project-end feedback has already been sent."
+              : undefined}
           >
             {bulkAction === "pulse" ? "Starting…" : `Send ${intervalLabel} feedback to ${actionPocs.length} POC${actionPocs.length === 1 ? "" : "s"}`}
           </Button>
@@ -1313,7 +1324,10 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           <Button
             icon={Send}
             onClick={() => requestFeedback("quick_checkin")}
-            disabled={!messagingEnabled || !actionPocs.length || Boolean(bulkAction)}
+            disabled={projectEndFeedbackLocked || !messagingEnabled || !actionPocs.length || Boolean(bulkAction)}
+            title={projectEndFeedbackLocked
+              ? "Quick check-ins are closed because project-end feedback has already been sent."
+              : undefined}
           >
             {bulkAction === "quick_checkin" ? "Starting..." : `Send quick check-in to ${actionPocs.length} POC${actionPocs.length === 1 ? "" : "s"}`}
           </Button>
@@ -1342,6 +1356,12 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           use the clearly selected cycle above. Stopping preserves existing feedback and affects only those POCs in
           that cycle; if every remaining open session is stopped, the cycle closes automatically.
         </p>
+        {projectEndFeedbackLocked ? (
+          <p className="form-note">
+            Project-end feedback has been sent. Monthly feedback and quick check-ins are permanently disabled for
+            this project; project-end feedback can still be resent manually when required.
+          </p>
+        ) : null}
         {finalResponseWindowActive ? (
           <p className="form-note">
             One or more selected POCs are in the final 24-hour response window after reminder 3. They cannot receive

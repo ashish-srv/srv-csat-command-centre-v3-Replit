@@ -903,6 +903,20 @@ class SupabaseStore {
     return rows.length > 0;
   }
 
+  async hasAnyCycle(projectId, cycleType) {
+    const rows = await this.request("feedback_cycles", {
+      query: `project_id=eq.${encodeURIComponent(projectId)}&cycle_type=eq.${encodeURIComponent(cycleType)}&select=id&limit=1`
+    });
+    return rows.length > 0;
+  }
+
+  async projectIdsWithCycleType(cycleType) {
+    const rows = await this.request("feedback_cycles", {
+      query: `cycle_type=eq.${encodeURIComponent(cycleType)}&select=project_id`
+    });
+    return new Set(rows.map((row) => row.project_id).filter(Boolean));
+  }
+
   /**
    * Create a cycle for a project plus one session per ACTIVE client POC.
    */
@@ -913,6 +927,11 @@ class SupabaseStore {
     const allowedCycleTypes = new Set(["pulse", "project_end", "quick_checkin"]);
     const cycleType = allowedCycleTypes.has(options.cycleType) ? options.cycleType : "pulse";
     const isQuickCheckin = cycleType === "quick_checkin";
+    const projectEndAlreadyStarted = Boolean(project.endFeedbackRequestedAt)
+      || (cycleType !== "project_end" && await this.hasAnyCycle(project.id, "project_end"));
+    if (cycleType !== "project_end" && projectEndAlreadyStarted) {
+      throw new Error("Monthly feedback and quick check-ins are disabled because project-end feedback has already been sent for this project");
+    }
     const selectionProvided = Array.isArray(options.clientPocIds);
     const requestedPocIds = selectionProvided
       ? [...new Set(options.clientPocIds.map((id) => String(id || "").trim()).filter(Boolean))]
@@ -1001,6 +1020,10 @@ class SupabaseStore {
     const projectPatch = { last_cycle_started_at: now.toISOString() };
     if (cycleType === "project_end") {
       projectPatch.end_feedback_requested_at = now.toISOString();
+      // A project-end request is the lifecycle boundary. Its calendar end date
+      // may still be in the future when an admin sends it manually, so remove
+      // the old monthly due date immediately instead of waiting for end_date.
+      projectPatch.next_cycle_due_at = null;
     } else {
       projectPatch.next_cycle_due_at = addDays(now, project.feedbackIntervalDays || 30);
     }
@@ -1908,18 +1931,27 @@ class SupabaseStore {
 
   async getDueFeedbackTargets(nowIso = new Date().toISOString()) {
     const projects = await this.listProjects();
+    const projectEndProjectIds = await this.projectIdsWithCycleType("project_end");
     const targets = [];
     const nowMs = new Date(nowIso).getTime();
 
     for (const project of projects) {
       if (project.activeStatus !== "active") continue;
 
+      // A manually-started project-end cycle is authoritative even when the
+      // project's stored end date is later. Never resume recurring feedback
+      // merely because all project-end POC sessions became terminal.
+      const projectEndAlreadyStarted = Boolean(project.endFeedbackRequestedAt)
+        || projectEndProjectIds.has(project.id);
+
       const endDue =
-        project.endDate && new Date(project.endDate).getTime() <= nowMs && !project.endFeedbackRequestedAt;
+        project.endDate && new Date(project.endDate).getTime() <= nowMs && !projectEndAlreadyStarted;
       if (endDue && !(await this.hasOpenCycle(project.id, "project_end"))) {
         targets.push({ projectKey: project.key, cycleType: "project_end" });
         continue;
       }
+
+      if (projectEndAlreadyStarted) continue;
 
       const pulseDue = project.nextCycleDueAt && new Date(project.nextCycleDueAt).getTime() <= nowMs;
       const projectEnded = project.endDate && new Date(project.endDate).getTime() <= nowMs;
@@ -2831,9 +2863,15 @@ class SupabaseStore {
    */
   async ensureProjectSchedule(projectId) {
     const rows = await this.request("projects", {
-      query: `id=eq.${encodeURIComponent(projectId)}&select=id,start_date,feedback_interval_days,active_status,next_cycle_due_at&limit=1`
+      query: `id=eq.${encodeURIComponent(projectId)}&select=id,start_date,feedback_interval_days,active_status,next_cycle_due_at,end_feedback_requested_at&limit=1`
     });
-    if (!rows.length || rows[0].active_status !== "active" || rows[0].next_cycle_due_at) return false;
+    if (
+      !rows.length
+      || rows[0].active_status !== "active"
+      || rows[0].next_cycle_due_at
+      || rows[0].end_feedback_requested_at
+      || await this.hasAnyCycle(projectId, "project_end")
+    ) return false;
     await this.request("projects", {
       method: "PATCH",
       query: `id=eq.${encodeURIComponent(projectId)}`,
@@ -3386,9 +3424,13 @@ class SupabaseStore {
     const scheduleKey = quickCheckinScheduleKey(nowIso);
     if (!scheduleKey) return { scheduleKey: null, targets: [] };
     const projects = await this.listProjects();
+    const projectEndProjectIds = await this.projectIdsWithCycleType("project_end");
+    const nowMs = new Date(nowIso).getTime();
     const targets = [];
     for (const project of projects) {
       if (project.activeStatus !== "active" || project.clientActiveStatus !== "active") continue;
+      const projectEnded = project.endDate && new Date(project.endDate).getTime() <= nowMs;
+      if (projectEnded || project.endFeedbackRequestedAt || projectEndProjectIds.has(project.id)) continue;
       if (await this.hasScheduledQuickCheckin(project.id, scheduleKey)) continue;
       targets.push({ projectKey: project.key, cycleType: "quick_checkin", scheduleKey });
     }

@@ -12,12 +12,57 @@ async function run() {
     { id: "p1", key: "active", activeStatus: "active", clientActiveStatus: "active" },
     { id: "p2", key: "already-sent", activeStatus: "active", clientActiveStatus: "active" },
     { id: "p3", key: "paused", activeStatus: "paused", clientActiveStatus: "active" },
-    { id: "p4", key: "inactive-client", activeStatus: "active", clientActiveStatus: "inactive" }
+    { id: "p4", key: "inactive-client", activeStatus: "active", clientActiveStatus: "inactive" },
+    {
+      id: "p5", key: "manual-project-end", activeStatus: "active", clientActiveStatus: "active",
+      endDate: "2026-10-31", endFeedbackRequestedAt: "2026-09-29T12:00:00.000Z"
+    },
+    { id: "p6", key: "historic-project-end", activeStatus: "active", clientActiveStatus: "active", endDate: "2026-10-31" },
+    { id: "p7", key: "date-ended", activeStatus: "active", clientActiveStatus: "active", endDate: "2026-10-10" }
   ];
+  scheduler.projectIdsWithCycleType = async () => new Set(["p6"]);
   scheduler.hasScheduledQuickCheckin = async (projectId) => projectId === "p2";
   const due = await scheduler.getDueQuickCheckinTargets("2026-10-11T04:30:00.000Z");
   assert.equal(due.scheduleKey, "2026-10-11");
   assert.deepEqual(due.targets, [{ projectKey: "active", cycleType: "quick_checkin", scheduleKey: "2026-10-11" }]);
+
+  const monthlyScheduler = new SupabaseStore({ skipEnv: true });
+  monthlyScheduler.listProjects = async () => [
+    {
+      id: "p1", key: "normal-monthly", activeStatus: "active", endDate: "2026-10-31",
+      nextCycleDueAt: "2026-09-30T00:00:00.000Z"
+    },
+    {
+      id: "p5", key: "manual-project-end", activeStatus: "active", endDate: "2026-10-31",
+      nextCycleDueAt: "2026-09-30T00:00:00.000Z", endFeedbackRequestedAt: "2026-09-29T12:00:00.000Z"
+    },
+    {
+      id: "p6", key: "historic-project-end", activeStatus: "active", endDate: "2026-10-31",
+      nextCycleDueAt: "2026-09-30T00:00:00.000Z"
+    }
+  ];
+  monthlyScheduler.projectIdsWithCycleType = async () => new Set(["p5", "p6"]);
+  monthlyScheduler.hasOpenCycle = async () => false;
+  assert.deepEqual(
+    await monthlyScheduler.getDueFeedbackTargets("2026-10-01T00:00:00.000Z"),
+    [{ projectKey: "normal-monthly", cycleType: "pulse" }],
+    "manual or historic project-end feedback must permanently suppress recurring monthly feedback"
+  );
+
+  const guardedStore = new SupabaseStore({ skipEnv: true });
+  guardedStore.getProject = async () => ({
+    id: "p5", key: "manual-project-end", endDate: "2026-10-31",
+    endFeedbackRequestedAt: "2026-09-29T12:00:00.000Z", pocs: []
+  });
+  guardedStore.hasAnyCycle = async () => true;
+  await assert.rejects(
+    guardedStore.createCycle("manual-project-end", { cycleType: "pulse" }),
+    /project-end feedback has already been sent/i
+  );
+  await assert.rejects(
+    guardedStore.createCycle("manual-project-end", { cycleType: "quick_checkin" }),
+    /project-end feedback has already been sent/i
+  );
 
   const store = new SupabaseStore({ skipEnv: true });
   let currentSession = {
