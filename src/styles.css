@@ -1417,6 +1417,42 @@ button.metric-card {
   gap: 4px;
 }
 
+.performance-filter-search {
+  display: flex;
+  flex: 1 1 260px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  max-width: 360px;
+}
+
+.performance-filter-search > span {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--label);
+}
+
+.performance-filter-search > input {
+  width: 100%;
+  min-height: 36px;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  outline: 0;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.performance-filter-search > input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(37, 102, 201, 0.1);
+}
+
 .filter-label {
   display: flex;
   align-items: center;

@@ -210,6 +210,7 @@ export default function ProjectPerformance({ currentUser = null }) {
   const [sentiment, setSentiment] = useState("");
   const [amFilter, setAmFilter] = useState("");
   const [avpFilter, setAvpFilter] = useState("");
+  const [projectSearch, setProjectSearch] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [form, setForm] = useState(formFromProject(null, editorIdentity));
   const [kpis, setKpis] = useState([]);
@@ -269,8 +270,26 @@ export default function ProjectPerformance({ currentUser = null }) {
     .filter((item) => !avpFilter || item.team?.avpId === avpFilter),
   [projects, cluster, client, projectFilter, status, sentiment, amFilter, avpFilter]);
 
+  const searchedProjects = useMemo(() => {
+    const needle = projectSearch.trim().toLowerCase();
+    if (!needle) return filteredProjects;
+    return filteredProjects.filter((item) => [
+      item.name,
+      item.key,
+      item.clientName,
+      item.clusterName,
+      item.performanceStatus,
+      item.currentPhase,
+      item.campaignStatus,
+      item.clientSentiment,
+      item.team?.am?.name,
+      item.team?.avp?.name,
+      item.primaryKpi?.kpiName
+    ].some((value) => String(value || "").toLowerCase().includes(needle)));
+  }, [filteredProjects, projectSearch]);
+
   const selectedProject = projects.find((item) => item.id === selectedProjectId) || null;
-  const concernedCount = filteredProjects.filter((item) => ["Concerned", "Escalated"].includes(item.clientSentiment)).length;
+  const concernedCount = searchedProjects.filter((item) => ["Concerned", "Escalated"].includes(item.clientSentiment)).length;
 
   function chooseProject(projectId, move = false) {
     const project = projects.find((item) => item.id === projectId) || null;
@@ -487,7 +506,7 @@ export default function ProjectPerformance({ currentUser = null }) {
   if (error && !data) return <ErrorBlock error={error} onRetry={() => load("")} />;
 
   const internalPocOptions = options((data?.internalPocs || []).filter((item) => item.active !== false));
-  const allFiltersClear = !cluster && !client && !projectFilter && !status && !sentiment && !amFilter && !avpFilter;
+  const allFiltersClear = !cluster && !client && !projectFilter && !status && !sentiment && !amFilter && !avpFilter && !projectSearch;
   const currencySymbol = CURRENCY_SYMBOLS[selectedProject?.currency || "INR"] || selectedProject?.currency || "";
 
   return (
@@ -499,11 +518,6 @@ export default function ProjectPerformance({ currentUser = null }) {
           <p>Current project information, delivery health, commercial details and an auditable update history.</p>
         </div>
         <div className="performance-heading-actions">
-          <Button icon={Download} onClick={downloadWorkbook} disabled={downloadingWorkbook || !data?.projects?.length}>{downloadingWorkbook ? "Preparing…" : "Download Excel"}</Button>
-          {canEditPerformance ? <label className={`button ${readingWorkbook ? "disabled" : ""}`}>
-            <Upload size={16} />{readingWorkbook ? "Reading…" : "Upload Excel"}
-            <input type="file" accept=".xlsx" onChange={readWorkbook} disabled={readingWorkbook} hidden />
-          </label> : null}
           <Button icon={RefreshCw} onClick={() => load()} disabled={loading}>Refresh</Button>
         </div>
       </header>
@@ -610,8 +624,9 @@ export default function ProjectPerformance({ currentUser = null }) {
         </div>
         <FilterBar
           showReset={!allFiltersClear}
-          onReset={() => { setCluster(""); setClient(""); setProjectFilter(""); setStatus(""); setSentiment(""); setAmFilter(""); setAvpFilter(""); }}
+          onReset={() => { setCluster(""); setClient(""); setProjectFilter(""); setStatus(""); setSentiment(""); setAmFilter(""); setAvpFilter(""); setProjectSearch(""); }}
         >
+          <label className="performance-filter-search"><span>Search Projects</span><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Project, ID, client, team or status" /></label>
           <SingleSelect label="Cluster" options={clusterNames.map((value) => ({ value, label: value }))} value={cluster} onChange={(value) => { setCluster(value); setClient(""); setProjectFilter(""); }} placeholder="All clusters" />
           <SingleSelect label="Client" options={clientNames.map((value) => ({ value, label: value }))} value={client} onChange={(value) => { setClient(value); setProjectFilter(""); }} placeholder="All clients" />
           <SingleSelect label="Project" options={projectOptions} value={projectFilter} onChange={setProjectFilter} placeholder="All projects" />
@@ -622,19 +637,19 @@ export default function ProjectPerformance({ currentUser = null }) {
         </FilterBar>
 
         <div className="performance-metrics">
-          <MetricCard label="Projects" value={filteredProjects.length} caption="matching current filters" />
-          <MetricCard label="On Track" value={filteredProjects.filter((item) => item.performanceStatus === "On Track").length} caption="current delivery status" tone="strong" />
-          <MetricCard label="Needs Attention" value={filteredProjects.filter((item) => item.performanceStatus === "Needs Attention").length} caption="requires closer review" tone="watch" />
-          <MetricCard label="At Risk / Off Track" value={filteredProjects.filter((item) => ["At Risk", "Off Track"].includes(item.performanceStatus)).length} caption="delivery intervention needed" tone="weak" />
+          <MetricCard label="Projects" value={searchedProjects.length} caption="matching filters and search" />
+          <MetricCard label="On Track" value={searchedProjects.filter((item) => item.performanceStatus === "On Track").length} caption="current delivery status" tone="strong" />
+          <MetricCard label="Needs Attention" value={searchedProjects.filter((item) => item.performanceStatus === "Needs Attention").length} caption="requires closer review" tone="watch" />
+          <MetricCard label="At Risk / Off Track" value={searchedProjects.filter((item) => ["At Risk", "Off Track"].includes(item.performanceStatus)).length} caption="delivery intervention needed" tone="weak" />
           <MetricCard label="Concerned / Escalated" value={concernedCount} caption="client sentiment" tone={concernedCount ? "weak" : "strong"} />
         </div>
 
-        <Panel title="Projects" badge={`${filteredProjects.length} shown`} className="performance-portfolio-panel">
+        <Panel title="Project Summary" badge={`${searchedProjects.length} shown`} className="performance-portfolio-panel">
           <div className="performance-table-scroll">
             <table className="data-table performance-table">
               <thead><tr><th>Client / Project</th><th>Cluster</th><th>Performance</th><th>Phase</th><th>Sentiment</th><th>Account Manager</th><th>Primary KPI</th><th>Updated</th></tr></thead>
               <tbody>
-                {filteredProjects.map((project) => (
+                {searchedProjects.map((project) => (
                   <tr key={project.id} className={selectedProjectId === project.id ? "selected-row" : ""} onClick={() => chooseProject(project.id, true)}>
                     <td><strong>{project.name}</strong><small>{project.clientName}</small></td>
                     <td>{project.clusterName || "—"}</td>
@@ -648,7 +663,7 @@ export default function ProjectPerformance({ currentUser = null }) {
                 ))}
               </tbody>
             </table>
-            {!filteredProjects.length ? <EmptyState title="No projects match these filters" text="Clear or change a filter to see portfolio data." /> : null}
+            {!searchedProjects.length ? <EmptyState title="No projects match these filters or search" text="Clear or change the search and filters to see portfolio data." /> : null}
           </div>
         </Panel>
       </section>
@@ -658,7 +673,7 @@ export default function ProjectPerformance({ currentUser = null }) {
           <div><p className="eyebrow">Project Details</p><h3>All projects matching the filters</h3></div>
         </div>
         <div className="performance-project-accordions">
-          {filteredProjects.map((project) => (
+          {searchedProjects.map((project) => (
             <details className="performance-project-accordion" key={project.id} onToggle={(event) => { if (event.currentTarget.open) chooseProject(project.id); }}>
               <summary>
                 <span><strong>{project.name}</strong><small>{project.clientName} · {project.key}</small></span>
@@ -675,7 +690,7 @@ export default function ProjectPerformance({ currentUser = null }) {
               />
             </details>
           ))}
-          {!filteredProjects.length ? <EmptyState title="No projects match these filters" text="Clear or change a filter to see project details." /> : null}
+          {!searchedProjects.length ? <EmptyState title="No projects match these filters or search" text="Clear or change the search and filters to see project details." /> : null}
         </div>
         {!selectedProject ? <EmptyState title="No project selected" /> : (
           <div className="performance-details-scroll legacy-selected-details" aria-hidden="true">
