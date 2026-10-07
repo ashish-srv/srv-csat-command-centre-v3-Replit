@@ -57,8 +57,8 @@ function applyManualQuestionContext(session, message) {
 
 function automaticProjectEndFeedbackEnabled() {
   const configured = String(process.env.AUTO_PROJECT_END_FEEDBACK || "").trim().toLowerCase();
-  if (!configured) return true;
-  return !["0", "false", "no", "off"].includes(configured);
+  if (!configured) return false;
+  return ["1", "true", "yes", "on"].includes(configured);
 }
 
 function automaticFeedbackTargets(targets = []) {
@@ -1493,6 +1493,42 @@ const GOOGLE_OAUTH_STATE_COOKIE = "srv_csat_google_state";
 const APP_SESSION_TTL_SECONDS = 12 * 60 * 60;
 const GOOGLE_OAUTH_STATE_TTL_SECONDS = 10 * 60;
 
+const APP_PERMISSION_KEYS = [
+  "dashboard", "project_workspace", "directory", "project_performance", "manage_records",
+  "manage_pocs", "manage_internal_pocs", "manage_catalogues", "messaging_controls", "bulk_sends",
+  "manage_project_users", "add_projects", "edit_project_performance", "manage_project_services"
+];
+
+const ROLE_PERMISSION_DEFAULTS = {
+  admin: Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, true])),
+  project_user: {
+    dashboard: false,
+    project_workspace: false,
+    directory: false,
+    project_performance: true,
+    manage_records: false,
+    manage_pocs: false,
+    manage_internal_pocs: false,
+    manage_catalogues: false,
+    messaging_controls: false,
+    bulk_sends: false,
+    manage_project_users: false,
+    add_projects: true,
+    edit_project_performance: true,
+    manage_project_services: true
+  }
+};
+
+function normalizedPermissions(role, permissions = {}) {
+  if (role === "super_admin") return Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, true]));
+  const defaults = ROLE_PERMISSION_DEFAULTS[role] || {};
+  return Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, permissions[key] === undefined ? Boolean(defaults[key]) : permissions[key] === true]));
+}
+
+function hasAppPermission(access, permission) {
+  return Boolean(access && (access.role === "super_admin" || access.permissions?.[permission] === true));
+}
+
 function appLoginPassword() {
   const value = String(process.env.APP_LOGIN_PASSWORD || "");
   return value.length >= 8 ? value : null;
@@ -1606,6 +1642,70 @@ function currentAppUser(headers) {
   return currentAppSession(headers)?.user || null;
 }
 
+async function resolveAppAccess(store, headers) {
+  const user = currentAppUser(headers);
+  if (!user) return null;
+  if (user.provider === "password") {
+    return { ...user, role: "super_admin", permissions: normalizedPermissions("super_admin"), active: true, bootstrap: true };
+  }
+  if (user.provider !== "google" || !user.email || typeof store.getAppUserByEmail !== "function") return null;
+  const appUser = await store.getAppUserByEmail(user.email);
+  if (!appUser || !appUser.active) return null;
+  return {
+    ...user,
+    appUserId: appUser.id,
+    name: appUser.name || user.name,
+    role: appUser.role,
+    permissions: normalizedPermissions(appUser.role, appUser.permissions),
+    internalPocId: appUser.internalPocId || null,
+    active: true
+  };
+}
+
+function projectVisibleToAppAccess(project, appAccess) {
+  if (appAccess?.role !== "project_user") return true;
+  if (!appAccess.internalPocId) return false;
+  return ["projectDirectorId", "amId", "tlId", "adId", "avpId"]
+    .some((key) => project?.team?.[key] === appAccess.internalPocId);
+}
+
+async function projectIdVisibleToAppAccess(store, projectId, appAccess) {
+  if (appAccess?.role !== "project_user") return true;
+  const performanceData = await store.getProjectPerformanceData();
+  const project = performanceData.projects.find((item) => item.id === projectId);
+  return Boolean(project && projectVisibleToAppAccess(project, appAccess));
+}
+
+function projectUserRouteAllowed(access, method, pathname) {
+  if (method === "GET" && pathname === "/api/project-performance") return hasAppPermission(access, "project_performance");
+  if (method === "PUT" && /^\/api\/project-performance\/[^/]+$/.test(pathname)) return hasAppPermission(access, "edit_project_performance");
+  if (method === "POST" && pathname === "/api/project-performance/projects") return hasAppPermission(access, "add_projects");
+  if (["POST", "DELETE"].includes(method) && /^\/api\/project-performance\/projects\/[^/]+\/services(?:\/[^/]+)?$/.test(pathname)) {
+    return hasAppPermission(access, "manage_project_services");
+  }
+  return false;
+}
+
+function adminRoutePermission(method, pathname) {
+  if (pathname === "/api/dashboard") return "dashboard";
+  if (method === "POST" && pathname === "/api/project-performance/projects") return "add_projects";
+  if (["POST", "DELETE"].includes(method) && /^\/api\/project-performance\/projects\/[^/]+\/services(?:\/[^/]+)?$/.test(pathname)) return "manage_project_services";
+  if (method === "PUT" && /^\/api\/project-performance\/[^/]+$/.test(pathname)) return "edit_project_performance";
+  if (pathname === "/api/project-performance" || /^\/api\/project-performance\//.test(pathname)) return "project_performance";
+  if (pathname === "/api/projects" || /^\/api\/(?:projects|sessions|issues)\//.test(pathname)) return "project_workspace";
+  if (pathname === "/api/admin/messaging") return "messaging_controls";
+  if (/^\/api\/admin\/bulk-feedback\//.test(pathname)) return "bulk_sends";
+  if (/^\/api\/admin\/app-users(?:\/|$)/.test(pathname)) return "manage_project_users";
+  if (/^\/api\/admin\/(?:performance-standards|service-catalog)(?:\/|$)/.test(pathname)) return "manage_catalogues";
+  if (/^\/api\/admin\/(?:internal-pocs|departments|sub-departments)(?:\/|$)/.test(pathname)) return "manage_internal_pocs";
+  if (/^\/api\/admin\/(?:poc-levels|poc-control)(?:\/|$)/.test(pathname) || /^\/api\/admin\/projects\/[^/]+\/pocs$/.test(pathname)) return "manage_pocs";
+  if (pathname === "/api/admin/directory" || /^\/api\/admin\/clients\//.test(pathname)) {
+    return method === "GET" ? "directory" : "manage_records";
+  }
+  if (/^\/api\/admin\//.test(pathname)) return "manage_records";
+  return null;
+}
+
 function sessionCookie(token, baseUrl) {
   const secure = String(baseUrl || "").startsWith("https://") ? "; Secure" : "";
   return `${APP_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=${APP_SESSION_TTL_SECONDS}`;
@@ -1676,15 +1776,9 @@ async function pocWhatsappConflict(store, phone, projectId, exceptId = null) {
     return store.whatsappConflict(phone, projectId, exceptId);
   }
   const owner = await store.whatsappOwner(phone, exceptId);
-  return owner ? { kind: "different_client", owner } : null;
-}
-
-async function pocWhatsappConflictForClient(store, phone, clientId) {
-  if (typeof store.whatsappConflictForClient === "function") {
-    return store.whatsappConflictForClient(phone, clientId);
-  }
-  const owner = await store.whatsappOwner(phone);
-  return owner ? { kind: "different_client", owner } : null;
+  return owner?.project_id === projectId || owner?.projectId === projectId
+    ? { kind: "same_project", owner }
+    : null;
 }
 
 function validOptionalIsoDate(value) {
@@ -3328,13 +3422,29 @@ async function handleApiRequest(request) {
     const googleSettings = googleOAuthSettings(baseUrl);
     const configured = passwordConfigured || googleSettings.configured;
     const session = configured ? currentAppSession(request.headers) : null;
+    let accessUser = session?.user || null;
+    let accessAuthorized = false;
+    if (session) {
+      try {
+        const authStore = createStore();
+        const resolvedUser = await resolveAppAccess(authStore, request.headers);
+        accessAuthorized = Boolean(resolvedUser);
+        accessUser = resolvedUser || session.user;
+      } catch {
+        if (session.user?.provider === "password") {
+          accessUser = { ...session.user, role: "super_admin", permissions: normalizedPermissions("super_admin"), active: true, bootstrap: true };
+          accessAuthorized = true;
+        }
+      }
+    }
     return withResponseHeaders(
       json(200, {
         configured,
         passwordConfigured,
         googleConfigured: googleSettings.configured,
         authenticated: Boolean(session),
-        user: session?.user || null,
+        accessAuthorized,
+        user: accessUser,
         sessionHours: APP_SESSION_TTL_SECONDS / 3600
       }),
       { "cache-control": "no-store" }
@@ -3419,7 +3529,7 @@ async function handleApiRequest(request) {
       return error(503, "Password login is not enabled");
     }
     if (!safeEqual(body.password, expected)) return error(401, "Incorrect password");
-    const user = { provider: "password", sub: null, email: null, name: null, hostedDomain: null };
+    const user = { provider: "password", sub: null, email: null, name: null, hostedDomain: null, role: "super_admin", permissions: normalizedPermissions("super_admin"), active: true, bootstrap: true };
     const token = createAppSessionToken(Date.now(), user);
     return withResponseHeaders(
       json(200, { authenticated: true, user, sessionHours: APP_SESSION_TTL_SECONDS / 3600 }),
@@ -3449,6 +3559,25 @@ async function handleApiRequest(request) {
     store = createStore();
   } catch (storeError) {
     return error(500, "Data provider is not configured", storeError.message);
+  }
+
+  let appAccess = null;
+  if (!isMachineApiPath(pathname)) {
+    appAccess = await resolveAppAccess(store, request.headers);
+    if (!appAccess) return error(403, "Application access has not been assigned", "Ask a Super Admin to add your Google email under Manage → Application Users.");
+    if (appAccess.role === "project_user" && !projectUserRouteAllowed(appAccess, method, pathname)) {
+      return error(403, "Your role can only access Project Performance");
+    }
+    if (appAccess.role === "admin") {
+      const requiredPermission = adminRoutePermission(method, pathname);
+      const dashboardForWorkspace = pathname === "/api/dashboard" && hasAppPermission(appAccess, "project_workspace");
+      const directoryForManage = (pathname === "/api/admin/directory" || /^\/api\/admin\/clients\/[^/]+$/.test(pathname)) && [
+        "manage_records", "manage_pocs", "manage_internal_pocs", "manage_catalogues", "bulk_sends", "manage_project_users"
+      ].some((permission) => hasAppPermission(appAccess, permission));
+      if (requiredPermission && !hasAppPermission(appAccess, requiredPermission) && !directoryForManage && !dashboardForWorkspace) {
+        return error(403, "This feature is turned off for your Admin account");
+      }
+    }
   }
 
   // ---- Retired v1 routes: fail with direction, not a bare 404.
@@ -3562,12 +3691,122 @@ async function handleApiRequest(request) {
   }
 
   if (method === "GET" && pathname === "/api/project-performance") {
-    return json(200, await store.getProjectPerformanceData());
+    const performanceData = await store.getProjectPerformanceData();
+    if (appAccess.role !== "project_user") return json(200, performanceData);
+    const projects = performanceData.projects.filter((project) => projectVisibleToAppAccess(project, appAccess));
+    const clientIds = new Set(projects.map((project) => project.clientId));
+    return json(200, { ...performanceData, projects, clients: performanceData.clients.filter((client) => clientIds.has(client.id)) });
+  }
+
+  if (method === "POST" && pathname === "/api/project-performance/projects") {
+    const clientId = String(body.clientId || "").trim();
+    const key = String(body.key || "").trim();
+    const name = String(body.name || "").trim();
+    if (!clientId || !key || !name || !body.startDate || !body.endDate) {
+      return error(400, "Client, Project ID, name, start date and end date are required");
+    }
+    if (!/^[A-Za-z0-9-]+$/.test(key)) return error(400, "Project ID must contain letters, numbers and hyphens only");
+    if (await store.projectKeyExists(key)) return error(409, "That project ID is already used", key);
+    if (String(body.endDate) < String(body.startDate)) return error(400, "End date cannot be before the start date");
+    const performanceData = await store.getProjectPerformanceData();
+    const client = performanceData.clients.find((item) => item.id === clientId);
+    if (!client) return error(404, "Client not found");
+    const feedbackIntervalDays = Number(body.feedbackIntervalDays || 30);
+    if (!Number.isInteger(feedbackIntervalDays) || feedbackIntervalDays < 1 || feedbackIntervalDays > 365) {
+      return error(400, "Feedback interval must be a whole number from 1 to 365");
+    }
+    const project = await store.createProject({
+      clientId,
+      key,
+      name,
+      goal: String(body.goal || "").trim() || null,
+      startDate: body.startDate,
+      endDate: body.endDate,
+      feedbackIntervalDays,
+      activeStatus: "paused"
+    });
+    if (appAccess.role === "project_user" && appAccess.internalPocId) {
+      const roleFields = {
+        project_director: "projectDirectorId",
+        am: "amId",
+        tl: "tlId",
+        ad: "adId",
+        avp: "avpId"
+      };
+      const requestedRoles = Array.isArray(body.selfTeamRoles) ? body.selfTeamRoles : ["am"];
+      const team = {};
+      for (const role of requestedRoles) {
+        if (roleFields[role]) team[roleFields[role]] = appAccess.internalPocId;
+      }
+      if (!Object.keys(team).length) team.amId = appAccess.internalPocId;
+      await store.saveProjectPerformance(project.id, {
+        updatedBy: appAccess.email || appAccess.name || "Project User",
+        expectedVersion: 0,
+        clientProfile: {},
+        profile: { team },
+        kpis: []
+      });
+    }
+    return json(201, {
+      project,
+      requiresSuperAdminSetup: true,
+      message: "Project created as paused. A Super Admin must add standard services/POCs and activate it before CSAT messages can be scheduled."
+    });
+  }
+
+  const performanceServiceDeleteMatch = pathname.match(/^\/api\/project-performance\/projects\/([^/]+)\/services\/([^/]+)$/);
+  const performanceServiceAddMatch = pathname.match(/^\/api\/project-performance\/projects\/([^/]+)\/services$/);
+  if (method === "POST" && performanceServiceAddMatch) {
+    const projectId = decodeURIComponent(performanceServiceAddMatch[1]);
+    if (!await projectIdVisibleToAppAccess(store, projectId, appAccess)) return error(403, "This project is not assigned to you");
+    const project = await store.getProjectById(projectId);
+    if (!project) return error(404, "Project not found");
+    if (await store.hasOpenFeedbackCycle(projectId)) {
+      return error(409, "A service cannot be added while a feedback cycle is open", "Close or complete the current cycle first so its service scope cannot change mid-conversation.");
+    }
+    const catalog = await store.getServiceCatalogItem(String(body.serviceCatalogId || "").trim());
+    if (!catalog || !catalog.active) return error(400, "Select an active service from the standard catalogue");
+    const current = await store.servicesForProject(projectId);
+    if (current.some((item) => item.serviceCatalogId === catalog.id || item.serviceKey === catalog.serviceKey)) {
+      return error(409, `${catalog.name} is already attached to this project`);
+    }
+    const service = await store.createProjectService({
+      projectId,
+      serviceCatalogId: catalog.id,
+      serviceKey: catalog.serviceKey,
+      name: catalog.name
+    });
+    return json(201, {
+      service,
+      message: `${catalog.name} was added to this project. The standard catalogue itself was not changed.`
+    });
+  }
+
+  if (method === "DELETE" && performanceServiceDeleteMatch) {
+    const projectId = decodeURIComponent(performanceServiceDeleteMatch[1]);
+    if (!await projectIdVisibleToAppAccess(store, projectId, appAccess)) return error(403, "This project is not assigned to you");
+    const serviceId = decodeURIComponent(performanceServiceDeleteMatch[2]);
+    const project = await store.getProjectById(projectId);
+    if (!project) return error(404, "Project not found");
+    const services = await store.servicesForProject(projectId);
+    const service = services.find((item) => item.id === serviceId);
+    if (!service) return error(404, "Service does not belong to this project");
+    if (services.length <= 1) return error(409, "A project must keep at least one service");
+    if (await store.hasOpenFeedbackCycle(projectId)) {
+      return error(409, "This service cannot be removed while a feedback cycle is open", "Close or complete the current cycle first. Historical CSAT records will remain unchanged.");
+    }
+    await store.deleteProjectService(serviceId);
+    return json(200, {
+      removed: service,
+      historicalFeedbackPreserved: true,
+      message: "Service removed from future project feedback. Historical scores, issues and conversations were preserved."
+    });
   }
 
   const projectPerformanceMatch = pathname.match(/^\/api\/project-performance\/([^/]+)$/);
   if (method === "PUT" && projectPerformanceMatch) {
     const projectId = decodeURIComponent(projectPerformanceMatch[1]);
+    if (!await projectIdVisibleToAppAccess(store, projectId, appAccess)) return error(403, "This project is not assigned to you");
     const signedInUser = currentAppUser(request.headers);
     const updatedBy = String(signedInUser?.email || signedInUser?.name || body.updatedBy || "").trim();
     if (updatedBy.length < 2 || updatedBy.length > 120) {
@@ -3582,25 +3821,26 @@ async function handleApiRequest(request) {
       }
     }
     const data = await store.getProjectPerformanceData();
+    const existingPerformanceProject = data.projects.find((item) => item.id === projectId) || null;
     const referenceChecks = {
-      clientCategory: [body.clientProfile?.clientCategory, "client_category"],
-      clientGroup: [body.clientProfile?.clientGroup, "client_group"],
-      projectType: [profile.projectType, "project_type"],
-      revenueCategory: [profile.revenueCategory, "revenue_category"],
-      portfolioType: [profile.portfolioType, "portfolio_type"],
-      currency: [profile.currency || "INR", "currency"],
-      performanceStatus: [profile.performanceStatus, "performance_status"],
-      currentPhase: [profile.currentPhase, "current_phase"],
-      campaignStatus: [profile.campaignStatus, "campaign_status"],
-      clientSentiment: [profile.clientSentiment, "client_sentiment"],
-      relationshipStrength: [profile.relationshipStrength, "relationship_strength"],
-      meetingCadence: [profile.meetingCadence, "meeting_cadence"],
-      suggestionFrequency: [profile.suggestionFrequency, "suggestion_frequency"]
+      clientCategory: [body.clientProfile?.clientCategory, "client_category", existingPerformanceProject?.clientCategory],
+      clientGroup: [body.clientProfile?.clientGroup, "client_group", existingPerformanceProject?.clientGroup],
+      projectType: [profile.projectType, "project_type", existingPerformanceProject?.projectType],
+      revenueCategory: [profile.revenueCategory, "revenue_category", existingPerformanceProject?.revenueCategory],
+      portfolioType: [profile.portfolioType, "portfolio_type", existingPerformanceProject?.portfolioType],
+      currency: [profile.currency || "INR", "currency", existingPerformanceProject?.currency || "INR"],
+      performanceStatus: [profile.performanceStatus, "performance_status", existingPerformanceProject?.performanceStatus],
+      currentPhase: [profile.currentPhase, "current_phase", existingPerformanceProject?.currentPhase],
+      campaignStatus: [profile.campaignStatus, "campaign_status", existingPerformanceProject?.campaignStatus],
+      clientSentiment: [profile.clientSentiment, "client_sentiment", existingPerformanceProject?.clientSentiment],
+      relationshipStrength: [profile.relationshipStrength, "relationship_strength", existingPerformanceProject?.relationshipStrength],
+      meetingCadence: [profile.meetingCadence, "meeting_cadence", existingPerformanceProject?.meetingCadence],
+      suggestionFrequency: [profile.suggestionFrequency, "suggestion_frequency", existingPerformanceProject?.suggestionFrequency]
     };
-    for (const [field, [value, category]] of Object.entries(referenceChecks)) {
+    for (const [field, [value, category, existingValue]] of Object.entries(referenceChecks)) {
       if (!value) continue;
-      const allowed = new Set((data.referenceValues?.[category] || []).map((item) => item.value));
-      if (!allowed.has(value)) return error(400, `${field} must be selected from its standard list`);
+      const allowed = new Set((data.referenceValues?.[category] || []).filter((item) => item.active !== false).map((item) => item.value));
+      if (!allowed.has(value) && value !== existingValue) return error(400, `${field} must be selected from its active standard list`);
     }
     const internalPocIds = new Set((data.internalPocs || []).map((item) => item.id));
     for (const [role, value] of Object.entries(profile.team || {})) {
@@ -3632,12 +3872,13 @@ async function handleApiRequest(request) {
     if (!Array.isArray(body.kpis) || body.kpis.length > 100) {
       return error(400, "KPIs must be a list containing no more than 100 rows");
     }
-    const allowedKpiNames = new Set((data.referenceValues?.kpi_name || []).map((item) => item.value));
+    const allowedKpiNames = new Set((data.referenceValues?.kpi_name || []).filter((item) => item.active !== false).map((item) => item.value));
+    const existingKpiNames = new Set((existingPerformanceProject?.kpis || []).map((item) => item.kpiName));
     let primaryKpiCount = 0;
     for (const [index, kpi] of body.kpis.entries()) {
       const kpiName = String(kpi.kpiName || "").trim();
       if (!kpiName) return error(400, `KPI ${index + 1} needs a name`);
-      if (!allowedKpiNames.has(kpiName)) return error(400, `KPI ${index + 1} name must be selected from the standard KPI list`);
+      if (!allowedKpiNames.has(kpiName) && !existingKpiNames.has(kpiName)) return error(400, `KPI ${index + 1} name must be selected from the active standard KPI list`);
       if (!["number", "percent", "currency", "ratio"].includes(kpi.unit || "number")) {
         return error(400, `KPI ${index + 1} unit is invalid`);
       }
@@ -4766,7 +5007,18 @@ async function handleApiRequest(request) {
   }
 
   if (method === "GET" && pathname === "/api/admin/directory") {
-    return json(200, await store.getDirectory());
+    const directory = await store.getDirectory();
+    const userManagementOnly = appAccess.role === "admin"
+      && hasAppPermission(appAccess, "manage_project_users")
+      && !["directory", "manage_records", "manage_pocs", "manage_internal_pocs", "manage_catalogues", "bulk_sends"]
+        .some((permission) => hasAppPermission(appAccess, permission));
+    if (userManagementOnly) {
+      return json(200, {
+        clusters: [], clients: [], projects: [], clientPocs: [], pocLevels: [], departments: [], subDepartments: [], serviceCatalog: [],
+        internalPocs: (directory.internalPocs || []).map((person) => ({ id: person.id, name: person.name, active: person.active !== false }))
+      });
+    }
+    return json(200, directory);
   }
 
   const clientDetailMatch = pathname.match(/^\/api\/admin\/clients\/([^/]+)$/);
@@ -4784,6 +5036,126 @@ async function handleApiRequest(request) {
     if (!isAdminAuthorized(request.headers)) {
       return error(403, "Incorrect PIN");
     }
+  }
+
+  if (method === "GET" && pathname === "/api/admin/app-users") {
+    const users = await store.listAppUsers();
+    return json(200, {
+      users: (appAccess.role === "super_admin" ? users : users.filter((user) => user.role === "project_user"))
+        .map((user) => ({ ...user, permissions: normalizedPermissions(user.role, user.permissions) })),
+      roles: appAccess.role === "super_admin" ? ["super_admin", "admin", "project_user"] : ["project_user"]
+    });
+  }
+
+  if (method === "POST" && pathname === "/api/admin/app-users") {
+    const email = String(body.email || "").trim().toLowerCase();
+    const role = String(body.role || "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return error(400, "Enter a valid Google Workspace email");
+    if (!["super_admin", "admin", "project_user"].includes(role)) return error(400, "Role must be Super Admin, Admin or Project User");
+    if (appAccess.role !== "super_admin" && role !== "project_user") {
+      return error(403, "Admins can only add Project Users");
+    }
+    const internalPocId = role === "project_user" ? String(body.internalPocId || "").trim() : null;
+    if (role === "project_user" && !internalPocId) return error(400, "Select the Internal POC this Project User represents");
+    if (internalPocId && !await store.internalPocById(internalPocId)) return error(400, "Selected Internal POC was not found");
+    const allowedDomains = googleAllowedDomains();
+    const domain = email.split("@")[1];
+    if (allowedDomains.length && !allowedDomains.includes(domain)) return error(400, "Email must use an approved Google Workspace domain");
+    if (await store.getAppUserByEmail(email)) return error(409, "That application user already exists");
+    try {
+      const user = await store.createAppUser({
+        email,
+        name: body.name,
+        role,
+        permissions: normalizedPermissions(role, body.permissions),
+        internalPocId,
+        active: body.active !== false,
+        actor: appAccess.email || "Password Super Admin"
+      });
+      return json(201, { user });
+    } catch (createError) {
+      return error(400, "Could not add application user", createError.message);
+    }
+  }
+
+  const appUserMatch = pathname.match(/^\/api\/admin\/app-users\/([^/]+)$/);
+  if (method === "PATCH" && appUserMatch) {
+    const appUserId = decodeURIComponent(appUserMatch[1]);
+    const users = await store.listAppUsers();
+    const existing = users.find((item) => item.id === appUserId);
+    if (!existing) return error(404, "Application user not found");
+    if (appAccess.role !== "super_admin" && existing.role !== "project_user") {
+      return error(403, "Admins cannot change Super Admin or Admin accounts");
+    }
+    const role = body.role === undefined ? existing.role : String(body.role || "");
+    const active = body.active === undefined ? existing.active : Boolean(body.active);
+    if (!["super_admin", "admin", "project_user"].includes(role)) return error(400, "Role must be Super Admin, Admin or Project User");
+    if (appAccess.role !== "super_admin" && role !== "project_user") {
+      return error(403, "Admins can only manage Project Users");
+    }
+    const internalPocId = role === "project_user"
+      ? String(body.internalPocId === undefined ? existing.internalPocId || "" : body.internalPocId || "").trim()
+      : null;
+    if (role === "project_user" && !internalPocId) return error(400, "Select the Internal POC this Project User represents");
+    if (internalPocId && !await store.internalPocById(internalPocId)) return error(400, "Selected Internal POC was not found");
+    const removesActiveSuperAdmin = existing.role === "super_admin" && existing.active && (role !== "super_admin" || !active);
+    if (removesActiveSuperAdmin && await store.activeSuperAdminCount() <= 1) {
+      return error(409, "Keep at least one active Super Admin");
+    }
+    const user = await store.updateAppUser(appUserId, {
+      name: body.name,
+      role,
+      permissions: normalizedPermissions(role, body.permissions === undefined ? existing.permissions : body.permissions),
+      internalPocId,
+      active,
+      actor: appAccess.email || "Password Super Admin"
+    });
+    return json(200, { user });
+  }
+
+  const PERFORMANCE_STANDARD_CATEGORIES = new Set([
+    "client_group", "client_category", "project_type", "revenue_category", "portfolio_type", "currency",
+    "performance_status", "current_phase", "campaign_status", "client_sentiment", "relationship_strength",
+    "meeting_cadence", "suggestion_frequency", "kpi_name"
+  ]);
+
+  if (method === "GET" && pathname === "/api/admin/performance-standards") {
+    return json(200, { values: await store.listPerformanceReferenceValues({ includeInactive: true }) });
+  }
+
+  if (method === "POST" && pathname === "/api/admin/performance-standards") {
+    const category = String(body.category || "").trim();
+    const value = String(body.value || "").trim();
+    if (!PERFORMANCE_STANDARD_CATEGORIES.has(category)) return error(400, "Unknown Project Performance standard category");
+    if (!value) return error(400, "Standard value is required");
+    try {
+      return json(201, { value: await store.createPerformanceReferenceValue({ category, value, sortOrder: body.sortOrder, active: body.active }) });
+    } catch (createError) {
+      return error(409, "That standard value already exists", createError.message);
+    }
+  }
+
+  const performanceStandardMatch = pathname.match(/^\/api\/admin\/performance-standards\/([^/]+)$/);
+  if (method === "PATCH" && performanceStandardMatch) {
+    const value = String(body.value || "").trim();
+    if (!value) return error(400, "Standard value is required");
+    try {
+      const saved = await store.updatePerformanceReferenceValue(decodeURIComponent(performanceStandardMatch[1]), {
+        value,
+        sortOrder: body.sortOrder,
+        active: body.active
+      });
+      if (!saved) return error(404, "Standard value not found");
+      return json(200, { value: saved });
+    } catch (updateError) {
+      return error(409, "Could not update that standard value", updateError.message);
+    }
+  }
+
+  if (method === "DELETE" && performanceStandardMatch) {
+    const result = await store.deleteOrArchivePerformanceReferenceValue(decodeURIComponent(performanceStandardMatch[1]));
+    if (!result) return error(404, "Standard value not found");
+    return json(200, result);
   }
 
   if (method === "PATCH" && pathname === "/api/admin/messaging") {
@@ -5094,8 +5466,6 @@ async function handleApiRequest(request) {
         return error(400, `POC ${index + 1}: influence must be more than 0% and no more than 100%`);
       }
       if (number) {
-        const conflict = await pocWhatsappConflictForClient(store, number, input.clientId);
-        if (conflict) return error(409, `POC ${index + 1}: WhatsApp number belongs to another client`, conflict.owner?.name);
         seenPhones.add(number);
       }
       if (active) activePocWeightTotal += weightPercentage;
@@ -5196,7 +5566,6 @@ async function handleApiRequest(request) {
         if (conflict?.kind === "same_project") {
           return error(409, `POC ${index + 1}: WhatsApp number is already configured on this project`, conflict.owner?.name);
         }
-        if (conflict) return error(409, `POC ${index + 1}: WhatsApp number belongs to another client`, conflict.owner?.name);
         seenPhones.add(phone);
       }
       if (id) seenIds.add(id);
@@ -5536,9 +5905,6 @@ async function handleApiRequest(request) {
       if (conflict?.kind === "same_project") {
         return error(409, "That WhatsApp number is already configured on this project", conflict.owner?.name);
       }
-      if (conflict) {
-        return error(409, "That WhatsApp number belongs to a POC under another client", conflict.owner?.name);
-      }
     }
     return json(201, { poc: await store.createClientPoc(body) });
   }
@@ -5559,9 +5925,6 @@ async function handleApiRequest(request) {
         const conflict = await pocWhatsappConflict(store, phone, body.projectId || existingPoc?.projectId, pocId);
         if (conflict?.kind === "same_project") {
           return error(409, "That WhatsApp number is already configured on this project", conflict.owner?.name);
-        }
-        if (conflict) {
-          return error(409, "That WhatsApp number belongs to a POC under another client", conflict.owner?.name);
         }
       }
     }

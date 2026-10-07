@@ -8,6 +8,7 @@ import {
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill } from "./Ui.jsx";
 import ReportDownloads from "./ReportDownloads.jsx";
+import { hasPermission } from "../permissions";
 
 const RISK_OPTIONS = ["High", "Watch", "Low", "Not scored"];
 const RESPONSE_LABELS = {
@@ -122,7 +123,7 @@ function ProjectRow({ project, cycles, sessions, expanded, onToggle, onOpenProje
   );
 }
 
-export default function Dashboard({ dashboard, onReload, onOpenProject }) {
+export default function Dashboard({ dashboard, onReload, onOpenProject, currentUser = null }) {
   const [clusters, setClusters] = useState([]);
   const [clients, setClients] = useState([]);
   const [projectNames, setProjectNames] = useState([]);
@@ -145,6 +146,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
   const allProjects = dashboard?.projects || [];
   const allCycles = dashboard?.cycles || [];
   const messagingEnabled = dashboard?.messaging?.enabled !== false;
+  const canControlMessaging = hasPermission(currentUser, "messaging_controls");
 
   async function changeMessagingStatus() {
     setMessagingSaving(true);
@@ -560,13 +562,13 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
             fileName={`csat-dashboard-${new Date().toISOString().slice(0, 10)}`}
             onError={setReportError}
           />
-          <Button
+          {canControlMessaging ? <Button
             icon={Power}
             variant={messagingEnabled ? "success" : "danger"}
             onClick={() => { setMessagingPrompt(true); setMessagingError(""); setMessagingPin(""); }}
           >
             WhatsApp {messagingEnabled ? "ON" : "PAUSED"}
-          </Button>
+          </Button> : null}
           <button type="button" className="button primary" onClick={onReload}>
             <RefreshCw size={16} aria-hidden="true" /><span>Refresh</span>
           </button>
@@ -584,7 +586,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
         <button type="button" onClick={() => showSection("response-tracker")}>Feedback Cycle &amp; POC Response Tracker</button>
       </nav>
 
-      {messagingPrompt ? (
+      {canControlMessaging && messagingPrompt ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !messagingSaving) setMessagingPrompt(false);
         }}>

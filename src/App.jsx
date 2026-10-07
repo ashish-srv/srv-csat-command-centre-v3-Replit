@@ -8,6 +8,7 @@ import Directory from "./components/Directory.jsx";
 import Manage from "./components/Manage.jsx";
 import { BrandLogo } from "./components/Ui.jsx";
 import { formatDateTime } from "./format";
+import { canOpenManage, hasPermission } from "./permissions";
 
 function getRoute() {
   const path = window.location.pathname;
@@ -129,6 +130,16 @@ export default function App({ onLogout, currentUser = null }) {
   const [error, setError] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
   const [locationTick, setLocationTick] = useState(0);
+  const routeAccess = useMemo(() => ({
+    dashboard: hasPermission(currentUser, "dashboard"),
+    project: hasPermission(currentUser, "project_workspace"),
+    directory: hasPermission(currentUser, "directory"),
+    performance: hasPermission(currentUser, "project_performance"),
+    manage: canOpenManage(currentUser)
+  }), [currentUser]);
+  const firstAllowedRoute = Object.keys(routeAccess).find((key) => routeAccess[key]) || "performance";
+  const showAttentionRail = routeAccess.dashboard;
+  const needsDashboardData = routeAccess.dashboard || routeAccess.project;
 
   async function loadDashboard() {
     setError(null);
@@ -140,19 +151,26 @@ export default function App({ onLogout, currentUser = null }) {
   }
 
   useEffect(() => {
-    loadDashboard();
+    const initialRoute = getRoute();
+    if (!routeAccess[initialRoute]) navigate(firstAllowedRoute === "performance" ? "/project-performance" : `/${firstAllowedRoute}`);
+    if (needsDashboardData) loadDashboard();
     const listener = () => {
-      setRoute(getRoute());
+      const nextRoute = getRoute();
+      if (!routeAccess[nextRoute]) {
+        navigate(firstAllowedRoute === "performance" ? "/project-performance" : `/${firstAllowedRoute}`);
+        return;
+      }
+      setRoute(nextRoute);
       setLocationTick((value) => value + 1);
       // The rail is fed by the same data as the dashboard, so it went stale as
       // soon as you navigated: issues past SLA and at-risk counts stayed at
       // whatever they were when the page first loaded.
-      loadDashboard();
+      if (needsDashboardData) loadDashboard();
     };
 
     // A conversation can finish while the tab sits open. Refresh on return
     // rather than showing numbers from an hour ago.
-    const onFocus = () => { if (!document.hidden) loadDashboard(); };
+    const onFocus = () => { if (needsDashboardData && !document.hidden) loadDashboard(); };
 
     window.addEventListener("popstate", listener);
     document.addEventListener("visibilitychange", onFocus);
@@ -160,7 +178,7 @@ export default function App({ onLogout, currentUser = null }) {
       window.removeEventListener("popstate", listener);
       document.removeEventListener("visibilitychange", onFocus);
     };
-  }, []);
+  }, [firstAllowedRoute, needsDashboardData, routeAccess]);
 
   const projects = useMemo(() => dashboard?.projects || [], [dashboard]);
 
@@ -174,51 +192,51 @@ export default function App({ onLogout, currentUser = null }) {
   }
 
   return (
-    <div className={`app-shell ${collapsed ? "rail-collapsed" : ""}`}>
-      <AttentionRail
+    <div className={`app-shell ${!showAttentionRail ? "project-user-shell rail-collapsed" : collapsed ? "rail-collapsed" : ""}`}>
+      {showAttentionRail ? <AttentionRail
         collapsed={collapsed}
         onToggle={() => setCollapsed((value) => !value)}
         dashboard={dashboard}
         onOpenProject={openProject}
-      />
+      /> : null}
 
       <main className="workspace">
         <nav className="tabbar">
-          <button
+          {routeAccess.dashboard ? <button
             type="button"
             className={`tab ${route === "dashboard" ? "active" : ""}`}
             onClick={() => navigate("/dashboard")}
           >
             Dashboard
-          </button>
-          <button
+          </button> : null}
+          {routeAccess.project ? <button
             type="button"
             className={`tab ${route === "project" ? "active" : ""}`}
             onClick={() => openProject(projects[0]?.key || "")}
           >
             Project workspace
-          </button>
-          <button
+          </button> : null}
+          {routeAccess.directory ? <button
             type="button"
             className={`tab ${route === "directory" ? "active" : ""}`}
             onClick={() => navigate("/directory")}
           >
             Directory
-          </button>
-          <button
+          </button> : null}
+          {routeAccess.performance ? <button
             type="button"
             className={`tab ${route === "performance" ? "active" : ""}`}
             onClick={() => navigate("/project-performance")}
           >
             Project Performance
-          </button>
-          <button
+          </button> : null}
+          {routeAccess.manage ? <button
             type="button"
             className={`tab ${route === "manage" ? "active" : ""}`}
             onClick={() => navigate("/manage")}
           >
             Manage
-          </button>
+          </button> : null}
           <span className="tabbar-spacer" aria-hidden="true" />
           <button type="button" className="tab logout-tab" onClick={onLogout}>
             <LogOut size={16} aria-hidden="true" />
@@ -226,7 +244,7 @@ export default function App({ onLogout, currentUser = null }) {
           </button>
         </nav>
 
-        {dashboard?.messaging?.enabled === false ? (
+        {routeAccess.dashboard && dashboard?.messaging?.enabled === false ? (
           <div className="messaging-paused-banner" role="status">
             <strong>WhatsApp messaging is paused.</strong>
             <span>No WhatsApp messages or automated replies will be sent. Email notifications remain active.</span>
@@ -242,13 +260,13 @@ export default function App({ onLogout, currentUser = null }) {
         ) : route === "directory" ? (
           <Directory onOpenProject={openProject} />
         ) : route === "manage" ? (
-          <Manage onReload={loadDashboard} />
+          <Manage onReload={loadDashboard} currentUser={currentUser} />
         ) : route === "performance" ? (
           <ProjectPerformance currentUser={currentUser} />
         ) : route === "project" ? (
           <ProjectWorkspace dashboard={dashboard} locationTick={locationTick} onReload={loadDashboard} />
         ) : (
-          <Dashboard dashboard={dashboard} onReload={loadDashboard} onOpenProject={openProject} />
+          <Dashboard dashboard={dashboard} onReload={loadDashboard} onOpenProject={openProject} currentUser={currentUser} />
         )}
       </main>
     </div>

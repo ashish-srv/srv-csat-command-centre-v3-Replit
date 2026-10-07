@@ -10,6 +10,7 @@ function AuthenticatedApplication() {
     checking: true,
     configured: true,
     authenticated: false,
+    accessAuthorized: false,
     passwordConfigured: false,
     googleConfigured: false,
     user: null
@@ -48,10 +49,17 @@ function AuthenticatedApplication() {
       setAuth((current) => ({ ...current, checking: false, authenticated: false, user: null }));
       setError("Your session expired. Please sign in again.");
     };
+    const accessChanged = () => {
+      apiGet("/api/auth/status")
+        .then((status) => setAuth({ checking: false, ...status }))
+        .catch((statusError) => setError(statusError.message));
+    };
     window.addEventListener("csat:unauthorized", signedOut);
+    window.addEventListener("csat:access-changed", accessChanged);
     return () => {
       active = false;
       window.removeEventListener("csat:unauthorized", signedOut);
+      window.removeEventListener("csat:access-changed", accessChanged);
     };
   }, []);
 
@@ -60,7 +68,7 @@ function AuthenticatedApplication() {
     setError("");
     try {
       const status = await apiPost("/api/auth/login", { password });
-      setAuth((current) => ({ ...current, checking: false, authenticated: true, user: status.user || null }));
+      setAuth((current) => ({ ...current, checking: false, authenticated: true, accessAuthorized: true, user: status.user || null }));
     } catch (loginError) {
       setError(loginError.status === 401 ? "That password is not correct." : loginError.message);
     } finally {
@@ -72,7 +80,7 @@ function AuthenticatedApplication() {
     try {
       await apiPost("/api/auth/logout");
       setError("");
-      setAuth((current) => ({ ...current, authenticated: false, user: null }));
+      setAuth((current) => ({ ...current, authenticated: false, accessAuthorized: false, user: null }));
     } catch (logoutError) {
       setError(logoutError.message);
     }
@@ -89,6 +97,19 @@ function AuthenticatedApplication() {
         busy={busy}
         onLogin={login}
       />
+    );
+  }
+  if (!auth.accessAuthorized) {
+    return (
+      <main className="access-denied-page">
+        <div className="access-denied-card">
+          <p className="eyebrow">Access not assigned</p>
+          <h1>Your Google sign-in worked</h1>
+          <p><strong>{auth.user?.email || "This account"}</strong> has not yet been added under Manage → Application Users.</p>
+          <p>Ask a Super Admin to add this exact Google Workspace email, then sign in again.</p>
+          <button type="button" className="button primary" onClick={logout}>Sign out</button>
+        </div>
+      </main>
     );
   }
   return <App onLogout={logout} currentUser={auth.user} />;

@@ -1006,21 +1006,16 @@ class SupabaseStore {
       throw new Error(`Project ${projectKey} has no active POC with a WhatsApp number`);
     }
 
-    // Full feedback must remain the only open conversation for a phone number.
-    // Quick check-ins can coexist because template buttons identify a session;
-    // subsequent free text is routed to the one awaiting details.
+    // A WhatsApp number may belong to several clients and projects, but it may
+    // have only one open conversation at a time. This keeps free-text replies
+    // unambiguous for monthly, project-end and quick check-in sessions alike.
     for (const poc of pocs) {
       const routing = await this.getWhatsappRoutingContext(poc.contactWhatsapp);
       const activeSessions = routing.status === "ambiguous"
         ? routing.candidates.map((candidate) => candidate.session)
         : routing.status === "active" ? [routing.session] : [];
-      const conflicts = isQuickCheckin
-        ? activeSessions.some((activeSession) => activeSession.sessionType !== "quick_checkin")
-        : activeSessions.length > 0;
-      if (conflicts) {
-        const blockingSession = activeSessions.find((activeSession) => (
-          isQuickCheckin ? activeSession.sessionType !== "quick_checkin" : true
-        ));
+      if (activeSessions.length) {
+        const blockingSession = activeSessions[0];
         const blockingProject = blockingSession?.projectId
           ? await this.getProjectById(blockingSession.projectId)
           : null;
@@ -3146,37 +3141,22 @@ class SupabaseStore {
     return rows.find((row) => row.id !== exceptId) || null;
   }
 
-  /**
-   * Reusing a WhatsApp number is valid across projects of the same client. It
-   * remains invalid twice on one project or anywhere under another client.
-   */
+  /** One contact may represent any number of clients/projects, but only once per project. */
   async whatsappConflict(phone, projectId, exceptId = null) {
     const value = digits(phone);
     if (!value || !projectId) return null;
-    const projectRows = await this.request("projects", {
-      query: `id=eq.${encodeURIComponent(projectId)}&select=id,client_id&limit=1`
-    });
-    if (!projectRows.length) return { kind: "unknown_project", owner: null };
-    const targetClientId = projectRows[0].client_id;
     const rows = await this.request("client_pocs", {
-      query: `contact_whatsapp=eq.${encodeURIComponent(value)}&select=id,name,project_id,projects(client_id)&limit=50`
+      query: `contact_whatsapp=eq.${encodeURIComponent(value)}&project_id=eq.${encodeURIComponent(projectId)}&select=id,name,project_id&limit=50`
     });
     for (const row of rows) {
       if (row.id === exceptId) continue;
       if (row.project_id === projectId) return { kind: "same_project", owner: row };
-      if (row.projects?.client_id !== targetClientId) return { kind: "different_client", owner: row };
     }
     return null;
   }
 
-  async whatsappConflictForClient(phone, clientId) {
-    const value = digits(phone);
-    if (!value || !clientId) return null;
-    const rows = await this.request("client_pocs", {
-      query: `contact_whatsapp=eq.${encodeURIComponent(value)}&select=id,name,project_id,projects(client_id)&limit=50`
-    });
-    const conflicting = rows.find((row) => row.projects?.client_id !== clientId);
-    return conflicting ? { kind: "different_client", owner: conflicting } : null;
+  async whatsappConflictForClient() {
+    return null;
   }
 
   async getDashboard() {
@@ -3503,16 +3483,205 @@ class SupabaseStore {
   // Project Performance
   // -------------------------------------------------------------------
 
+  async getAppUserByEmail(email) {
+    const normalized = String(email || "").trim().toLowerCase();
+    if (!normalized) return null;
+    const rows = await this.request("app_users", {
+      query: `email=ilike.${encodeURIComponent(normalized)}&select=*&limit=1`
+    });
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      id: row.id,
+      email: row.email,
+      name: row.name || "",
+      role: row.role,
+      permissions: row.permissions && typeof row.permissions === "object" ? row.permissions : {},
+      internalPocId: row.internal_poc_id || null,
+      active: row.active !== false,
+      createdBy: row.created_by || null,
+      updatedBy: row.updated_by || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  async listAppUsers() {
+    const rows = await this.request("app_users", { query: "select=*&order=role.asc,email.asc" });
+    return Promise.all(rows.map((row) => this.getAppUserByEmail(row.email)));
+  }
+
+  async createAppUser(input) {
+    const email = String(input.email || "").trim().toLowerCase();
+    const rows = await this.request("app_users", {
+      method: "POST",
+      body: [{
+        email,
+        name: String(input.name || "").trim() || null,
+        role: input.role,
+        permissions: input.permissions && typeof input.permissions === "object" ? input.permissions : {},
+        internal_poc_id: input.internalPocId || null,
+        active: input.active !== false,
+        created_by: input.actor || null,
+        updated_by: input.actor || null
+      }]
+    });
+    return this.getAppUserByEmail(rows[0].email);
+  }
+
+  async updateAppUser(appUserId, input) {
+    const body = { updated_by: input.actor || null, updated_at: new Date().toISOString() };
+    if (input.email !== undefined) body.email = String(input.email || "").trim().toLowerCase();
+    if (input.name !== undefined) body.name = String(input.name || "").trim() || null;
+    if (input.role !== undefined) body.role = input.role;
+    if (input.permissions !== undefined) body.permissions = input.permissions && typeof input.permissions === "object" ? input.permissions : {};
+    if (input.internalPocId !== undefined) body.internal_poc_id = input.internalPocId || null;
+    if (input.active !== undefined) body.active = Boolean(input.active);
+    const rows = await this.request("app_users", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(appUserId)}`,
+      body
+    });
+    return rows.length ? this.getAppUserByEmail(rows[0].email) : null;
+  }
+
+  async activeSuperAdminCount() {
+    const rows = await this.request("app_users", {
+      query: "role=eq.super_admin&active=is.true&select=id"
+    });
+    return rows.length;
+  }
+
+  async listPerformanceReferenceValues({ includeInactive = false } = {}) {
+    const active = includeInactive ? "" : "active=is.true&";
+    const rows = await this.request("performance_reference_values", {
+      query: `${active}select=*&order=category.asc,sort_order.asc,value.asc`
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      category: row.category,
+      value: row.value,
+      sortOrder: Number(row.sort_order) || 0,
+      active: row.active !== false
+    }));
+  }
+
+  async createPerformanceReferenceValue(input) {
+    const rows = await this.request("performance_reference_values", {
+      method: "POST",
+      body: [{
+        category: input.category,
+        value: String(input.value || "").trim(),
+        sort_order: Number(input.sortOrder) || 0,
+        active: input.active !== false
+      }]
+    });
+    const row = rows[0];
+    return { id: row.id, category: row.category, value: row.value, sortOrder: Number(row.sort_order) || 0, active: row.active !== false };
+  }
+
+  async updatePerformanceReferenceValue(referenceId, input) {
+    const currentRows = await this.request("performance_reference_values", {
+      query: `id=eq.${encodeURIComponent(referenceId)}&select=*&limit=1`
+    });
+    if (!currentRows.length) return null;
+    const current = currentRows[0];
+    const body = { updated_at: new Date().toISOString() };
+    if (input.value !== undefined) body.value = String(input.value || "").trim();
+    if (input.sortOrder !== undefined) body.sort_order = Number(input.sortOrder) || 0;
+    if (input.active !== undefined) body.active = Boolean(input.active);
+    const rows = await this.request("performance_reference_values", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(referenceId)}`,
+      body
+    });
+    if (!rows.length) return null;
+    if (body.value && body.value !== current.value) {
+      const usageMap = {
+        client_group: ["client_performance_profiles", "client_group"],
+        client_category: ["client_performance_profiles", "client_category"],
+        project_type: ["project_performance_profiles", "project_type"],
+        revenue_category: ["project_performance_profiles", "revenue_category"],
+        portfolio_type: ["project_performance_profiles", "portfolio_type"],
+        currency: ["project_performance_profiles", "currency"],
+        performance_status: ["project_performance_profiles", "performance_status"],
+        current_phase: ["project_performance_profiles", "current_phase"],
+        campaign_status: ["project_performance_profiles", "campaign_status"],
+        client_sentiment: ["project_performance_profiles", "client_sentiment"],
+        relationship_strength: ["project_performance_profiles", "relationship_strength"],
+        meeting_cadence: ["project_performance_profiles", "meeting_cadence"],
+        suggestion_frequency: ["project_performance_profiles", "suggestion_frequency"],
+        kpi_name: ["project_performance_kpis", "kpi_name"]
+      };
+      const usage = usageMap[current.category];
+      if (usage) {
+        await this.request(usage[0], {
+          method: "PATCH",
+          query: `${usage[1]}=eq.${encodeURIComponent(current.value)}`,
+          body: { [usage[1]]: body.value, updated_at: new Date().toISOString() }
+        });
+      }
+    }
+    const row = rows[0];
+    return { id: row.id, category: row.category, value: row.value, sortOrder: Number(row.sort_order) || 0, active: row.active !== false };
+  }
+
+  async deleteOrArchivePerformanceReferenceValue(referenceId) {
+    const rows = await this.request("performance_reference_values", {
+      query: `id=eq.${encodeURIComponent(referenceId)}&select=*&limit=1`
+    });
+    if (!rows.length) return null;
+    const row = rows[0];
+    const usageMap = {
+      client_group: ["client_performance_profiles", "client_group", "client_id"],
+      client_category: ["client_performance_profiles", "client_category", "client_id"],
+      project_type: ["project_performance_profiles", "project_type", "project_id"],
+      revenue_category: ["project_performance_profiles", "revenue_category", "project_id"],
+      portfolio_type: ["project_performance_profiles", "portfolio_type", "project_id"],
+      currency: ["project_performance_profiles", "currency", "project_id"],
+      performance_status: ["project_performance_profiles", "performance_status", "project_id"],
+      current_phase: ["project_performance_profiles", "current_phase", "project_id"],
+      campaign_status: ["project_performance_profiles", "campaign_status", "project_id"],
+      client_sentiment: ["project_performance_profiles", "client_sentiment", "project_id"],
+      relationship_strength: ["project_performance_profiles", "relationship_strength", "project_id"],
+      meeting_cadence: ["project_performance_profiles", "meeting_cadence", "project_id"],
+      suggestion_frequency: ["project_performance_profiles", "suggestion_frequency", "project_id"],
+      kpi_name: ["project_performance_kpis", "kpi_name", "id"]
+    };
+    const usage = usageMap[row.category];
+    const inUse = usage
+      ? (await this.request(usage[0], { query: `${usage[1]}=eq.${encodeURIComponent(row.value)}&select=${usage[2]}&limit=1` })).length > 0
+      : true;
+    if (inUse) {
+      await this.updatePerformanceReferenceValue(referenceId, { active: false });
+      return { action: "archived", id: referenceId };
+    }
+    await this.request("performance_reference_values", {
+      method: "DELETE",
+      query: `id=eq.${encodeURIComponent(referenceId)}`
+    });
+    return { action: "deleted", id: referenceId };
+  }
+
+  async hasOpenFeedbackCycle(projectId) {
+    const rows = await this.request("feedback_cycles", {
+      query: `project_id=eq.${encodeURIComponent(projectId)}&status=eq.open&select=id&limit=1`
+    });
+    return rows.length > 0;
+  }
+
   async getProjectPerformanceData() {
-    const [projects, clientProfiles, profiles, kpiRows, auditRows, internalRows, serviceRows, referenceRows] = await Promise.all([
+    const [projects, clients, clientProfiles, profiles, kpiRows, auditRows, internalRows, serviceRows, catalogRows, referenceRows] = await Promise.all([
       this.listProjects(),
+      this.request("clients", { query: "select=id,client_key,name,cluster_id,active_status,clusters(id,name)&order=name.asc" }),
       this.request("client_performance_profiles", { query: "select=*" }),
       this.request("project_performance_profiles", { query: "select=*" }),
       this.request("project_performance_kpis", { query: "select=*&order=sort_order.asc,created_at.asc" }),
       this.request("project_performance_audit", { query: "select=*&order=changed_at.desc&limit=500" }),
       this.request("internal_pocs", { query: "select=*&order=name.asc" }),
-      this.request("project_services", { query: "select=id,project_id,service_key,name&order=name.asc" }),
-      this.request("performance_reference_values", { query: "active=is.true&select=*&order=category.asc,sort_order.asc,value.asc" })
+      this.request("project_services", { query: "select=id,project_id,service_catalog_id,service_key,name&order=name.asc" }),
+      this.request("service_catalog", { query: "active=is.true&select=id,service_key,name,active&order=name.asc" }),
+      this.request("performance_reference_values", { query: "select=*&order=category.asc,sort_order.asc,value.asc" })
     ]);
 
     const clientProfilesById = new Map(clientProfiles.map((row) => [row.client_id, row]));
@@ -3550,7 +3719,7 @@ class SupabaseStore {
     }
     for (const row of serviceRows) {
       const items = servicesByProject.get(row.project_id) || [];
-      items.push({ id: row.id, serviceKey: row.service_key, name: row.name });
+      items.push({ id: row.id, serviceCatalogId: row.service_catalog_id || null, serviceKey: row.service_key, name: row.name });
       servicesByProject.set(row.project_id, items);
     }
 
@@ -3618,7 +3787,7 @@ class SupabaseStore {
     const referenceValues = {};
     for (const row of referenceRows) {
       if (!referenceValues[row.category]) referenceValues[row.category] = [];
-      referenceValues[row.category].push({ id: row.id, value: row.value });
+      referenceValues[row.category].push({ id: row.id, value: row.value, active: row.active !== false });
     }
     const currentYear = new Date().getFullYear();
     const financialYears = [];
@@ -3626,7 +3795,21 @@ class SupabaseStore {
       financialYears.push(`${year}-${year + 1}`);
     }
 
-    return { projects: mappedProjects, internalPocs, referenceValues, financialYears };
+    return {
+      projects: mappedProjects,
+      clients: clients.map((row) => ({
+        id: row.id,
+        key: row.client_key,
+        name: row.name,
+        clusterId: row.cluster_id,
+        clusterName: row.clusters?.name || null,
+        activeStatus: row.active_status
+      })),
+      internalPocs,
+      serviceCatalog: catalogRows.map((row) => ({ id: row.id, serviceKey: row.service_key, name: row.name, active: row.active !== false })),
+      referenceValues,
+      financialYears
+    };
   }
 
   async saveProjectPerformance(projectId, input = {}) {

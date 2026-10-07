@@ -16,6 +16,13 @@ async function parseResponse(response) {
     if (response.status === 401 && payload.error === "Authentication required") {
       window.dispatchEvent(new CustomEvent("csat:unauthorized"));
     }
+    if (response.status === 403 && [
+      "Application access has not been assigned",
+      "Your role can only access Project Performance",
+      "This feature is turned off for your Admin account"
+    ].includes(payload.error)) {
+      window.dispatchEvent(new CustomEvent("csat:access-changed"));
+    }
     throw requestError;
   }
   return payload;
@@ -45,6 +52,19 @@ export async function apiPost(path, body = {}) {
 export async function apiPut(path, body = {}) {
   const response = await fetch(path, {
     method: "PUT",
+    credentials: "same-origin",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  return parseResponse(response);
+}
+
+export async function apiDelete(path, body = {}) {
+  const response = await fetch(path, {
+    method: "DELETE",
     credentials: "same-origin",
     headers: {
       accept: "application/json",

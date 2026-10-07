@@ -190,19 +190,7 @@ function validateWorkbook(snapshot, raw) {
     if (managerCycles.has(row.email)) rowError(errors, "Internal POCs", row.row, "reporting line creates a management loop");
   }
 
-  const clientIdToKey = new Map(directory.clients.map((item) => [item.id, lower(item.key)]));
-  const clientKeyByProjectKey = new Map(directory.projects.map((item) => [
-    lower(item.key), clientIdToKey.get(item.clientId)
-  ]));
-  for (const row of data.projects) clientKeyByProjectKey.set(lower(row.key), lower(row.clientKey));
   const seenProjectPhones = new Set();
-  const clientKeyByPhone = new Map();
-  for (const poc of snapshot.pocs) {
-    const phone = digits(poc.contactWhatsapp);
-    const project = directory.projects.find((item) => item.id === poc.projectId);
-    const clientKey = project ? clientIdToKey.get(project.clientId) : null;
-    if (phone && clientKey && !clientKeyByPhone.has(phone)) clientKeyByPhone.set(phone, clientKey);
-  }
 
   for (const row of data.clientPocs) {
     row.projectKey = String(row.projectKey || "").trim();
@@ -220,13 +208,8 @@ function validateWorkbook(snapshot, raw) {
     if (!row.contactWhatsapp) rowError(errors, "Client POCs", row.row, "whatsapp_number is required because it is the update key");
     else if (row.contactWhatsapp.length < 10 || row.contactWhatsapp.length > 15) rowError(errors, "Client POCs", row.row, "WhatsApp number must be 10-15 digits including country code");
     const projectPhoneKey = `${lower(row.projectKey)}|${row.contactWhatsapp}`;
-    const rowClientKey = clientKeyByProjectKey.get(lower(row.projectKey));
     if (row.contactWhatsapp && seenProjectPhones.has(projectPhoneKey)) {
       rowError(errors, "Client POCs", row.row, "WhatsApp number appears more than once on this project");
-    }
-    if (row.contactWhatsapp && clientKeyByPhone.has(row.contactWhatsapp)
-      && clientKeyByPhone.get(row.contactWhatsapp) !== rowClientKey) {
-      rowError(errors, "Client POCs", row.row, "WhatsApp number is already used under another client");
     }
     if (row.contactEmail && !validEmail(row.contactEmail)) rowError(errors, "Client POCs", row.row, "email is not valid");
     if (row.birthDate && !/^\d{4}-\d{2}-\d{2}$/.test(row.birthDate)) {
@@ -241,7 +224,6 @@ function validateWorkbook(snapshot, raw) {
       rowError(errors, "Client POCs", row.row, "weight_percent must be from 0 to 100");
     }
     seenProjectPhones.add(projectPhoneKey);
-    if (row.contactWhatsapp && rowClientKey) clientKeyByPhone.set(row.contactWhatsapp, rowClientKey);
   }
 
   for (const row of data.services) {

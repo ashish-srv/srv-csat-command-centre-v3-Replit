@@ -31,7 +31,7 @@ const BASE_COLUMNS = [
   { key: "revenue_generated_local", label: "Revenue Generated (Local)", width: 22 },
   { key: "services", label: "Services (Reference Only)", width: 32 },
   { key: "mandates", label: "Mandates, Targets and Service Details", width: 42, aliases: ["deliverables_target_mandate", "deliverables_target_and_mandate"] },
-  { key: "deliverables_status", label: "Deliverables Status", width: 38, aliases: ["current_status_of_deliverable_what_we_delivered"] }
+  { key: "deliverables_status", label: "Current Delivery Update", width: 38, aliases: ["deliverables_status", "current_status_of_deliverable_what_we_delivered"] }
 ];
 
 const TRAILING_COLUMNS = [

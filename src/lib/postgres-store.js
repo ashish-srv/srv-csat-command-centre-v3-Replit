@@ -7,7 +7,7 @@ const TABLES = new Set([
   "issues", "messages", "observations", "poc_levels", "project_services",
   "project_key_aliases", "projects", "service_catalog", "service_feedback", "sub_departments",
   "performance_reference_values", "client_performance_profiles", "project_performance_profiles",
-  "project_performance_kpis", "project_performance_audit"
+  "project_performance_kpis", "project_performance_audit", "app_users"
 ]);
 
 const JSON_COLUMNS = {
@@ -15,6 +15,7 @@ const JSON_COLUMNS = {
   automation_events: new Set(["payload"]),
   feedback_sessions: new Set(["conversation_state", "predicted_signals"]),
   messages: new Set(["metadata"]),
+  app_users: new Set(["permissions"]),
   project_performance_audit: new Set(["changes", "snapshot"])
 };
 

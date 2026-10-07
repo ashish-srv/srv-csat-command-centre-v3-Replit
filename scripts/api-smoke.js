@@ -277,7 +277,8 @@ const store = {
   updateIssueStatus: async (issueId, action) => ({ id: issueId, status: action === "close" ? "closed" : "open" }),
   getDashboard: async () => ({ projects: [project], metrics: { projectCount: 1 }, clusters: [], clients: [], openIssues: [], openCycles: [] }),
   getProjectPerformanceData: async () => ({
-    projects: [{ ...project, version: 0, performanceStatus: null, clientSentiment: null, kpis: [], auditHistory: [] }],
+    projects: [{ ...project, team: { amId: "ip_1" }, version: 0, performanceStatus: null, clientSentiment: null, kpis: [], auditHistory: [] }],
+    clients: [{ id: "cl_1", key: "test", name: "Test Client", activeStatus: "active" }],
     internalPocs: [{ id: "ip_1", name: "Internal Owner", active: true }],
     referenceValues: {
       client_category: [{ value: "Symbi" }, { value: "Non-Symbi" }],
@@ -292,10 +293,14 @@ const store = {
       client_sentiment: [{ value: "Positive" }],
       relationship_strength: [{ value: "Good" }],
       meeting_cadence: [{ value: "Monthly" }],
-      suggestion_frequency: [{ value: "Monthly" }]
+      suggestion_frequency: [{ value: "Monthly" }],
+      kpi_name: [{ value: "Leads" }]
     },
     financialYears: ["2026-2027"]
   }),
+  getAppUserByEmail: async (email) => String(email).toLowerCase() === "employee@srvmedia.com" && store._appUserActive
+    ? { id: "app_user_1", email: "employee@srvmedia.com", name: "SRV Employee", role: store._appUserRole, internalPocId: "ip_1", active: true }
+    : null,
   saveProjectPerformance: async (projectId, input) => {
     calls.performanceSaves.push({ projectId, input });
     return { saved: true, projectId, version: 1, changes: { "project.performance_status": { before: null, after: "On Track" } } };
@@ -349,15 +354,9 @@ const store = {
   whatsappOwner: async (phone, exceptId) => (phone === "919999999999" && exceptId !== "poc_1" ? poc : null),
   whatsappConflict: async (phone, projectId, exceptId) => {
     if (phone !== "919999999999" || exceptId === "poc_1") return null;
-    if (projectId === "prj_same_client") return null;
-    return {
-      kind: projectId === "prj_other_client" ? "different_client" : "same_project",
-      owner: poc
-    };
+    return projectId === "prj_1" ? { kind: "same_project", owner: poc } : null;
   },
-  whatsappConflictForClient: async (phone, clientId) => (
-    phone === "918888888888" && clientId !== "cl_owner" ? { kind: "different_client", owner: poc } : null
-  ),
+  whatsappConflictForClient: async () => null,
   createProject: async (input) => {
     const created = { id: `prj_new_${calls.createdProjects.length + 1}`, ...input };
     calls.createdProjects.push(created);
@@ -382,6 +381,7 @@ const store = {
   updateProjectService: async (id, input) => ({ id, ...input }),
   deleteProjectService: async (id) => { calls.deletedServices.push(id); return true; },
   servicesForProject: async (projectId) => project.services.filter((service) => service.projectId === projectId),
+  hasOpenFeedbackCycle: async () => false,
   serviceKeyExists: async (projectId, key, exceptId) => key === "ppc" && exceptId !== "svc_1",
   updateCluster: async (id, input) => (id === "clu_1" ? { id, ...input } : null),
   deleteCluster: async (id) => {
@@ -413,6 +413,8 @@ const store = {
   _inactiveFinalSweepCandidates: [],
   _expiredInactiveFinalSweeps: [],
   _messagingStatus: { enabled: true, updatedAt: null, updatedBy: null },
+  _appUserRole: "super_admin",
+  _appUserActive: true,
   _injectRapidRatingMessages: false,
   _rapidRatingMessagesInjected: false
 };
@@ -433,6 +435,7 @@ function rawReq(method, pathname, body = {}, headers = {}) {
 }
 
 let appCookie = "";
+let googleAppCookie = "";
 function req(method, pathname, body = {}, headers = {}) {
   const requestHeaders = { ...headers };
   if (appCookie && !Object.prototype.hasOwnProperty.call(requestHeaders, "cookie")) {
@@ -467,6 +470,7 @@ async function scenario(name, fn) {
       passwordConfigured: true,
       googleConfigured: false,
       authenticated: false,
+      accessAuthorized: false,
       user: null,
       sessionHours: 12
     });
@@ -520,6 +524,7 @@ async function scenario(name, fn) {
       assert.strictEqual(callback.headers.location, "/dashboard");
       assert.ok(Array.isArray(callback.headers["set-cookie"]));
       const sessionCookieHeader = callback.headers["set-cookie"][0].split(";")[0];
+      googleAppCookie = sessionCookieHeader;
       const status = await rawReq("GET", "/api/auth/status", {}, { cookie: sessionCookieHeader });
       const statusPayload = JSON.parse(status.body);
       assert.strictEqual(statusPayload.authenticated, true);
@@ -543,6 +548,41 @@ async function scenario(name, fn) {
       if (prior.secret === undefined) delete process.env.GOOGLE_CLIENT_SECRET; else process.env.GOOGLE_CLIENT_SECRET = prior.secret;
       if (prior.domains === undefined) delete process.env.GOOGLE_ALLOWED_DOMAINS; else process.env.GOOGLE_ALLOWED_DOMAINS = prior.domains;
     }
+  });
+
+  await scenario("Project User is restricted to Project Performance and creates only paused projects", async () => {
+    store._appUserRole = "project_user";
+    const portfolio = await rawReq("GET", "/api/project-performance", {}, { cookie: googleAppCookie });
+    assert.strictEqual(portfolio.statusCode, 200);
+    const dashboard = await rawReq("GET", "/api/dashboard", {}, { cookie: googleAppCookie });
+    assert.strictEqual(dashboard.statusCode, 403);
+    const created = await rawReq("POST", "/api/project-performance/projects", {
+      clientId: "cl_1",
+      key: "role-project",
+      name: "Role Project",
+      startDate: "2026-10-01",
+      endDate: "2027-03-31",
+      feedbackIntervalDays: 30
+    }, { cookie: googleAppCookie });
+    assert.strictEqual(created.statusCode, 201);
+    assert.strictEqual(JSON.parse(created.body).project.activeStatus, "paused");
+    const beforeDeletes = calls.deletedServices.length;
+    const removed = await rawReq("DELETE", "/api/project-performance/projects/prj_1/services/svc_ppc", {}, { cookie: googleAppCookie });
+    assert.strictEqual(removed.statusCode, 200);
+    assert.strictEqual(calls.deletedServices.length, beforeDeletes + 1);
+    store._appUserRole = "super_admin";
+  });
+
+  await scenario("An inactive or unassigned Google user keeps authentication but receives no application access", async () => {
+    store._appUserActive = false;
+    const status = await rawReq("GET", "/api/auth/status", {}, { cookie: googleAppCookie });
+    const payload = JSON.parse(status.body);
+    assert.strictEqual(payload.authenticated, true);
+    assert.strictEqual(payload.accessAuthorized, false);
+    assert.strictEqual(payload.user.email, "employee@srvmedia.com");
+    const portfolio = await rawReq("GET", "/api/project-performance", {}, { cookie: googleAppCookie });
+    assert.strictEqual(portfolio.statusCode, 403);
+    store._appUserActive = true;
   });
 
   await scenario("incorrect login password is rejected without a cookie", async () => {
@@ -986,6 +1026,27 @@ async function scenario(name, fn) {
     const res = await req("POST", "/api/projects/acme-ug/request-feedback", { cycleType: "pulse" });
     assert.strictEqual(res.statusCode, 201);
     assert.strictEqual(Object.hasOwn(calls.createdCycleRequests.at(-1).options, "clientPocIds"), false);
+  });
+
+  await scenario("an active session blocks a quick check-in for the same WhatsApp number on another project", async () => {
+    const guardStore = Object.create(SupabaseStore.prototype);
+    guardStore.getProject = async () => ({
+      id: "prj_second",
+      key: "second-project",
+      name: "Second Project",
+      pocs: [{ ...poc, id: "poc_second", projectId: "prj_second" }]
+    });
+    guardStore.hasAnyCycle = async () => false;
+    guardStore.getWhatsappRoutingContext = async () => ({
+      status: "active",
+      poc,
+      session: { id: "session_first", projectId: "prj_first", sessionType: "quick_checkin" }
+    });
+    guardStore.getProjectById = async () => ({ id: "prj_first", name: "First Project" });
+    await assert.rejects(
+      () => guardStore.createCycle("second-project", { cycleType: "quick_checkin" }),
+      /already has an active feedback request on First Project/i
+    );
   });
 
   await scenario("WhatsApp inbound routes phone -> POC -> session and replies", async () => {
@@ -2879,10 +2940,10 @@ async function scenario(name, fn) {
     assert.strictEqual(JSON.parse(res.body).cycles.length, 1);
   });
 
-  await scenario("automatic project-end feedback can be disabled without blocking monthly or manual cycles", async () => {
+  await scenario("project-end feedback defaults to manual-only without blocking monthly or manual cycles", async () => {
     const priorSetting = process.env.AUTO_PROJECT_END_FEEDBACK;
     const originalTargets = store.getDueFeedbackTargets;
-    process.env.AUTO_PROJECT_END_FEEDBACK = "false";
+    delete process.env.AUTO_PROJECT_END_FEEDBACK;
     store.getDueFeedbackTargets = async () => [
       { projectKey: project.key, cycleType: "project_end" },
       { projectKey: project.key, cycleType: "pulse" }
@@ -2895,6 +2956,14 @@ async function scenario(name, fn) {
         JSON.parse(due.body).targets.map((target) => target.cycleType),
         ["pulse"]
       );
+
+      process.env.AUTO_PROJECT_END_FEEDBACK = "true";
+      const deliberatelyEnabled = await req("GET", "/api/automation/due-feedback");
+      assert.deepStrictEqual(
+        JSON.parse(deliberatelyEnabled.body).targets.map((target) => target.cycleType),
+        ["project_end", "pulse"]
+      );
+      process.env.AUTO_PROJECT_END_FEEDBACK = "false";
 
       const scheduled = await req("POST", "/api/automation/create-due-sessions", {});
       assert.strictEqual(scheduled.statusCode, 201);
@@ -3915,9 +3984,9 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 201);
   });
 
-  await scenario("a WhatsApp number cannot be reused under another client", async () => {
+  await scenario("the same POC WhatsApp number can be used under another client", async () => {
     const res = await req("POST", "/api/admin/pocs", { projectId: "prj_other_client", name: "Someone", contactWhatsapp: "+91 99999 99999" }, PIN);
-    assert.strictEqual(res.statusCode, 409);
+    assert.strictEqual(res.statusCode, 201);
   });
 
   await scenario("editing a POC may keep its own number", async () => {

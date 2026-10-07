@@ -130,6 +130,20 @@ async function run() {
   const sharedClientPocResult = await importAdminWorkbook(fakeStore(), sharedClientPoc);
   assert.equal(sharedClientPocResult.ok, true, "one client POC may belong to several projects of the same client");
 
+  const sharedCrossClientPoc = validWorkbook();
+  sharedCrossClientPoc.clients.push({ row: 6, key: "sls-nagpur", name: "SLS Nagpur", clusterName: "Education", activeStatus: "active" });
+  sharedCrossClientPoc.projects.push({
+    ...sharedCrossClientPoc.projects[0], row: 6, clientKey: "sls-nagpur", key: "SLSNAGPUR", name: "SLS Nagpur Marketing"
+  });
+  sharedCrossClientPoc.clientPocs.push({
+    ...sharedCrossClientPoc.clientPocs[0], row: 6, projectKey: "SLSNAGPUR"
+  });
+  sharedCrossClientPoc.services.push({
+    ...sharedCrossClientPoc.services[0], row: 6, projectKey: "SLSNAGPUR"
+  });
+  const sharedCrossClientResult = await importAdminWorkbook(fakeStore(), sharedCrossClientPoc);
+  assert.equal(sharedCrossClientResult.ok, true, "one POC may belong to projects under different clients");
+
   const loop = validWorkbook();
   loop.internalPocs[0].reportingManagerEmail = "owner@srvmedia.com";
   const loopResult = await importAdminWorkbook(fakeStore(), loop);

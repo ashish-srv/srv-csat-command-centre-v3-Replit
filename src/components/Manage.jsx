@@ -5,6 +5,9 @@ import { formatCycleType, formatDate, formatPocWeightShare } from "../format";
 import { parseCsatWorkbook } from "../lib/workbook-import";
 import { FilterBar, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, LoadingBlock, Panel } from "./Ui.jsx";
+import {
+  APP_PERMISSION_LABELS, defaultPermissions, hasPermission, permissionsForRole
+} from "../permissions";
 
 const EMPTY_INTERNAL = {
   name: "", email: "", phone: "", clusterId: "",
@@ -22,6 +25,23 @@ const EMPTY_CLUSTER = { name: "" };
 const EMPTY_PROJECT = {
   clientId: "", key: "", name: "",
   activeStatus: "active", startDate: "", endDate: "", feedbackIntervalDays: 30
+};
+
+const PERFORMANCE_STANDARD_LABELS = {
+  client_group: "Client Group",
+  client_category: "Client Category",
+  project_type: "Project Type",
+  revenue_category: "Revenue Category",
+  portfolio_type: "Portfolio Type",
+  currency: "Currency",
+  performance_status: "Performance Status",
+  current_phase: "Current Phase",
+  campaign_status: "Campaign Status",
+  client_sentiment: "Client Sentiment",
+  relationship_strength: "Relationship Strength",
+  meeting_cadence: "Meeting Cadence",
+  suggestion_frequency: "Suggestion Frequency",
+  kpi_name: "KPI Name"
 };
 
 const EMPTY_POC = {
@@ -1140,7 +1160,14 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
   );
 }
 
-export default function Manage({ onReload }) {
+export default function Manage({ onReload, currentUser = null }) {
+  const canManageRecords = hasPermission(currentUser, "manage_records");
+  const canManagePocs = hasPermission(currentUser, "manage_pocs");
+  const canManageInternalPocs = hasPermission(currentUser, "manage_internal_pocs");
+  const canManageCatalogues = hasPermission(currentUser, "manage_catalogues");
+  const canBulkSend = hasPermission(currentUser, "bulk_sends");
+  const canManageUsers = hasPermission(currentUser, "manage_project_users");
+  const isSuperAdmin = currentUser?.role === "super_admin";
   const [unlocked, setUnlocked] = useState(hasAdminPin());
   const [directory, setDirectory] = useState(null);
   const [clusterFilterId, setClusterFilterId] = useState("");
@@ -1181,6 +1208,10 @@ export default function Manage({ onReload }) {
   const [cleanupPin, setCleanupPin] = useState("");
   const [cleanupPinError, setCleanupPinError] = useState("");
   const [cleaning, setCleaning] = useState("");
+  const [appUsers, setAppUsers] = useState([]);
+  const [performanceStandards, setPerformanceStandards] = useState([]);
+  const [newAppUser, setNewAppUser] = useState({ email: "", name: "", role: "project_user", internalPocId: "", permissions: defaultPermissions("project_user") });
+  const [newStandard, setNewStandard] = useState({ category: "performance_status", value: "" });
   const formRef = useRef(null);
   const workbookInputRef = useRef(null);
 
@@ -1208,8 +1239,14 @@ export default function Manage({ onReload }) {
   async function loadAll(keepClient = clientId) {
     setLoading(true);
     try {
-      const data = await apiGet("/api/admin/directory");
+      const [data, userData, standardData] = await Promise.all([
+        apiGet("/api/admin/directory"),
+        canManageUsers ? apiAdminGet("/api/admin/app-users") : Promise.resolve({ users: [] }),
+        canManageCatalogues ? apiAdminGet("/api/admin/performance-standards") : Promise.resolve({ values: [] })
+      ]);
       setDirectory(data);
+      setAppUsers(userData.users || []);
+      setPerformanceStandards(standardData.values || []);
       setPocControlRows((data.clientPocs || []).map((poc) => ({ ...poc })));
       const target = keepClient || "";
       setClientId(target);
@@ -1224,6 +1261,84 @@ export default function Manage({ onReload }) {
       showToast(loadError.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function addAppUser() {
+    setSaving(true);
+    try {
+      await apiWrite("/api/admin/app-users", newAppUser, "POST");
+      setNewAppUser({ email: "", name: "", role: "project_user", internalPocId: "", permissions: defaultPermissions("project_user") });
+      showToast("Application user added. They can sign in with this Google email.");
+      await loadAll(clientId);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveAppUser(user) {
+    setSaving(true);
+    try {
+      await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {
+        name: user.name,
+        role: user.role,
+        permissions: user.permissions,
+        internalPocId: user.internalPocId || null,
+        active: user.active
+      }, "PATCH");
+      showToast("Application user updated.");
+      await loadAll(clientId);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addPerformanceStandard() {
+    setSaving(true);
+    try {
+      await apiWrite("/api/admin/performance-standards", newStandard, "POST");
+      setNewStandard((current) => ({ ...current, value: "" }));
+      showToast("Project Performance standard added.");
+      await loadAll(clientId);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function savePerformanceStandard(item) {
+    setSaving(true);
+    try {
+      await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {
+        value: item.value,
+        sortOrder: item.sortOrder,
+        active: item.active
+      }, "PATCH");
+      showToast("Standard value updated.");
+      await loadAll(clientId);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removePerformanceStandard(item) {
+    if (!window.confirm(`Remove ${item.value} from future selections? Values already used by projects will be archived, not erased.`)) return;
+    setSaving(true);
+    try {
+      const result = await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {}, "DELETE");
+      showToast(result.action === "archived" ? "Value is in use, so it was safely archived." : "Unused standard value deleted.");
+      await loadAll(clientId);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -1893,9 +2008,17 @@ export default function Manage({ onReload }) {
   const departments = directory?.departments || [];
   const subDepartments = directory?.subDepartments || [];
   const peopleById = new Map(people.map((person) => [person.id, person]));
+  const manageAccessClasses = [
+    !canManageRecords && "deny-manage-records",
+    !canManagePocs && "deny-manage-pocs",
+    !canManageInternalPocs && "deny-manage-internal-pocs",
+    !canManageCatalogues && "deny-manage-catalogues",
+    !canBulkSend && "deny-bulk-sends",
+    !canManageUsers && "deny-manage-users"
+  ].filter(Boolean).join(" ");
 
   return (
-    <>
+    <div className={`manage-page ${manageAccessClasses}`}>
       <div className="topbar">
         <div>
           <h2>Manage records</h2>
@@ -1928,32 +2051,110 @@ export default function Manage({ onReload }) {
       </FilterBar>
 
       <nav className="manage-section-nav" aria-label="Manage sections">
-        <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button>
-        <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button>
-        <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button>
-        <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button>
-        <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Project Services</button>
-        <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button>
-        <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button>
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button> : null}
+        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
+        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Project Services</button> : null}
+        {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
+        {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
+        {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
       </nav>
+
+      {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel">
+        <details>
+          <summary>
+            <span><strong>Application Users</strong><small>Google access · {appUsers.filter((user) => user.active).length} active</small></span>
+          </summary>
+          <div className="admin-collapsible-body">
+            <p className="form-note">Super Admin always has full access. Super Admin can configure Admins and Project Users. Admins with this permission can manage Project Users only and can never change an Admin or Super Admin account.</p>
+            <div className="form-grid app-user-add-row">
+              <Field label="Google Workspace Email"><input type="email" value={newAppUser.email} onChange={(event) => setNewAppUser((current) => ({ ...current, email: event.target.value }))} placeholder="name@srvmedia.com" /></Field>
+              <Field label="Name"><input value={newAppUser.name} onChange={(event) => setNewAppUser((current) => ({ ...current, name: event.target.value }))} /></Field>
+              <Field label="Role"><select value={newAppUser.role} onChange={(event) => { const role = event.target.value; setNewAppUser((current) => ({ ...current, role, permissions: defaultPermissions(role) })); }}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select></Field>
+              {newAppUser.role === "project_user" ? <Field label="Internal POC"><select value={newAppUser.internalPocId} onChange={(event) => setNewAppUser((current) => ({ ...current, internalPocId: event.target.value }))}><option value="">Select person</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></Field> : null}
+              <Button icon={Plus} variant="primary" onClick={addAppUser} disabled={saving || !newAppUser.email.trim() || (newAppUser.role === "project_user" && !newAppUser.internalPocId)}>Add User</Button>
+            </div>
+            <div className="app-permission-grid new-user-permissions">
+              {permissionsForRole(newAppUser.role).map((permission) => <label key={permission}><input type="checkbox" checked={newAppUser.role === "super_admin" || newAppUser.permissions?.[permission] === true} disabled={newAppUser.role === "super_admin"} onChange={(event) => setNewAppUser((current) => ({ ...current, permissions: { ...current.permissions, [permission]: event.target.checked } }))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
+            </div>
+            <div className="admin-control-scroll">
+              {appUsers.map((user) => (
+                <details className="app-user-card" key={user.id}>
+                  <summary><span><strong>{user.email}</strong><small>{user.name || "Name not set"}</small></span><span className={`role-badge role-${user.role}`}>{user.role.replace("_", " ")}</span></summary>
+                  <div className="app-user-card-body">
+                    <div className="app-user-row">
+                      <input value={user.name || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item))} aria-label={`Name for ${user.email}`} />
+                      <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => { const role = event.target.value; setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, role, permissions: defaultPermissions(role) } : item)); }} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
+                      {user.role === "project_user" ? <select value={user.internalPocId || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: event.target.value } : item))} aria-label={`Internal POC for ${user.email}`}><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : null}
+                      <select value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></select>
+                      <Button onClick={() => saveAppUser(user)} disabled={saving}>Save User</Button>
+                    </div>
+                    <div className="app-permission-grid">
+                      {permissionsForRole(user.role).map((permission) => <label key={permission}><input type="checkbox" checked={user.role === "super_admin" || user.permissions?.[permission] === true} disabled={user.role === "super_admin"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, permissions: { ...item.permissions, [permission]: event.target.checked } } : item))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
+                    </div>
+                  </div>
+                </details>
+              ))}
+              {!appUsers.length ? <EmptyState title="No Google users assigned yet" text="Add your own Google email as Super Admin before removing the password-login secret." /> : null}
+            </div>
+          </div>
+        </details>
+      </section> : null}
+
+      {canManageCatalogues ? <section id="manage-performance-standards" className="admin-collapsible-panel">
+        <details>
+          <summary>
+            <span><strong>Project Performance Standards</strong><small>Controlled dropdown values · Super Admin only</small></span>
+          </summary>
+          <div className="admin-collapsible-body">
+            <div className="form-grid standard-add-row">
+              <Field label="Standard"><select value={newStandard.category} onChange={(event) => setNewStandard({ category: event.target.value, value: "" })}>{Object.entries(PERFORMANCE_STANDARD_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
+              <Field label="New Value"><input value={newStandard.value} onChange={(event) => setNewStandard((current) => ({ ...current, value: event.target.value }))} /></Field>
+              <Button icon={Plus} variant="primary" onClick={addPerformanceStandard} disabled={saving || !newStandard.value.trim()}>Add Value</Button>
+            </div>
+            <div className="admin-control-scroll standards-scroll">
+              {Object.entries(PERFORMANCE_STANDARD_LABELS).map(([category, label]) => {
+                const values = performanceStandards.filter((item) => item.category === category);
+                return (
+                  <details className="standard-category" key={category}>
+                    <summary><strong>{label}</strong><small>{values.filter((item) => item.active).length} active · {values.length} total</small></summary>
+                    <div className="standard-value-list">
+                      {values.map((item) => (
+                        <div className="standard-value-row" key={item.id}>
+                          <input value={item.value} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, value: event.target.value } : value))} />
+                          <select value={item.active ? "active" : "inactive"} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, active: event.target.value === "active" } : value))}><option value="active">Active</option><option value="inactive">Archived</option></select>
+                          <Button onClick={() => savePerformanceStandard(item)} disabled={saving}>Save</Button>
+                          <button type="button" className="icon-button danger" onClick={() => removePerformanceStandard(item)} disabled={saving} aria-label={`Remove ${item.value}`}><Trash2 size={15} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+            </div>
+          </div>
+        </details>
+      </section> : null}
 
       {/* Setting a project up has an order, and doing it out of order leaves
           a project that cannot be sent: no POC means no recipient, no service
           owner means an issue nobody hears about. */}
-      {clientId ? (
+      {clientId && (canManageRecords || canManagePocs || canManageInternalPocs) ? (
         <nav className="setup-steps" aria-label="Manage section shortcuts">
-          <button type="button" className={projects.length ? "done" : "todo"} onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>
+          {canManageRecords ? <button type="button" className={projects.length ? "done" : "todo"} onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>
             1. Projects{projects.length ? ` (${projects.length})` : ""}
-          </button>
-          <button type="button" className={pocs.length ? "done" : "todo"} onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>
+          </button> : null}
+          {canManagePocs ? <button type="button" className={pocs.length ? "done" : "todo"} onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>
             2. Client POCs{pocs.length ? ` (${pocs.length})` : ""}
-          </button>
-          <button type="button" className={services.length ? "done" : "todo"} onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>
+          </button> : null}
+          {canManageRecords ? <button type="button" className={services.length ? "done" : "todo"} onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>
             3. Services{services.length ? ` (${services.length})` : ""}
-          </button>
-          <button type="button" className={peopleOnThisClient.length ? "done" : "todo"} onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>
+          </button> : null}
+          {canManageInternalPocs ? <button type="button" className={peopleOnThisClient.length ? "done" : "todo"} onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>
             4. Internal owners{peopleOnThisClient.length ? ` (${peopleOnThisClient.length})` : ""}
-          </button>
+          </button> : null}
         </nav>
       ) : null}
 
@@ -2022,6 +2223,7 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-poc-influence"
         title="POC scoring influence"
         badge="Per project"
         className="span-12"
@@ -2047,6 +2249,7 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-workbook"
         title="Bulk Excel onboarding and updates"
         badge="Multiple clients in one upload"
         className="span-12"
@@ -2091,6 +2294,7 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-clients"
         title="Clients and clusters"
         badge={`${filteredClients.length} displayed · ${clients.length} clients · ${clusters.length} clusters`}
         className="span-12"
@@ -2664,6 +2868,7 @@ export default function Manage({ onReload }) {
       </Panel>
 
       <Panel
+        id="manage-cleanup"
         title="Project data cleanup"
         badge="Permanent"
         className="span-12"
@@ -2903,6 +3108,6 @@ export default function Manage({ onReload }) {
         onConfirm={runConfirmedCleanup}
       />
       {toast ? <div className="toast visible">{toast}</div> : null}
-    </>
+    </div>
   );
 }
