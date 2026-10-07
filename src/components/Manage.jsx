@@ -1240,6 +1240,9 @@ export default function Manage({ onReload, currentUser = null }) {
   const [newAppUsers, setNewAppUsers] = useState(() => [createAppUserDraft()]);
   const [standardDrafts, setStandardDrafts] = useState(initialStandardDrafts);
   const [selectedStandardIds, setSelectedStandardIds] = useState([]);
+  const [projectSearch, setProjectSearch] = useState("");
+  const [serviceCatalogSearch, setServiceCatalogSearch] = useState("");
+  const [internalPocSearch, setInternalPocSearch] = useState("");
   const formRef = useRef(null);
   const workbookInputRef = useRef(null);
 
@@ -1299,14 +1302,19 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function addAppUsers() {
-    const pending = newAppUsers.filter((row) => row.email.trim());
+    const pending = newAppUsers.filter((row) => row.email.trim() || row.internalPocId);
     if (!pending.length) {
-      showToast("Enter at least one Google Workspace email.");
+      showToast("Select at least one Internal POC or enter an Admin email.");
       return;
     }
     const missingInternalPoc = pending.find((row) => row.role === "project_user" && !row.internalPocId);
     if (missingInternalPoc) {
       showToast(`Select an Internal POC for ${missingInternalPoc.email}.`);
+      return;
+    }
+    const missingGoogleEmail = pending.find((row) => !row.email.trim());
+    if (missingGoogleEmail) {
+      showToast("That Internal POC does not have an email. Add their Google Workspace email under Internal POCs first.");
       return;
     }
     setSaving(true);
@@ -2133,6 +2141,36 @@ export default function Manage({ onReload, currentUser = null }) {
   const departments = directory?.departments || [];
   const subDepartments = directory?.subDepartments || [];
   const peopleById = new Map(people.map((person) => [person.id, person]));
+  const projectNeedle = projectSearch.trim().toLowerCase();
+  const displayedProjects = visibleProjects.filter((project) => !projectNeedle || [
+    project.name,
+    project.key,
+    project.activeStatus,
+    clientsById.get(project.clientId)?.name,
+    project.startDate,
+    project.endDate
+  ].some((value) => String(value || "").toLowerCase().includes(projectNeedle)));
+  const serviceCatalogNeedle = serviceCatalogSearch.trim().toLowerCase();
+  const displayedServiceCatalog = serviceCatalog.filter((item) => !serviceCatalogNeedle || [
+    item.name,
+    item.serviceKey,
+    item.active ? "active" : "archived"
+  ].some((value) => String(value || "").toLowerCase().includes(serviceCatalogNeedle)));
+  const internalPocNeedle = internalPocSearch.trim().toLowerCase();
+  const displayedPeople = visiblePeople.filter((person) => {
+    const department = departments.find((item) => item.id === person.departmentId);
+    const subDepartment = subDepartments.find((item) => item.id === person.subDepartmentId);
+    const manager = peopleById.get(person.reportingManagerId);
+    return !internalPocNeedle || [
+      person.name,
+      person.email,
+      person.phone,
+      department?.name,
+      subDepartment?.name,
+      manager?.name,
+      person.active ? "active" : "inactive"
+    ].some((value) => String(value || "").toLowerCase().includes(internalPocNeedle));
+  });
   const manageAccessClasses = [
     !canManageRecords && "deny-manage-records",
     !canManagePocs && "deny-manage-pocs",
@@ -2196,17 +2234,16 @@ export default function Manage({ onReload, currentUser = null }) {
             <p className="form-note">Super Admin always has full access. Super Admin can configure Admins and Project Users. Admins with this permission can manage Project Users only and can never change an Admin or Super Admin account.</p>
             <div className="bulk-editor-block">
               <div className="bulk-editor-heading">
-                <span><strong>Add multiple users</strong><small>Enter all users and roles, then add them together. Role permissions can be adjusted below.</small></span>
+                <span><strong>Add multiple users</strong><small>For a Project User, select the Internal POC and their saved name and email are used automatically. Enter details manually only for Admin or Super Admin.</small></span>
               </div>
               <div className="app-user-draft-list">
                 {newAppUsers.map((row) => (
                   <div className="app-user-draft-row" key={row.draftId}>
-                    <input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" />
-                    <input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder="Name" aria-label="User name" />
                     <select value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", permissions: defaultPermissions(role) }); }} aria-label="Application role">
                       <option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}
                     </select>
-                    {row.role === "project_user" ? <select value={row.internalPocId} onChange={(event) => updateNewAppUser(row.draftId, { internalPocId: event.target.value })} aria-label="Internal POC"><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">All projects</span>}
+                    {row.role === "project_user" ? <select value={row.internalPocId} onChange={(event) => { const internalPocId = event.target.value; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { internalPocId, name: person?.name || "", email: person?.email || "" }); }} aria-label="Internal POC"><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">Access across projects</span>}
+                    {row.role === "project_user" ? <span className={`app-user-linked-identity ${row.internalPocId && !row.email ? "missing-email" : ""}`}><strong>{row.name || "Select a person"}</strong><small>{row.email || (row.internalPocId ? "Email missing in Internal POCs" : "Name and email will load automatically")}</small></span> : <span className="app-user-manual-identity"><input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder="Name" aria-label="User name" /><input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" /></span>}
                     <select value={row.active ? "active" : "inactive"} onChange={(event) => updateNewAppUser(row.draftId, { active: event.target.value === "active" })} aria-label="User status"><option value="active">Active</option><option value="inactive">Inactive</option></select>
                     <button type="button" className="icon-button danger" disabled={newAppUsers.length === 1} onClick={() => setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId))} aria-label="Remove pending user"><Trash2 size={15} /></button>
                   </div>
@@ -2214,7 +2251,7 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
               <div className="button-row bulk-editor-actions">
                 <Button icon={Plus} onClick={() => setNewAppUsers((current) => [...current, createAppUserDraft()])}>Add another user</Button>
-                <Button variant="primary" onClick={addAppUsers} disabled={saving || !newAppUsers.some((row) => row.email.trim())}>{saving ? "Adding users…" : `Add ${newAppUsers.filter((row) => row.email.trim()).length || ""} user${newAppUsers.filter((row) => row.email.trim()).length === 1 ? "" : "s"}`.trim()}</Button>
+                <Button variant="primary" onClick={addAppUsers} disabled={saving || !newAppUsers.some((row) => row.email.trim() || row.internalPocId)}>{saving ? "Adding users…" : `Add ${newAppUsers.filter((row) => row.email.trim() || row.internalPocId).length || ""} user${newAppUsers.filter((row) => row.email.trim() || row.internalPocId).length === 1 ? "" : "s"}`.trim()}</Button>
               </div>
             </div>
             <div className="bulk-editor-heading existing-users-heading">
@@ -2575,7 +2612,7 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-service-catalog"
         title="Service catalogue"
-        badge={`${serviceCatalog.filter((item) => item.active).length} active · ${serviceCatalog.length} total`}
+        badge={`${displayedServiceCatalog.length} displayed · ${serviceCatalog.filter((item) => item.active).length} active · ${serviceCatalog.length} total`}
         className="span-12"
         action={<Button icon={Plus} onClick={() => { closeForms(); setServiceCatalogBatch([{ name: "" }]); }}>Add standard services</Button>}
       >
@@ -2604,6 +2641,10 @@ export default function Manage({ onReload, currentUser = null }) {
             />
           </div>
         ) : null}
+        <div className="manage-section-search">
+          <Field label="Search services"><input value={serviceCatalogSearch} onChange={(event) => setServiceCatalogSearch(event.target.value)} placeholder="Service name, key or status" /></Field>
+          {serviceCatalogSearch ? <Button onClick={() => setServiceCatalogSearch("")}>Clear search</Button> : null}
+        </div>
         <div className="manage-service-catalog-scroll">
         <div className="dtable manage-service-catalog">
           <div className="dtable-head">
@@ -2612,7 +2653,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <span>Status</span>
             <span />
           </div>
-          {serviceCatalog.map((item) => (
+          {displayedServiceCatalog.map((item) => (
             <div className="dtable-row" key={item.id}>
               <strong>{item.name}</strong>
               <span className="mono">{item.serviceKey}</span>
@@ -2627,7 +2668,7 @@ export default function Manage({ onReload, currentUser = null }) {
               </span>
             </div>
           ))}
-          {!serviceCatalog.length ? <EmptyState title="No standard services" text="Add the services that projects can use." /> : null}
+          {!displayedServiceCatalog.length ? <EmptyState title={serviceCatalog.length ? "No services match this search" : "No standard services"} text={serviceCatalog.length ? "Clear the search to see every standard service." : "Add the services that projects can use."} /> : null}
         </div>
         </div>
       </Panel>
@@ -2635,7 +2676,7 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-projects"
         title="Projects"
-        badge={`${visibleProjects.length} displayed · ${allProjects.length} total`}
+        badge={`${displayedProjects.length} displayed · ${allProjects.length} total`}
         className="span-12"
         action={
           <div className="button-row">
@@ -2695,6 +2736,10 @@ export default function Manage({ onReload, currentUser = null }) {
             />
           </div>
         ) : null}
+        <div className="manage-section-search">
+          <Field label="Search projects"><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Project, ID, client, status or date" /></Field>
+          {projectSearch ? <Button onClick={() => setProjectSearch("")}>Clear search</Button> : null}
+        </div>
         <div className="manage-projects-scroll">
         <div className="dtable manage-projects">
           <div className="dtable-head">
@@ -2707,7 +2752,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <span>Interval</span>
             <span />
           </div>
-          {visibleProjects.map((project) => (
+          {displayedProjects.map((project) => (
             <div key={project.id} className="dtable-row">
               <strong>{project.name}</strong>
               <span className="mono">{project.key}</span>
@@ -2738,10 +2783,10 @@ export default function Manage({ onReload, currentUser = null }) {
               </button>
             </div>
           ))}
-          {!visibleProjects.length ? (
+          {!displayedProjects.length ? (
             <EmptyState
-              title="No projects match these filters"
-              text="Clear the client or cluster filter, or add a project for the selected client."
+              title={visibleProjects.length ? "No projects match this search" : "No projects match these filters"}
+              text={visibleProjects.length ? "Clear the project search to see all filtered projects." : "Clear the client or cluster filter, or add a project for the selected client."}
             />
           ) : null}
         </div>
@@ -2910,7 +2955,7 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-internal-pocs"
         title="Internal POCs"
-        badge={`${visiblePeople.length} displayed${showAllInternal ? ` · ${people.length} across the agency` : ` · ${peopleOnThisClient.length} on this client`}`}
+        badge={`${displayedPeople.length} displayed${showAllInternal ? ` · ${people.length} across the agency` : ` · ${peopleOnThisClient.length} on this client`}`}
         className="span-12"
         action={
           <div className="button-row">
@@ -2919,8 +2964,8 @@ export default function Manage({ onReload, currentUser = null }) {
             </button>
             <Button
               icon={Pencil}
-              disabled={!visiblePeople.length}
-              onClick={() => { closeForms(); setInternalBatch(internalPocRowsForBatch(visiblePeople)); }}
+              disabled={!displayedPeople.length}
+              onClick={() => { closeForms(); setInternalBatch(internalPocRowsForBatch(displayedPeople)); }}
             >
               Edit displayed internal POCs
             </Button>
@@ -2960,6 +3005,11 @@ export default function Manage({ onReload, currentUser = null }) {
             />
           </div>
         ) : null}
+        <div className="manage-section-search">
+          <Field label="Search internal POCs"><input value={internalPocSearch} onChange={(event) => setInternalPocSearch(event.target.value)} placeholder="Name, email, phone, department or manager" /></Field>
+          {internalPocSearch ? <Button onClick={() => setInternalPocSearch("")}>Clear search</Button> : null}
+        </div>
+        <div className="manage-internal-pocs-scroll">
         <div className="dtable manage-internal">
           <div className="dtable-head">
             <span>Name</span>
@@ -2969,7 +3019,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <span>Active</span>
             <span />
           </div>
-          {visiblePeople.map((person) => {
+          {displayedPeople.map((person) => {
             const dept = departments.find((item) => item.id === person.departmentId);
             const manager = peopleById.get(person.reportingManagerId);
             return (
@@ -3003,14 +3053,13 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
             );
           })}
-          {!visiblePeople.length ? (
+          {!displayedPeople.length ? (
             <EmptyState
-              title={clusterFilterId ? "No internal POCs match this cluster" : showAllInternal ? "No internal POCs" : "Nobody assigned to this client"}
-              text={showAllInternal
-                ? "Add your service owners so alerts have somewhere to go."
-                : "Internal POCs appear here once they own a service on one of this client's projects."}
+              title={visiblePeople.length ? "No internal POCs match this search" : clusterFilterId ? "No internal POCs match this cluster" : showAllInternal ? "No internal POCs" : "Nobody assigned to this client"}
+              text={visiblePeople.length ? "Clear the search to see all filtered Internal POCs." : showAllInternal ? "Add your service owners so alerts have somewhere to go." : "Internal POCs appear here once they own a service on one of this client's projects."}
             />
           ) : null}
+        </div>
         </div>
         <div className="button-row section-bottom-actions">
           <Button icon={Plus} onClick={() => { closeForms(); setInternalForm({ ...EMPTY_INTERNAL, clusterId: clusterFilterId }); }}>
