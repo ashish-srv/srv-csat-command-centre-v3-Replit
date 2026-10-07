@@ -42,6 +42,19 @@ export async function apiPost(path, body = {}) {
   return parseResponse(response);
 }
 
+export async function apiPut(path, body = {}) {
+  const response = await fetch(path, {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  return parseResponse(response);
+}
+
 // The admin PIN is kept in memory for the tab's lifetime only - never stored.
 let adminPin = "";
 

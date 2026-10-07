@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { OAuth2Client } = require("google-auth-library");
 const { createStore } = require("../lib/store");
 const { MAX_REMINDERS } = require("../lib/supabase-store");
 const { processWhatsAppReply, getConversationState, buildChecklist, applyCaptured, applyServiceScopeDecision, applyTurnProgress, isEverythingCovered, soundsLikeFarewell, isMoveOnReply, overallRatingQuestion, projectEndReviewQuestion, buildAnalysis, detectors, STATES, GUARDRAILS, CLOSING_GRACE_MS, DEFERRAL_REPLY, SERVICE_SCOPE_DECISIONS, SERVICE_SCOPE_QUESTION } = require("../lib/whatsapp-state-machine");
@@ -1458,6 +1459,18 @@ function error(statusCode, message, details) {
   return json(statusCode, { error: message, details });
 }
 
+function redirect(statusCode, location, headers = {}) {
+  return {
+    statusCode,
+    headers: {
+      location,
+      "cache-control": "no-store",
+      ...headers
+    },
+    body: ""
+  };
+}
+
 function trimSlash(value) {
   return String(value || "").replace(/\/$/, "");
 }
@@ -1476,7 +1489,9 @@ function headerValue(headers, name) {
 }
 
 const APP_SESSION_COOKIE = "srv_csat_session";
+const GOOGLE_OAUTH_STATE_COOKIE = "srv_csat_google_state";
 const APP_SESSION_TTL_SECONDS = 12 * 60 * 60;
+const GOOGLE_OAUTH_STATE_TTL_SECONDS = 10 * 60;
 
 function appLoginPassword() {
   const value = String(process.env.APP_LOGIN_PASSWORD || "");
@@ -1485,7 +1500,31 @@ function appLoginPassword() {
 
 function appSessionSecret() {
   const separateSecret = String(process.env.APP_SESSION_SECRET || "");
-  return separateSecret.length >= 16 ? separateSecret : appLoginPassword();
+  const commonSecret = String(process.env.SESSION_SECRET || "");
+  if (separateSecret.length >= 16) return separateSecret;
+  if (commonSecret.length >= 16) return commonSecret;
+  return appLoginPassword();
+}
+
+function googleAllowedDomains() {
+  return String(process.env.GOOGLE_ALLOWED_DOMAINS || process.env.GOOGLE_ALLOWED_DOMAIN || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase().replace(/^@/, ""))
+    .filter(Boolean);
+}
+
+function googleOAuthSettings(baseUrl) {
+  const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
+  const allowedDomains = googleAllowedDomains();
+  const redirectUri = String(process.env.GOOGLE_REDIRECT_URI || "").trim()
+    || `${trimSlash(baseUrl)}/api/auth/google/callback`;
+  const configured = Boolean(clientId && clientSecret && allowedDomains.length && appSessionSecret());
+  return { configured, clientId, clientSecret, allowedDomains, redirectUri };
+}
+
+function appAuthenticationConfigured(baseUrl) {
+  return Boolean(appLoginPassword() || googleOAuthSettings(baseUrl).configured);
 }
 
 function safeEqual(left, right) {
@@ -1500,11 +1539,27 @@ function signSessionPayload(payload) {
   return crypto.createHmac("sha256", secret).update(payload).digest("base64url");
 }
 
-function createAppSessionToken(now = Date.now()) {
-  if (!appLoginPassword()) return null;
+function createAppSessionToken(now = Date.now(), user = null) {
+  if (!appSessionSecret()) return null;
   const payload = Buffer.from(JSON.stringify({
     exp: now + (APP_SESSION_TTL_SECONDS * 1000),
-    nonce: crypto.randomBytes(16).toString("base64url")
+    nonce: crypto.randomBytes(16).toString("base64url"),
+    user: user ? {
+      provider: user.provider || "google",
+      sub: user.sub || null,
+      email: user.email || null,
+      name: user.name || null,
+      hostedDomain: user.hostedDomain || null
+    } : null
+  })).toString("base64url");
+  return `${payload}.${signSessionPayload(payload)}`;
+}
+
+function createGoogleOauthState(now = Date.now()) {
+  if (!appSessionSecret()) return null;
+  const payload = Buffer.from(JSON.stringify({
+    exp: now + (GOOGLE_OAUTH_STATE_TTL_SECONDS * 1000),
+    nonce: crypto.randomBytes(24).toString("base64url")
   })).toString("base64url");
   return `${payload}.${signSessionPayload(payload)}`;
 }
@@ -1523,20 +1578,32 @@ function readCookie(headers, name) {
   return null;
 }
 
-function verifyAppSessionToken(token, now = Date.now()) {
+function readSignedPayload(token, now = Date.now()) {
   const [payload, signature, ...extra] = String(token || "").split(".");
   const expectedSignature = payload ? signSessionPayload(payload) : null;
-  if (!payload || !signature || !expectedSignature || extra.length || !safeEqual(signature, expectedSignature)) return false;
+  if (!payload || !signature || !expectedSignature || extra.length || !safeEqual(signature, expectedSignature)) return null;
   try {
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return Number.isFinite(decoded.exp) && decoded.exp > now;
+    return Number.isFinite(decoded.exp) && decoded.exp > now ? decoded : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function verifyAppSessionToken(token, now = Date.now()) {
+  return Boolean(readSignedPayload(token, now));
+}
+
+function currentAppSession(headers) {
+  return readSignedPayload(readCookie(headers, APP_SESSION_COOKIE));
 }
 
 function isAppAuthenticated(headers) {
   return verifyAppSessionToken(readCookie(headers, APP_SESSION_COOKIE));
+}
+
+function currentAppUser(headers) {
+  return currentAppSession(headers)?.user || null;
 }
 
 function sessionCookie(token, baseUrl) {
@@ -1547,6 +1614,16 @@ function sessionCookie(token, baseUrl) {
 function expiredSessionCookie(baseUrl) {
   const secure = String(baseUrl || "").startsWith("https://") ? "; Secure" : "";
   return `${APP_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=0`;
+}
+
+function googleOauthStateCookie(token, baseUrl) {
+  const secure = String(baseUrl || "").startsWith("https://") ? "; Secure" : "";
+  return `${GOOGLE_OAUTH_STATE_COOKIE}=${encodeURIComponent(token)}; Path=/api/auth/google; HttpOnly; SameSite=Lax${secure}; Max-Age=${GOOGLE_OAUTH_STATE_TTL_SECONDS}`;
+}
+
+function expiredGoogleOauthStateCookie(baseUrl) {
+  const secure = String(baseUrl || "").startsWith("https://") ? "; Secure" : "";
+  return `${GOOGLE_OAUTH_STATE_COOKIE}=; Path=/api/auth/google; HttpOnly; SameSite=Lax${secure}; Max-Age=0`;
 }
 
 function withResponseHeaders(response, headers) {
@@ -3247,26 +3324,105 @@ async function handleApiRequest(request) {
   }
 
   if (method === "GET" && pathname === "/api/auth/status") {
-    const configured = Boolean(appLoginPassword());
+    const passwordConfigured = Boolean(appLoginPassword());
+    const googleSettings = googleOAuthSettings(baseUrl);
+    const configured = passwordConfigured || googleSettings.configured;
+    const session = configured ? currentAppSession(request.headers) : null;
     return withResponseHeaders(
       json(200, {
         configured,
-        authenticated: configured && isAppAuthenticated(request.headers),
+        passwordConfigured,
+        googleConfigured: googleSettings.configured,
+        authenticated: Boolean(session),
+        user: session?.user || null,
         sessionHours: APP_SESSION_TTL_SECONDS / 3600
       }),
       { "cache-control": "no-store" }
     );
   }
 
+  if (method === "GET" && pathname === "/api/auth/google/start") {
+    const settings = googleOAuthSettings(baseUrl);
+    if (!settings.configured) {
+      return error(
+        503,
+        "Google login is not configured",
+        "Set SESSION_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_ALLOWED_DOMAINS in Replit Secrets."
+      );
+    }
+    const state = createGoogleOauthState();
+    const client = new OAuth2Client(settings.clientId, settings.clientSecret, settings.redirectUri);
+    const authorizationUrl = client.generateAuthUrl({
+      access_type: "online",
+      scope: ["openid", "email", "profile"],
+      prompt: "select_account",
+      state,
+      hd: settings.allowedDomains.length === 1 ? settings.allowedDomains[0] : undefined
+    });
+    return redirect(302, authorizationUrl, {
+      "set-cookie": googleOauthStateCookie(state, baseUrl)
+    });
+  }
+
+  if (method === "GET" && pathname === "/api/auth/google/callback") {
+    const settings = googleOAuthSettings(baseUrl);
+    const errorRedirect = (reason) => redirect(303, `/?auth_error=${encodeURIComponent(reason)}`, {
+      "set-cookie": expiredGoogleOauthStateCookie(baseUrl)
+    });
+    if (!settings.configured) return errorRedirect("google_not_configured");
+    if (searchParams.get("error")) return errorRedirect("google_cancelled");
+
+    const code = String(searchParams.get("code") || "");
+    const state = String(searchParams.get("state") || "");
+    const cookieState = readCookie(request.headers, GOOGLE_OAUTH_STATE_COOKIE);
+    if (!code || !state || !cookieState || !safeEqual(state, cookieState) || !readSignedPayload(state)) {
+      return errorRedirect("invalid_google_state");
+    }
+
+    try {
+      const client = new OAuth2Client(settings.clientId, settings.clientSecret, settings.redirectUri);
+      const { tokens } = await client.getToken(code);
+      if (!tokens.id_token) return errorRedirect("google_identity_missing");
+      const ticket = await client.verifyIdToken({
+        idToken: tokens.id_token,
+        audience: settings.clientId
+      });
+      const payload = ticket.getPayload() || {};
+      const hostedDomain = String(payload.hd || "").toLowerCase();
+      const email = String(payload.email || "").toLowerCase();
+      if (!payload.sub || payload.email_verified !== true || !email) {
+        return errorRedirect("google_identity_unverified");
+      }
+      if (!hostedDomain || !settings.allowedDomains.includes(hostedDomain)) {
+        return errorRedirect("google_domain_not_allowed");
+      }
+      const user = {
+        provider: "google",
+        sub: payload.sub,
+        email,
+        name: String(payload.name || email).trim(),
+        hostedDomain
+      };
+      const token = createAppSessionToken(Date.now(), user);
+      return redirect(303, "/dashboard", {
+        "set-cookie": [sessionCookie(token, baseUrl), expiredGoogleOauthStateCookie(baseUrl)]
+      });
+    } catch (googleError) {
+      console.warn("[auth] Google login failed:", googleError.message);
+      return errorRedirect("google_login_failed");
+    }
+  }
+
   if (method === "POST" && pathname === "/api/auth/login") {
     const expected = appLoginPassword();
     if (!expected) {
-      return error(503, "Application login is not configured", "Set APP_LOGIN_PASSWORD to at least 8 characters in Replit Secrets, then restart the app.");
+      return error(503, "Password login is not enabled");
     }
     if (!safeEqual(body.password, expected)) return error(401, "Incorrect password");
-    const token = createAppSessionToken();
+    const user = { provider: "password", sub: null, email: null, name: null, hostedDomain: null };
+    const token = createAppSessionToken(Date.now(), user);
     return withResponseHeaders(
-      json(200, { authenticated: true, sessionHours: APP_SESSION_TTL_SECONDS / 3600 }),
+      json(200, { authenticated: true, user, sessionHours: APP_SESSION_TTL_SECONDS / 3600 }),
       { "set-cookie": sessionCookie(token, baseUrl), "cache-control": "no-store" }
     );
   }
@@ -3282,8 +3438,8 @@ async function handleApiRequest(request) {
   // x-csat-webhook-secret check so adding a dashboard login cannot interrupt
   // WhatsApp replies or scheduled n8n jobs.
   if (!isMachineApiPath(pathname)) {
-    if (!appLoginPassword()) {
-      return error(503, "Application login is not configured", "Set APP_LOGIN_PASSWORD to at least 8 characters in Replit Secrets, then restart the app.");
+    if (!appAuthenticationConfigured(baseUrl)) {
+      return error(503, "Application login is not configured", "Configure Google login or APP_LOGIN_PASSWORD in Replit Secrets, then restart the app.");
     }
     if (!isAppAuthenticated(request.headers)) return error(401, "Authentication required");
   }
@@ -3403,6 +3559,107 @@ async function handleApiRequest(request) {
     }
     feedbackSchedule.sort((left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime());
     return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule, messaging });
+  }
+
+  if (method === "GET" && pathname === "/api/project-performance") {
+    return json(200, await store.getProjectPerformanceData());
+  }
+
+  const projectPerformanceMatch = pathname.match(/^\/api\/project-performance\/([^/]+)$/);
+  if (method === "PUT" && projectPerformanceMatch) {
+    const projectId = decodeURIComponent(projectPerformanceMatch[1]);
+    const signedInUser = currentAppUser(request.headers);
+    const updatedBy = String(signedInUser?.email || signedInUser?.name || body.updatedBy || "").trim();
+    if (updatedBy.length < 2 || updatedBy.length > 120) {
+      return error(400, "Enter the name of the person making this update");
+    }
+    const profile = body.profile || {};
+    const financialYear = String(profile.financialYear || "").trim();
+    if (financialYear) {
+      const match = financialYear.match(/^(\d{4})-(\d{4})$/);
+      if (!match || Number(match[2]) !== Number(match[1]) + 1) {
+        return error(400, "Financial year must use the format 2026-2027");
+      }
+    }
+    const data = await store.getProjectPerformanceData();
+    const referenceChecks = {
+      clientCategory: [body.clientProfile?.clientCategory, "client_category"],
+      clientGroup: [body.clientProfile?.clientGroup, "client_group"],
+      projectType: [profile.projectType, "project_type"],
+      revenueCategory: [profile.revenueCategory, "revenue_category"],
+      portfolioType: [profile.portfolioType, "portfolio_type"],
+      currency: [profile.currency || "INR", "currency"],
+      performanceStatus: [profile.performanceStatus, "performance_status"],
+      currentPhase: [profile.currentPhase, "current_phase"],
+      campaignStatus: [profile.campaignStatus, "campaign_status"],
+      clientSentiment: [profile.clientSentiment, "client_sentiment"],
+      relationshipStrength: [profile.relationshipStrength, "relationship_strength"],
+      meetingCadence: [profile.meetingCadence, "meeting_cadence"],
+      suggestionFrequency: [profile.suggestionFrequency, "suggestion_frequency"]
+    };
+    for (const [field, [value, category]] of Object.entries(referenceChecks)) {
+      if (!value) continue;
+      const allowed = new Set((data.referenceValues?.[category] || []).map((item) => item.value));
+      if (!allowed.has(value)) return error(400, `${field} must be selected from its standard list`);
+    }
+    const internalPocIds = new Set((data.internalPocs || []).map((item) => item.id));
+    for (const [role, value] of Object.entries(profile.team || {})) {
+      if (value && !internalPocIds.has(value)) return error(400, `${role} must be selected from Internal POCs`);
+    }
+    const numericFields = [
+      "fxRateToInr", "poAmountLocal", "budgetAllocatedLocal", "budgetSpentLocal", "revenueGeneratedLocal"
+    ];
+    for (const field of numericFields) {
+      const value = profile[field];
+      if (value !== "" && value !== null && value !== undefined && (!Number.isFinite(Number(value)) || Number(value) < 0)) {
+        return error(400, `${field} must be a valid non-negative number`);
+      }
+    }
+    if (profile.fxRateToInr !== "" && profile.fxRateToInr !== null && profile.fxRateToInr !== undefined
+      && Number(profile.fxRateToInr) <= 0) {
+      return error(400, "FX rate must be greater than zero");
+    }
+    const links = profile.links || {};
+    for (const [name, value] of Object.entries(links)) {
+      if (!value) continue;
+      try {
+        const parsed = new URL(value);
+        if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported protocol");
+      } catch {
+        return error(400, `${name} must be a valid http or https URL`);
+      }
+    }
+    if (!Array.isArray(body.kpis) || body.kpis.length > 100) {
+      return error(400, "KPIs must be a list containing no more than 100 rows");
+    }
+    const allowedKpiNames = new Set((data.referenceValues?.kpi_name || []).map((item) => item.value));
+    let primaryKpiCount = 0;
+    for (const [index, kpi] of body.kpis.entries()) {
+      const kpiName = String(kpi.kpiName || "").trim();
+      if (!kpiName) return error(400, `KPI ${index + 1} needs a name`);
+      if (!allowedKpiNames.has(kpiName)) return error(400, `KPI ${index + 1} name must be selected from the standard KPI list`);
+      if (!["number", "percent", "currency", "ratio"].includes(kpi.unit || "number")) {
+        return error(400, `KPI ${index + 1} unit is invalid`);
+      }
+      if (!["higher_better", "lower_better"].includes(kpi.direction || "higher_better")) {
+        return error(400, `KPI ${index + 1} direction is invalid`);
+      }
+      if (kpi.isPrimary) primaryKpiCount += 1;
+      for (const field of ["target", "actual", "previousYearActual"]) {
+        const value = kpi[field];
+        if (value !== "" && value !== null && value !== undefined && !Number.isFinite(Number(value))) {
+          return error(400, `KPI ${index + 1} ${field} must be a valid number`);
+        }
+      }
+    }
+    if (primaryKpiCount > 1) return error(400, "Only one KPI can be marked Primary");
+    try {
+      return json(200, await store.saveProjectPerformance(projectId, { ...body, updatedBy }));
+    } catch (saveError) {
+      if (saveError.code === "PERFORMANCE_VERSION_CONFLICT") return error(409, saveError.message);
+      if (saveError.message === "Project not found") return error(404, saveError.message);
+      return error(400, "Could not save project performance", saveError.message);
+    }
   }
 
   if (method === "GET" && pathname === "/api/projects") {

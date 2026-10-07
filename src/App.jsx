@@ -3,6 +3,7 @@ import { AlertTriangle, ChevronLeft, ChevronRight, Clock, History, LogOut, Trend
 import { apiGet } from "./api";
 import Dashboard from "./components/Dashboard.jsx";
 import ProjectWorkspace from "./components/ProjectWorkspace.jsx";
+import ProjectPerformance from "./components/ProjectPerformance.jsx";
 import Directory from "./components/Directory.jsx";
 import Manage from "./components/Manage.jsx";
 import { BrandLogo } from "./components/Ui.jsx";
@@ -11,6 +12,7 @@ import { formatDateTime } from "./format";
 function getRoute() {
   const path = window.location.pathname;
   if (path === "/project" || path === "/client") return "project";
+  if (path === "/project-performance" || path === "/performance") return "performance";
   if (path === "/directory") return "directory";
   if (path === "/manage") return "manage";
   return "dashboard";
@@ -121,7 +123,7 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject }) {
   );
 }
 
-export default function App({ onLogout }) {
+export default function App({ onLogout, currentUser = null }) {
   const [route, setRoute] = useState(getRoute);
   const [dashboard, setDashboard] = useState(null);
   const [error, setError] = useState(null);
@@ -205,6 +207,13 @@ export default function App({ onLogout }) {
           </button>
           <button
             type="button"
+            className={`tab ${route === "performance" ? "active" : ""}`}
+            onClick={() => navigate("/project-performance")}
+          >
+            Project Performance
+          </button>
+          <button
+            type="button"
             className={`tab ${route === "manage" ? "active" : ""}`}
             onClick={() => navigate("/manage")}
           >
@@ -234,6 +243,8 @@ export default function App({ onLogout }) {
           <Directory onOpenProject={openProject} />
         ) : route === "manage" ? (
           <Manage onReload={loadDashboard} />
+        ) : route === "performance" ? (
+          <ProjectPerformance currentUser={currentUser} />
         ) : route === "project" ? (
           <ProjectWorkspace dashboard={dashboard} locationTick={locationTick} onReload={loadDashboard} />
         ) : (

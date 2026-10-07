@@ -39,6 +39,7 @@ const calls = {
   inactiveCompletionClaims: [],
   inactiveCompletionFinishes: [],
   inactiveCompletionFailures: [],
+  performanceSaves: [],
   automationClaims: new Map()
 };
 
@@ -275,6 +276,30 @@ const store = {
   getIssue: async () => ({ id: "iss_1", status: "open" }),
   updateIssueStatus: async (issueId, action) => ({ id: issueId, status: action === "close" ? "closed" : "open" }),
   getDashboard: async () => ({ projects: [project], metrics: { projectCount: 1 }, clusters: [], clients: [], openIssues: [], openCycles: [] }),
+  getProjectPerformanceData: async () => ({
+    projects: [{ ...project, version: 0, performanceStatus: null, clientSentiment: null, kpis: [], auditHistory: [] }],
+    internalPocs: [{ id: "ip_1", name: "Internal Owner", active: true }],
+    referenceValues: {
+      client_category: [{ value: "Symbi" }, { value: "Non-Symbi" }],
+      client_group: [],
+      project_type: [{ value: "Performance Only" }],
+      revenue_category: [{ value: "Below 25 L" }],
+      portfolio_type: [{ value: "Portfolio" }],
+      currency: [{ value: "INR" }, { value: "USD" }],
+      performance_status: [{ value: "On Track" }],
+      current_phase: [{ value: "Execution" }],
+      campaign_status: [{ value: "LIVE" }],
+      client_sentiment: [{ value: "Positive" }],
+      relationship_strength: [{ value: "Good" }],
+      meeting_cadence: [{ value: "Monthly" }],
+      suggestion_frequency: [{ value: "Monthly" }]
+    },
+    financialYears: ["2026-2027"]
+  }),
+  saveProjectPerformance: async (projectId, input) => {
+    calls.performanceSaves.push({ projectId, input });
+    return { saved: true, projectId, version: 1, changes: { "project.performance_status": { before: null, after: "On Track" } } };
+  },
   getMessagingStatus: async () => store._messagingStatus,
   setMessagingStatus: async (enabled, updatedBy) => {
     store._messagingStatus = {
@@ -439,9 +464,85 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 200);
     assert.deepStrictEqual(JSON.parse(res.body), {
       configured: true,
+      passwordConfigured: true,
+      googleConfigured: false,
       authenticated: false,
+      user: null,
       sessionHours: 12
     });
+  });
+
+  await scenario("Google login fails closed until every production secret is configured", async () => {
+    const res = await rawReq("GET", "/api/auth/google/start");
+    assert.strictEqual(res.statusCode, 503);
+    assert.match(JSON.parse(res.body).error, /google login is not configured/i);
+  });
+
+  await scenario("Google Workspace login verifies the hosted domain and creates the normal app session", async () => {
+    const { OAuth2Client } = require("google-auth-library");
+    const prior = {
+      id: process.env.GOOGLE_CLIENT_ID,
+      secret: process.env.GOOGLE_CLIENT_SECRET,
+      domains: process.env.GOOGLE_ALLOWED_DOMAINS
+    };
+    const priorGetToken = OAuth2Client.prototype.getToken;
+    const priorVerifyIdToken = OAuth2Client.prototype.verifyIdToken;
+    process.env.GOOGLE_CLIENT_ID = "test-client.apps.googleusercontent.com";
+    process.env.GOOGLE_CLIENT_SECRET = "test-client-secret";
+    process.env.GOOGLE_ALLOWED_DOMAINS = "srvmedia.com";
+    OAuth2Client.prototype.getToken = async () => ({ tokens: { id_token: "verified-test-token" } });
+    OAuth2Client.prototype.verifyIdToken = async () => ({
+      getPayload: () => ({
+        sub: "google-user-1",
+        email: "employee@srvmedia.com",
+        email_verified: true,
+        hd: "srvmedia.com",
+        name: "SRV Employee"
+      })
+    });
+    try {
+      const start = await rawReq("GET", "/api/auth/google/start");
+      assert.strictEqual(start.statusCode, 302);
+      assert.match(start.headers.location, /^https:\/\/accounts\.google\.com\//);
+      const state = new URL(start.headers.location).searchParams.get("state");
+      const stateCookie = String(start.headers["set-cookie"]).split(";")[0];
+      assert.ok(state);
+
+      const callback = await handleApiRequest({
+        method: "GET",
+        path: "/api/auth/google/callback",
+        searchParams: new URLSearchParams({ code: "test-code", state }),
+        headers: { cookie: stateCookie },
+        body: {},
+        baseUrl: "https://csat.srvmedia.com"
+      });
+      assert.strictEqual(callback.statusCode, 303);
+      assert.strictEqual(callback.headers.location, "/dashboard");
+      assert.ok(Array.isArray(callback.headers["set-cookie"]));
+      const sessionCookieHeader = callback.headers["set-cookie"][0].split(";")[0];
+      const status = await rawReq("GET", "/api/auth/status", {}, { cookie: sessionCookieHeader });
+      const statusPayload = JSON.parse(status.body);
+      assert.strictEqual(statusPayload.authenticated, true);
+      assert.strictEqual(statusPayload.user.email, "employee@srvmedia.com");
+      assert.strictEqual(statusPayload.user.hostedDomain, "srvmedia.com");
+      const beforeSaves = calls.performanceSaves.length;
+      const update = await rawReq("PUT", "/api/project-performance/prj_1", {
+        updatedBy: "Spoofed Editor",
+        expectedVersion: 0,
+        clientProfile: {},
+        profile: { financialYear: "2026-2027", currency: "INR", team: {}, links: {} },
+        kpis: []
+      }, { cookie: sessionCookieHeader });
+      assert.strictEqual(update.statusCode, 200);
+      assert.strictEqual(calls.performanceSaves.length, beforeSaves + 1);
+      assert.strictEqual(calls.performanceSaves.at(-1).input.updatedBy, "employee@srvmedia.com");
+    } finally {
+      OAuth2Client.prototype.getToken = priorGetToken;
+      OAuth2Client.prototype.verifyIdToken = priorVerifyIdToken;
+      if (prior.id === undefined) delete process.env.GOOGLE_CLIENT_ID; else process.env.GOOGLE_CLIENT_ID = prior.id;
+      if (prior.secret === undefined) delete process.env.GOOGLE_CLIENT_SECRET; else process.env.GOOGLE_CLIENT_SECRET = prior.secret;
+      if (prior.domains === undefined) delete process.env.GOOGLE_ALLOWED_DOMAINS; else process.env.GOOGLE_ALLOWED_DOMAINS = prior.domains;
+    }
   });
 
   await scenario("incorrect login password is rejected without a cookie", async () => {
@@ -506,6 +607,120 @@ async function scenario(name, fn) {
   await scenario("GET /api/projects returns projects", async () => {
     const res = await req("GET", "/api/projects");
     assert.strictEqual(JSON.parse(res.body).projects.length, 1);
+  });
+
+  await scenario("GET /api/project-performance returns the portfolio model", async () => {
+    const res = await req("GET", "/api/project-performance");
+    assert.strictEqual(res.statusCode, 200);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(payload.projects.length, 1);
+    assert.deepStrictEqual(payload.financialYears, ["2026-2027"]);
+  });
+
+  await scenario("PUT /api/project-performance saves standardized current data", async () => {
+    const before = calls.performanceSaves.length;
+    const res = await req("PUT", "/api/project-performance/prj_1", {
+      updatedBy: "Test Editor",
+      expectedVersion: 0,
+      clientProfile: { clientGroup: "", clientCategory: "Symbi" },
+      profile: {
+        financialYear: "2026-2027",
+        projectType: "Performance Only",
+        revenueCategory: "Below 25 L",
+        portfolioType: "Portfolio",
+        team: { amId: "ip_1" },
+        currency: "INR",
+        fxRateToInr: 1,
+        poAmountLocal: 500000,
+        performanceStatus: "On Track",
+        currentPhase: "Execution",
+        campaignStatus: "LIVE",
+        clientSentiment: "Positive",
+        relationshipStrength: "Good",
+        meetingCadence: "Monthly",
+        suggestionFrequency: "Monthly",
+        links: {}
+      },
+      kpis: [{ kpiName: "Leads", unit: "number", direction: "higher_better", target: 100, actual: 90 }]
+    });
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(calls.performanceSaves.length, before + 1);
+    assert.strictEqual(calls.performanceSaves.at(-1).projectId, "prj_1");
+    assert.strictEqual(calls.performanceSaves.at(-1).input.profile.performanceStatus, "On Track");
+  });
+
+  await scenario("PUT /api/project-performance rejects non-standard dropdown values", async () => {
+    const res = await req("PUT", "/api/project-performance/prj_1", {
+      updatedBy: "Test Editor",
+      expectedVersion: 0,
+      clientProfile: {},
+      profile: { financialYear: "2026-2027", currency: "Bitcoin", team: {}, links: {} },
+      kpis: []
+    });
+    assert.strictEqual(res.statusCode, 400);
+    assert.match(JSON.parse(res.body).error, /currency must be selected/i);
+  });
+
+  await scenario("Project Performance persistence keeps CSAT active status untouched and writes an audit", async () => {
+    const provider = Object.create(SupabaseStore.prototype);
+    const profiles = [];
+    const clientProfiles = [];
+    const kpiRows = [];
+    const audits = [];
+    provider.getProjectById = async () => ({ ...project, activeStatus: "active" });
+    provider.request = async (table, options = {}) => {
+      const method = options.method || "GET";
+      if (method === "GET") {
+        if (table === "project_performance_profiles") return [...profiles];
+        if (table === "client_performance_profiles") return [...clientProfiles];
+        if (table === "project_performance_kpis") return [...kpiRows];
+      }
+      if (method === "POST") {
+        const rows = (Array.isArray(options.body) ? options.body : [options.body]).map((row, index) => ({
+          id: `${table}_${index + 1}`,
+          created_at: "2026-10-06T10:00:00.000Z",
+          updated_at: "2026-10-06T10:00:00.000Z",
+          ...row
+        }));
+        if (table === "project_performance_profiles") profiles.push(...rows);
+        if (table === "client_performance_profiles") clientProfiles.push(...rows);
+        if (table === "project_performance_kpis") kpiRows.push(...rows);
+        if (table === "project_performance_audit") audits.push(...rows);
+        return rows;
+      }
+      if (method === "PATCH" && table === "project_performance_profiles") {
+        Object.assign(profiles[0], options.body);
+        return [profiles[0]];
+      }
+      if (method === "PATCH" && table === "client_performance_profiles") {
+        Object.assign(clientProfiles[0], options.body);
+        return [clientProfiles[0]];
+      }
+      if (method === "DELETE" && table === "project_performance_kpis") {
+        return kpiRows.splice(0, kpiRows.length);
+      }
+      throw new Error(`Unexpected persistence request ${method} ${table}`);
+    };
+
+    const saved = await provider.saveProjectPerformance(project.id, {
+      updatedBy: "Ashish",
+      expectedVersion: 0,
+      clientProfile: { clientCategory: "Symbi" },
+      profile: {
+        financialYear: "2026-2027",
+        performanceStatus: "On Track",
+        currency: "INR",
+        team: {},
+        links: {}
+      },
+      kpis: [{ kpiName: "Leads", target: 100, actual: 90, isPrimary: true }]
+    });
+    assert.strictEqual(saved.version, 1);
+    assert.strictEqual(profiles[0].performance_status, "On Track");
+    assert.strictEqual(Object.hasOwn(profiles[0], "active_status"), false);
+    assert.strictEqual(audits.length, 1);
+    assert.strictEqual(audits[0].updated_by, "Ashish");
+    assert.strictEqual(kpiRows.length, 1);
   });
 
   await scenario("GET /api/projects/:key/workspace", async () => {
@@ -2480,7 +2695,17 @@ async function scenario(name, fn) {
       }
     ];
     dashboardStore.request = async (table, options = {}) => {
-      if (["clusters", "clients", "issues", "client_pocs", "automation_events"].includes(table)) return [];
+      if (["clusters", "clients", "client_pocs", "automation_events"].includes(table)) return [];
+      if (table === "project_services") {
+        return [{ project_id: "prj_1", service_key: "creatives", name: "Creatives" }];
+      }
+      if (table === "issues") {
+        return [{
+          id: "issue_typo", project_id: "prj_1", session_id: "sess_partial", client_poc_id: "poc_b",
+          service_key: "creatives", service_name: "Cretives", severity: "watch", status: "open",
+          title: "Wrong creative went live", root_cause: "Wrong creative went live", created_at: cycleRow.started_at
+        }];
+      }
       if (table === "feedback_cycles") return [cycleRow];
       if (table === "feedback_sessions") return sessionRows;
       if (table === "messages") {
@@ -2502,6 +2727,7 @@ async function scenario(name, fn) {
     assert.strictEqual(dashboard.responseTracker[1].latestClientReply, "PPC lead quality is poor");
     assert.strictEqual(dashboard.responseTracker[3].stoppedByAdmin, true);
     assert.strictEqual(dashboard.responseTracker[3].closureReason, "stopped_by_admin");
+    assert.strictEqual(dashboard.openIssues[0].service_name, "Creatives");
   });
 
   await scenario("Supabase cycle stop preserves feedback and clears only that session's reminder", async () => {

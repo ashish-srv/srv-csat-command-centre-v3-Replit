@@ -10,7 +10,6 @@ import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill } from 
 import ReportDownloads from "./ReportDownloads.jsx";
 
 const RISK_OPTIONS = ["High", "Watch", "Low", "Not scored"];
-const ROW_STEP = 15;
 const RESPONSE_LABELS = {
   awaiting: "Awaiting First Reply",
   partial: "Partial Response",
@@ -134,7 +133,6 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
   const [statuses, setStatuses] = useState(["active"]);
   const [range, setRange] = useState({ from: "", to: "", basis: "started" });
   const [expanded, setExpanded] = useState({});
-  const [visibleRows, setVisibleRows] = useState(ROW_STEP);
   const [responseFilter, setResponseFilter] = useState("all");
   const [scheduleTypes, setScheduleTypes] = useState([]);
   const [scheduleStatuses, setScheduleStatuses] = useState([]);
@@ -290,6 +288,10 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
     window.setTimeout(() => {
       document.getElementById("response-tracker")?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 0);
+  }
+
+  function showSection(sectionId) {
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function buildDashboardReport() {
@@ -537,13 +539,11 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
     };
   }
 
-  const rows = visibleProjects.slice(0, visibleRows);
-
   return (
     <>
       <div className="topbar">
         <div>
-          <h2>Client feedback overview</h2>
+          <h2>Client Feedback Overview</h2>
           {filtersActive ? (
             <p className="topbar-sub">
               Showing {visibleProjects.length} of {allProjects.length}{" "}
@@ -574,6 +574,15 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
       </div>
 
       {reportError ? <div className="report-export-error" role="alert">{reportError}</div> : null}
+
+      <nav className="dashboard-section-nav" aria-label="Dashboard sections">
+        <button type="button" onClick={() => showSection("dashboard-projects")}>Projects</button>
+        <button type="button" onClick={() => showSection("dashboard-feedback-schedule")}>Feedback Schedule &amp; Delivery</button>
+        <button type="button" onClick={() => showSection("dashboard-recent-skips")}>Recent Skipped Attempts</button>
+        <button type="button" onClick={() => showSection("dashboard-open-cycles")}>Open Cycles</button>
+        <button type="button" onClick={() => showSection("dashboard-open-issues")}>Open Issues</button>
+        <button type="button" onClick={() => showSection("response-tracker")}>Feedback Cycle &amp; POC Response Tracker</button>
+      </nav>
 
       {messagingPrompt ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -672,7 +681,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
         </div>
       ) : null}
 
-      <div className="metric-row four">
+      <div className="metric-row five">
         <MetricCard label="Projects" value={visibleProjects.length} />
         <MetricCard
           label="Avg CSAT"
@@ -680,20 +689,28 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
           caption={`${scored.length} of ${visibleProjects.length} projects rated`}
           tone={scoreClass(avgCsat)}
         />
-        <MetricCard label="Cycles completed" value={completedCycles.length} caption={range.from || range.to ? "in range" : "all time"} />
-        <MetricCard label="At risk" value={atRisk} tone={atRisk ? "weak" : "strong"} />
+        <MetricCard label="Cycles Completed" value={completedCycles.length} caption={range.from || range.to ? "in range" : "all time"} />
+        <MetricCard label="At Risk" value={atRisk} tone={atRisk ? "weak" : "strong"} />
+        <MetricCard
+          label="Open Issues"
+          value={openIssues.length}
+          caption="click to view"
+          tone={openIssues.length ? "weak" : "strong"}
+          onClick={() => showSection("dashboard-open-issues")}
+          title="Go to Open Issues"
+        />
       </div>
 
       <div className="metric-row six response-summary">
         <MetricCard
-          label="Cycles sent"
+          label="Cycles Sent"
           value={rangeCycles.length}
           caption="click to view their POC sessions"
           onClick={() => showResponses("all")}
           title="Show all feedback-cycle POC sessions"
         />
         <MetricCard
-          label="POC sessions sent"
+          label="POC Sessions Sent"
           value={responseTracker.length}
           caption="individual feedback requests"
           onClick={() => showResponses("all")}
@@ -732,7 +749,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
         />
       </div>
 
-      <Panel title="Cluster scorecards" badge={`${clusterCards.length} clusters`} className="span-12">
+      <Panel title="Cluster Scorecards" badge={`${clusterCards.length} clusters`} className="span-12">
         <div className="cluster-grid">
           {clusterCards.map((cluster) => (
             <button
@@ -750,8 +767,9 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
         </div>
       </Panel>
 
-      <Panel title="Projects" badge={`${visibleProjects.length} shown`} className="span-12">
-        <div className="ptable">
+      <Panel id="dashboard-projects" title="Projects" badge={`${visibleProjects.length} shown`} className="span-12 dashboard-anchor-section">
+        <div className="dashboard-projects-scroll" role="region" aria-label="Projects" tabIndex={0}>
+          <div className="ptable">
           <div className="ptable-head">
             <span />
             <span>Project</span>
@@ -764,7 +782,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
             <span>Risk</span>
             <span />
           </div>
-          {rows.map((project) => (
+          {visibleProjects.map((project) => (
             <ProjectRow
               key={project.key}
               project={project}
@@ -776,18 +794,15 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
             />
           ))}
           {!visibleProjects.length ? <EmptyState title="No project matches these filters" text="Reset a filter to see more." /> : null}
+          </div>
         </div>
-        {visibleProjects.length > rows.length ? (
-          <button type="button" className="show-more" onClick={() => setVisibleRows((value) => value + ROW_STEP)}>
-            Show {Math.min(ROW_STEP, visibleProjects.length - rows.length)} more
-          </button>
-        ) : null}
       </Panel>
 
       <Panel
-        title="Feedback schedule & delivery"
+        id="dashboard-feedback-schedule"
+        title="Feedback Schedule & Delivery"
         badge={`${feedbackSchedule.length} scheduled · ${recentScheduleSkips.length} recent skips`}
-        className="span-12"
+        className="span-12 dashboard-anchor-section"
       >
         <div className="schedule-filter-row">
           <MultiSelect
@@ -832,24 +847,24 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
           {!feedbackSchedule.length ? <EmptyState title="No scheduled feedback matches" text="Adjust the dashboard or schedule filters." /> : null}
         </div>
 
-        {recentScheduleSkips.length ? (
-          <div className="schedule-skip-history">
-            <h4>Recent skipped attempts</h4>
+        <div id="dashboard-recent-skips" className="schedule-skip-history dashboard-anchor-section">
+            <h4>Recent Skipped Attempts</h4>
             {recentScheduleSkips.map((event) => (
               <button type="button" key={event.id} onClick={() => onOpenProject(event.projectKey)}>
                 <span><strong>{event.project?.name || event.projectKey}</strong><small>{formatCycleType(event.cycleType)} · {formatDateTime(event.attemptedAt)}</small></span>
                 <span>{event.reason || "The scheduler could not start this cycle."}</span>
               </button>
             ))}
+            {!recentScheduleSkips.length ? <EmptyState title="No Recent Skipped Attempts" text="Skipped scheduler attempts will appear here." /> : null}
           </div>
-        ) : null}
       </Panel>
 
       <div className="dashboard-grid">
         <Panel
-          title="Open cycles"
+          id="dashboard-open-cycles"
+          title="Open Cycles"
           badge={range.from || range.to ? `${openCycles.length} started in range` : `${openCycles.length} open`}
-          className="span-6"
+          className="span-6 dashboard-anchor-section"
         >
           <div className="session-list">
             {openCycles.map((cycle) => (
@@ -871,9 +886,10 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
         </Panel>
 
         <Panel
-          title="Open issues"
+          id="dashboard-open-issues"
+          title="Open Issues"
           badge={range.from || range.to ? `${openIssues.length} raised in range` : `${openIssues.length} open`}
-          className="span-6"
+          className="span-6 dashboard-anchor-section"
         >
           <div className="focus-list">
             {openIssues.map((issue) => (
@@ -897,9 +913,9 @@ export default function Dashboard({ dashboard, onReload, onOpenProject }) {
 
         <Panel
           id="response-tracker"
-          title="Feedback cycle & POC response tracker"
+          title="Feedback Cycle & POC Response Tracker"
           badge={`${filteredResponseTracker.length} of ${responseTracker.length} POC sessions shown`}
-          className="span-12"
+          className="span-12 dashboard-anchor-section"
           action={responseFilter !== "all" ? (
             <button type="button" className="filter-reset" onClick={() => setResponseFilter("all")}>
               Clear {responseLabel(responseFilter)} filter <X size={12} aria-hidden="true" />

@@ -61,6 +61,56 @@ function sessionIsTerminal(session) {
     || reminderLoopExhausted(session);
 }
 
+function performanceNumber(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function performanceSnapshot(profile, clientProfile, kpis) {
+  const clean = (value) => {
+    if (!value) return null;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => ![
+      "id", "created_at", "updated_at", "createdAt", "updatedAt"
+    ].includes(key)));
+  };
+  return {
+    clientProfile: clean(clientProfile),
+    profile: clean(profile),
+    kpis: (Array.isArray(kpis) ? kpis : []).map((item) => ({
+      kpi_name: item.kpi_name ?? item.kpiName ?? null,
+      unit: item.unit || "number",
+      direction: item.direction || "higher_better",
+      target: performanceNumber(item.target),
+      actual: performanceNumber(item.actual),
+      previous_year_actual: performanceNumber(item.previous_year_actual ?? item.previousYearActual),
+      is_primary: Boolean(item.is_primary ?? item.isPrimary),
+      sort_order: Number(item.sort_order ?? item.sortOrder) || 0
+    }))
+  };
+}
+
+function performanceChanges(before, after) {
+  const changes = {};
+  const compare = (prefix, previous = {}, next = {}) => {
+    const keys = new Set([...Object.keys(previous || {}), ...Object.keys(next || {})]);
+    for (const key of keys) {
+      if (["created_at", "updated_at", "createdAt", "updatedAt", "version"].includes(key)) continue;
+      const previousValue = previous?.[key] ?? null;
+      const nextValue = next?.[key] ?? null;
+      if (JSON.stringify(previousValue) !== JSON.stringify(nextValue)) {
+        changes[`${prefix}.${key}`] = { before: previousValue, after: nextValue };
+      }
+    }
+  };
+  compare("client", before?.clientProfile, after?.clientProfile);
+  compare("project", before?.profile, after?.profile);
+  if (JSON.stringify(before?.kpis || []) !== JSON.stringify(after?.kpis || [])) {
+    changes.kpis = { before: before?.kpis || [], after: after?.kpis || [] };
+  }
+  return changes;
+}
+
 // ---------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------
@@ -1284,7 +1334,10 @@ class SupabaseStore {
         project_id: session.projectId,
         client_poc_id: session.clientPocId,
         service_key: service.serviceKey,
-        service_name: service.serviceName || (projectService ? projectService.name : service.serviceKey),
+        // The configured project service is the naming authority. Gemini may
+        // return a misspelling or conversational variant (for example
+        // "Cretives"), but that must never replace the catalogue label.
+        service_name: projectService ? projectService.name : (service.serviceName || service.serviceKey),
         sentiment: service.sentiment || "neutral",
         // `|| null` turned a stated 0 into "no rating". Only null and undefined
         // mean absent.
@@ -1381,7 +1434,7 @@ class SupabaseStore {
           session_id: session.id,
           client_poc_id: session.clientPocId,
           service_key: problem.serviceKey,
-          service_name: problem.serviceName || (projectService ? projectService.name : problem.serviceKey),
+          service_name: projectService ? projectService.name : (problem.serviceName || problem.serviceKey),
           severity,
           status: "open",
           // The API layer may attach Gemini-written text. The RULES still decide
@@ -2750,7 +2803,7 @@ class SupabaseStore {
       return {
         id: row.id,
         serviceKey: row.service_key,
-        serviceName: row.service_name,
+        serviceName: service?.name || row.service_name,
         title: row.title,
         rootCause: row.root_cause,
         severity: row.severity,
@@ -3130,16 +3183,25 @@ class SupabaseStore {
     const projects = await this.listProjects();
     const clusters = await this.request("clusters", { query: "select=*&order=name.asc" });
     const clients = await this.request("clients", { query: "select=id,client_key,name,cluster_id&order=name.asc" });
-    const [activePocRows, scheduleEventRows] = await Promise.all([
+    const [activePocRows, scheduleEventRows, projectServiceNameRows] = await Promise.all([
       this.request("client_pocs", { query: "active=is.true&select=id,project_id,name,contact_whatsapp" }),
       this.request("automation_events", {
         query: "event_type=in.(cycle_start_skipped,quick_checkin_start_skipped)&select=*&order=created_at.desc&limit=200"
-      })
+      }),
+      this.request("project_services", { query: "select=project_id,service_key,name" })
     ]);
 
     const openIssues = await this.request("issues", {
       query: "status=neq.closed&select=id,project_id,session_id,client_poc_id,service_key,service_name,severity,title,root_cause,due_at,created_at,client_pocs(name)&order=created_at.desc"
     });
+    const canonicalServiceNames = new Map(projectServiceNameRows.map((row) => [
+      `${row.project_id}:${row.service_key}`,
+      row.name
+    ]));
+    const normalizedOpenIssues = openIssues.map((row) => ({
+      ...row,
+      service_name: canonicalServiceNames.get(`${row.project_id}:${row.service_key}`) || row.service_name
+    }));
 
     const openCycleRows = await this.request("feedback_cycles", {
       query: "status=eq.open&cycle_type=neq.quick_checkin&select=*&order=started_at.desc"
@@ -3258,11 +3320,11 @@ class SupabaseStore {
       metrics: {
         projectCount: projects.length,
         avgCsat,
-        openIssues: openIssues.length,
+        openIssues: normalizedOpenIssues.length,
         openCycles: openCycleRows.length,
         atRisk: projects.filter((project) => project.riskLevel === "High").length
       },
-      openIssues,
+      openIssues: normalizedOpenIssues,
       openCycles: openCycleRows.map(toCycle),
       cycles: allCycleRows.map(toCycle),
       responseTracker,
@@ -3435,6 +3497,267 @@ class SupabaseStore {
       targets.push({ projectKey: project.key, cycleType: "quick_checkin", scheduleKey });
     }
     return { scheduleKey, targets };
+  }
+
+  // -------------------------------------------------------------------
+  // Project Performance
+  // -------------------------------------------------------------------
+
+  async getProjectPerformanceData() {
+    const [projects, clientProfiles, profiles, kpiRows, auditRows, internalRows, serviceRows, referenceRows] = await Promise.all([
+      this.listProjects(),
+      this.request("client_performance_profiles", { query: "select=*" }),
+      this.request("project_performance_profiles", { query: "select=*" }),
+      this.request("project_performance_kpis", { query: "select=*&order=sort_order.asc,created_at.asc" }),
+      this.request("project_performance_audit", { query: "select=*&order=changed_at.desc&limit=500" }),
+      this.request("internal_pocs", { query: "select=*&order=name.asc" }),
+      this.request("project_services", { query: "select=id,project_id,service_key,name&order=name.asc" }),
+      this.request("performance_reference_values", { query: "active=is.true&select=*&order=category.asc,sort_order.asc,value.asc" })
+    ]);
+
+    const clientProfilesById = new Map(clientProfiles.map((row) => [row.client_id, row]));
+    const profilesById = new Map(profiles.map((row) => [row.project_id, row]));
+    const internalPocs = internalRows.map(toInternalPocRow);
+    const internalById = new Map(internalPocs.map((row) => [row.id, row]));
+    const kpisByProject = new Map();
+    const auditsByProject = new Map();
+    const servicesByProject = new Map();
+    for (const row of kpiRows) {
+      const items = kpisByProject.get(row.project_id) || [];
+      items.push({
+        id: row.id,
+        kpiName: row.kpi_name,
+        unit: row.unit,
+        direction: row.direction,
+        target: performanceNumber(row.target),
+        actual: performanceNumber(row.actual),
+        previousYearActual: performanceNumber(row.previous_year_actual),
+        isPrimary: Boolean(row.is_primary),
+        sortOrder: Number(row.sort_order) || 0
+      });
+      kpisByProject.set(row.project_id, items);
+    }
+    for (const row of auditRows) {
+      const items = auditsByProject.get(row.project_id) || [];
+      items.push({
+        id: row.id,
+        updatedBy: row.updated_by,
+        changedAt: row.changed_at,
+        changes: row.changes || {},
+        snapshot: row.snapshot || {}
+      });
+      auditsByProject.set(row.project_id, items);
+    }
+    for (const row of serviceRows) {
+      const items = servicesByProject.get(row.project_id) || [];
+      items.push({ id: row.id, serviceKey: row.service_key, name: row.name });
+      servicesByProject.set(row.project_id, items);
+    }
+
+    const mappedProjects = projects.map((project) => {
+      const row = profilesById.get(project.id) || {};
+      const clientRow = clientProfilesById.get(project.clientId) || {};
+      const kpis = kpisByProject.get(project.id) || [];
+      const primaryKpi = kpis.find((item) => item.isPrimary) || kpis[0] || null;
+      return {
+        ...project,
+        clientGroup: clientRow.client_group || null,
+        clientCategory: clientRow.client_category || null,
+        financialYear: row.financial_year || null,
+        projectType: row.project_type || null,
+        revenueCategory: row.revenue_category || null,
+        portfolioType: row.portfolio_type || null,
+        team: {
+          projectDirectorId: row.project_director_id || null,
+          amId: row.am_id || null,
+          tlId: row.tl_id || null,
+          adId: row.ad_id || null,
+          avpId: row.avp_id || null,
+          projectDirector: internalById.get(row.project_director_id) || null,
+          am: internalById.get(row.am_id) || null,
+          tl: internalById.get(row.tl_id) || null,
+          ad: internalById.get(row.ad_id) || null,
+          avp: internalById.get(row.avp_id) || null
+        },
+        currency: row.currency || "INR",
+        fxRateToInr: performanceNumber(row.fx_rate_to_inr),
+        poAmountLocal: performanceNumber(row.po_amount_local),
+        budgetAllocatedLocal: performanceNumber(row.budget_allocated_local),
+        budgetSpentLocal: performanceNumber(row.budget_spent_local),
+        revenueGeneratedLocal: performanceNumber(row.revenue_generated_local),
+        performanceStatus: row.performance_status || null,
+        currentPhase: row.current_phase || null,
+        campaignStatus: row.campaign_status || null,
+        clientSentiment: row.client_sentiment || null,
+        mandates: row.mandates || "",
+        deliverablesStatus: row.deliverables_status || "",
+        relationshipStrength: row.relationship_strength || null,
+        meetingCadence: row.meeting_cadence || null,
+        lastMeetingDate: row.last_meeting_date || null,
+        suggestionFrequency: row.suggestion_frequency || null,
+        lastSuggestionDate: row.last_suggestion_date || null,
+        clientFeedback: row.client_feedback || "",
+        nextSteps: row.next_steps || "",
+        comments: row.comments || "",
+        links: {
+          mom: row.mom_link || "",
+          consolidatedSheet: row.consolidated_sheet_link || "",
+          projectDriveFolder: row.project_drive_folder_link || "",
+          projectDataSheet: row.project_data_sheet_link || ""
+        },
+        version: Number(row.version) || 0,
+        updatedBy: row.updated_by || null,
+        performanceUpdatedAt: row.updated_at || null,
+        services: servicesByProject.get(project.id) || [],
+        kpis,
+        primaryKpi,
+        auditHistory: auditsByProject.get(project.id) || []
+      };
+    });
+
+    const referenceValues = {};
+    for (const row of referenceRows) {
+      if (!referenceValues[row.category]) referenceValues[row.category] = [];
+      referenceValues[row.category].push({ id: row.id, value: row.value });
+    }
+    const currentYear = new Date().getFullYear();
+    const financialYears = [];
+    for (let year = currentYear - 4; year <= currentYear + 5; year += 1) {
+      financialYears.push(`${year}-${year + 1}`);
+    }
+
+    return { projects: mappedProjects, internalPocs, referenceValues, financialYears };
+  }
+
+  async saveProjectPerformance(projectId, input = {}) {
+    const project = await this.getProjectById(projectId);
+    if (!project) throw new Error("Project not found");
+
+    const editor = String(input.updatedBy || "").trim();
+    if (!editor) throw new Error("Updated by is required");
+    const [existingProfileRows, existingClientRows, existingKpis] = await Promise.all([
+      this.request("project_performance_profiles", { query: `project_id=eq.${encodeURIComponent(project.id)}&select=*&limit=1` }),
+      this.request("client_performance_profiles", { query: `client_id=eq.${encodeURIComponent(project.clientId)}&select=*&limit=1` }),
+      this.request("project_performance_kpis", { query: `project_id=eq.${encodeURIComponent(project.id)}&select=*&order=sort_order.asc` })
+    ]);
+    const existingProfile = existingProfileRows[0] || null;
+    const expectedVersion = Number(input.expectedVersion || 0);
+    const currentVersion = Number(existingProfile?.version || 0);
+    if (expectedVersion !== currentVersion) {
+      const conflict = new Error("This project was updated by someone else. Reload it before saving your changes.");
+      conflict.code = "PERFORMANCE_VERSION_CONFLICT";
+      throw conflict;
+    }
+
+    const clientInput = input.clientProfile || {};
+    const clientBody = {
+      client_group: clientInput.clientGroup || null,
+      client_category: clientInput.clientCategory || null
+    };
+    const profileInput = input.profile || {};
+    const team = profileInput.team || {};
+    const links = profileInput.links || {};
+    const profileBody = {
+      financial_year: profileInput.financialYear || null,
+      project_type: profileInput.projectType || null,
+      revenue_category: profileInput.revenueCategory || null,
+      portfolio_type: profileInput.portfolioType || null,
+      project_director_id: team.projectDirectorId || null,
+      am_id: team.amId || null,
+      tl_id: team.tlId || null,
+      ad_id: team.adId || null,
+      avp_id: team.avpId || null,
+      currency: profileInput.currency || "INR",
+      fx_rate_to_inr: performanceNumber(profileInput.fxRateToInr),
+      po_amount_local: performanceNumber(profileInput.poAmountLocal),
+      budget_allocated_local: performanceNumber(profileInput.budgetAllocatedLocal),
+      budget_spent_local: performanceNumber(profileInput.budgetSpentLocal),
+      revenue_generated_local: performanceNumber(profileInput.revenueGeneratedLocal),
+      performance_status: profileInput.performanceStatus || null,
+      current_phase: profileInput.currentPhase || null,
+      campaign_status: profileInput.campaignStatus || null,
+      client_sentiment: profileInput.clientSentiment || null,
+      mandates: String(profileInput.mandates || "").trim() || null,
+      deliverables_status: String(profileInput.deliverablesStatus || "").trim() || null,
+      relationship_strength: profileInput.relationshipStrength || null,
+      meeting_cadence: profileInput.meetingCadence || null,
+      last_meeting_date: profileInput.lastMeetingDate || null,
+      suggestion_frequency: profileInput.suggestionFrequency || null,
+      last_suggestion_date: profileInput.lastSuggestionDate || null,
+      client_feedback: String(profileInput.clientFeedback || "").trim() || null,
+      next_steps: String(profileInput.nextSteps || "").trim() || null,
+      comments: String(profileInput.comments || "").trim() || null,
+      mom_link: String(links.mom || "").trim() || null,
+      consolidated_sheet_link: String(links.consolidatedSheet || "").trim() || null,
+      project_drive_folder_link: String(links.projectDriveFolder || "").trim() || null,
+      project_data_sheet_link: String(links.projectDataSheet || "").trim() || null,
+      version: currentVersion + 1,
+      updated_by: editor
+    };
+
+    const before = performanceSnapshot(existingProfile, existingClientRows[0] || null, existingKpis);
+    if (existingClientRows.length) {
+      await this.request("client_performance_profiles", {
+        method: "PATCH", query: `client_id=eq.${encodeURIComponent(project.clientId)}`, body: clientBody
+      });
+    } else {
+      await this.request("client_performance_profiles", {
+        method: "POST", body: [{ client_id: project.clientId, ...clientBody }]
+      });
+    }
+
+    let savedProfileRows;
+    if (existingProfile) {
+      savedProfileRows = await this.request("project_performance_profiles", {
+        method: "PATCH", query: `project_id=eq.${encodeURIComponent(project.id)}&version=eq.${currentVersion}`, body: profileBody
+      });
+      if (!savedProfileRows.length) {
+        const conflict = new Error("This project was updated by someone else. Reload it before saving your changes.");
+        conflict.code = "PERFORMANCE_VERSION_CONFLICT";
+        throw conflict;
+      }
+    } else {
+      savedProfileRows = await this.request("project_performance_profiles", {
+        method: "POST", body: [{ project_id: project.id, ...profileBody }]
+      });
+    }
+
+    if (existingKpis.length) {
+      await this.request("project_performance_kpis", {
+        method: "DELETE", query: `project_id=eq.${encodeURIComponent(project.id)}`
+      });
+    }
+    const kpiBodies = (Array.isArray(input.kpis) ? input.kpis : [])
+      .map((item, index) => ({
+        project_id: project.id,
+        kpi_name: String(item.kpiName || "").trim(),
+        unit: ["number", "percent", "currency", "ratio"].includes(item.unit) ? item.unit : "number",
+        direction: item.direction === "lower_better" ? "lower_better" : "higher_better",
+        target: performanceNumber(item.target),
+        actual: performanceNumber(item.actual),
+        previous_year_actual: performanceNumber(item.previousYearActual),
+        is_primary: Boolean(item.isPrimary),
+        sort_order: index
+      }))
+      .filter((item) => item.kpi_name);
+    const savedKpis = kpiBodies.length
+      ? await this.request("project_performance_kpis", { method: "POST", body: kpiBodies })
+      : [];
+    const savedClientRows = await this.request("client_performance_profiles", {
+      query: `client_id=eq.${encodeURIComponent(project.clientId)}&select=*&limit=1`
+    });
+    const after = performanceSnapshot(savedProfileRows[0], savedClientRows[0] || null, savedKpis);
+    const changes = performanceChanges(before, after);
+    await this.request("project_performance_audit", {
+      method: "POST",
+      body: [{
+        project_id: project.id,
+        updated_by: editor,
+        changes,
+        snapshot: after
+      }]
+    });
+    return { saved: true, projectId: project.id, version: currentVersion + 1, changes };
   }
 
   async expireDueQuickCheckins(nowIso = new Date().toISOString()) {

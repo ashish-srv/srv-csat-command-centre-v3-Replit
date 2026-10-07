@@ -25,7 +25,13 @@ function useOutsideClose(onClose) {
 export function MultiSelect({ label, options, selected, onChange, allLabel = "All", renderOption }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const ref = useOutsideClose(() => { setOpen(false); setQuery(""); });
+
+  function closeMenu() {
+    setOpen(false);
+    setQuery("");
+  }
+
+  const ref = useOutsideClose(closeMenu);
 
   function toggle(value) {
     onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
@@ -58,7 +64,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
         <ChevronDown size={14} aria-hidden="true" />
       </button>
       {open ? (
-        <div className="filter-menu" role="listbox">
+        <div className="filter-menu">
           <label className="filter-search">
             <Search size={14} aria-hidden="true" />
             <input
@@ -74,25 +80,33 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
               </button>
             ) : null}
           </label>
-          {selected.length ? (
-            <button type="button" className="filter-clear" onClick={() => onChange([])}>
-              <X size={12} aria-hidden="true" /> Clear
-            </button>
-          ) : null}
-          {visibleOptions.map((option) => (
+          <div className="filter-option-list" role="listbox" aria-label={label}>
+            {visibleOptions.map((option) => (
+              <button
+                key={option}
+                type="button"
+                className={`filter-option ${selected.includes(option) ? "checked" : ""}`}
+                onClick={() => toggle(option)}
+                role="option"
+                aria-selected={selected.includes(option)}
+              >
+                <i>{selected.includes(option) ? <Check size={12} aria-hidden="true" /> : null}</i>
+                <span>{show(option)}</span>
+              </button>
+            ))}
+            {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
+          </div>
+          <div className="filter-menu-actions">
             <button
-              key={option}
               type="button"
-              className={`filter-option ${selected.includes(option) ? "checked" : ""}`}
-              onClick={() => toggle(option)}
-              role="option"
-              aria-selected={selected.includes(option)}
+              className="filter-clear"
+              onClick={() => onChange([])}
+              disabled={!selected.length}
             >
-              <i>{selected.includes(option) ? <Check size={12} aria-hidden="true" /> : null}</i>
-              <span>{show(option)}</span>
+              Clear
             </button>
-          ))}
-          {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
+            <button type="button" className="filter-apply" onClick={closeMenu}>OK</button>
+          </div>
         </div>
       ) : null}
     </div>
@@ -102,7 +116,13 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
 export function SingleSelect({ label, options, value, onChange, placeholder = "Select" }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const ref = useOutsideClose(() => { setOpen(false); setQuery(""); });
+
+  function closeMenu() {
+    setOpen(false);
+    setQuery("");
+  }
+
+  const ref = useOutsideClose(closeMenu);
   const selectedOption = options.find((option) => String(option.value) === String(value));
   const normalizedQuery = query.trim().toLowerCase();
   const visibleOptions = normalizedQuery
@@ -111,8 +131,7 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
 
   function choose(nextValue) {
     onChange(nextValue);
-    setOpen(false);
-    setQuery("");
+    closeMenu();
   }
 
   return (
@@ -128,7 +147,7 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
         <ChevronDown size={14} aria-hidden="true" />
       </button>
       {open ? (
-        <div className="filter-menu filter-menu-single" role="listbox">
+        <div className="filter-menu filter-menu-single">
           <label className="filter-search">
             <Search size={14} aria-hidden="true" />
             <input
@@ -144,40 +163,48 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
               </button>
             ) : null}
           </label>
-          {value ? (
-            <button type="button" className="filter-clear" onClick={() => choose("")}>
-              <X size={12} aria-hidden="true" /> Clear
-            </button>
-          ) : null}
-          {placeholder ? (
+          <div className="filter-option-list" role="listbox" aria-label={label}>
+            {placeholder ? (
+              <button
+                type="button"
+                className={`filter-option single ${!value ? "checked" : ""}`}
+                onClick={() => choose("")}
+                role="option"
+                aria-selected={!value}
+              >
+                <i>{!value ? <Check size={12} aria-hidden="true" /> : null}</i>
+                <span>{placeholder}</span>
+              </button>
+            ) : null}
+            {visibleOptions.map((option) => {
+              const checked = String(option.value) === String(value);
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`filter-option single ${checked ? "checked" : ""}`}
+                  onClick={() => choose(option.value)}
+                  role="option"
+                  aria-selected={checked}
+                >
+                  <i>{checked ? <Check size={12} aria-hidden="true" /> : null}</i>
+                  <span>{option.label}</span>
+                </button>
+              );
+            })}
+            {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
+          </div>
+          <div className="filter-menu-actions">
             <button
               type="button"
-              className={`filter-option single ${!value ? "checked" : ""}`}
+              className="filter-clear"
               onClick={() => choose("")}
-              role="option"
-              aria-selected={!value}
+              disabled={!value}
             >
-              <i>{!value ? <Check size={12} aria-hidden="true" /> : null}</i>
-              <span>{placeholder}</span>
+              Clear
             </button>
-          ) : null}
-          {visibleOptions.map((option) => {
-            const checked = String(option.value) === String(value);
-            return (
-              <button
-                key={option.value}
-                type="button"
-                className={`filter-option single ${checked ? "checked" : ""}`}
-                onClick={() => choose(option.value)}
-                role="option"
-                aria-selected={checked}
-              >
-                <i>{checked ? <Check size={12} aria-hidden="true" /> : null}</i>
-                <span>{option.label}</span>
-              </button>
-            );
-          })}
-          {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
+            <button type="button" className="filter-apply" onClick={closeMenu}>OK</button>
+          </div>
         </div>
       ) : null}
     </div>

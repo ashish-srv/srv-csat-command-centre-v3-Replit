@@ -5,14 +5,17 @@ const TABLES = new Set([
   "app_settings", "automation_events", "client_pocs", "clients", "clusters", "departments",
   "feedback_cycles", "feedback_sessions", "internal_pocs", "issue_events",
   "issues", "messages", "observations", "poc_levels", "project_services",
-  "project_key_aliases", "projects", "service_catalog", "service_feedback", "sub_departments"
+  "project_key_aliases", "projects", "service_catalog", "service_feedback", "sub_departments",
+  "performance_reference_values", "client_performance_profiles", "project_performance_profiles",
+  "project_performance_kpis", "project_performance_audit"
 ]);
 
 const JSON_COLUMNS = {
   app_settings: new Set(["setting_value"]),
   automation_events: new Set(["payload"]),
   feedback_sessions: new Set(["conversation_state", "predicted_signals"]),
-  messages: new Set(["metadata"])
+  messages: new Set(["metadata"]),
+  project_performance_audit: new Set(["changes", "snapshot"])
 };
 
 // Many-to-one relationships embedded by the existing store's PostgREST

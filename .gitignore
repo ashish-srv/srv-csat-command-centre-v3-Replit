@@ -8,3 +8,4 @@ dist/
 .local/
 attached_assets/
 outputs/
+*-roundtrip.xlsx
