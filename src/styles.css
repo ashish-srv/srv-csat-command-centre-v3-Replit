@@ -4738,9 +4738,54 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
   border-radius: 9px;
 }
 .app-user-add-row { align-items: end; }
+.bulk-editor-block {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--soft-line);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.bulk-editor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.bulk-editor-heading > span { display: flex; flex-direction: column; gap: 3px; }
+.bulk-editor-heading small { color: var(--muted); }
+.existing-users-heading { margin: 16px 0 8px; }
+.app-user-draft-list { display: grid; gap: 8px; }
+.app-user-draft-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(150px, 0.8fr) 145px minmax(175px, 0.9fr) 110px 34px;
+  gap: 8px;
+  align-items: center;
+}
+.app-user-draft-row input,
+.app-user-draft-row select {
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  padding: 7px 9px;
+  font: inherit;
+}
+.bulk-row-placeholder {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 7px 9px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: #fff;
+}
+.bulk-editor-actions { justify-content: space-between; margin-top: 10px; }
 .app-user-row {
   display: grid;
-  grid-template-columns: minmax(230px, 1.35fr) minmax(150px, 0.8fr) 150px 120px auto;
+  grid-template-columns: minmax(230px, 1.35fr) minmax(150px, 0.8fr) 150px 120px;
   gap: 9px;
   align-items: center;
   padding: 10px;
@@ -4758,15 +4803,32 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
   padding: 7px 9px;
   font: inherit;
 }
-.standard-add-row { align-items: end; }
 .standards-scroll { padding: 8px; }
 .standard-category { border-bottom: 1px solid var(--soft-line); }
 .standard-category:last-child { border-bottom: 0; }
 .standard-category > summary { padding: 10px; }
 .standard-category > summary::after { font-size: 18px; }
 .standard-category > summary small { margin-left: auto; }
-.standard-value-list { display: grid; gap: 7px; padding: 0 10px 10px; }
-.standard-value-row { display: grid; grid-template-columns: minmax(190px, 1fr) 120px auto 34px; gap: 8px; align-items: center; }
+.standard-value-list { display: grid; gap: 7px; padding: 0 10px 12px; }
+.standard-select-all { display: flex; align-items: center; gap: 8px; color: var(--muted-strong); font-size: 12px; font-weight: 700; }
+.standard-select-all input,
+.standard-row-checkbox { width: 17px; height: 17px; margin: 0; accent-color: var(--blue); }
+.standard-value-row { display: grid; grid-template-columns: 54px minmax(190px, 1fr) 120px 34px; gap: 8px; align-items: center; }
+.standard-value-row:not(.standard-draft-row) > select { grid-column: 3; }
+.standard-new-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #1e58aa;
+  background: #e9f1ff;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.standard-bulk-actions { justify-content: flex-end; margin-top: 5px; padding-top: 10px; border-top: 1px solid var(--soft-line); }
 
 /* Project details: all filtered projects are expandable; page scrolling
    continues naturally when a fixed-height inner section reaches its end. */
@@ -4813,8 +4875,12 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
 .context-list { margin-bottom: 12px !important; }
 
 @media (max-width: 900px) {
+  .bulk-editor-heading { align-items: stretch; flex-direction: column; }
+  .app-user-draft-row { grid-template-columns: 1fr; padding-bottom: 10px; border-bottom: 1px solid var(--soft-line); }
   .app-user-row { grid-template-columns: 1fr; }
   .standard-value-row { grid-template-columns: 1fr; }
+  .standard-value-row:not(.standard-draft-row) > select { grid-column: auto; }
+  .standard-bulk-actions { align-items: stretch; flex-direction: column; }
   .performance-delivery-copy { grid-template-columns: 1fr; }
   .performance-project-accordion > summary { align-items: flex-start; flex-direction: column; }
   .performance-project-accordion > summary > span:last-child { align-items: flex-start; }

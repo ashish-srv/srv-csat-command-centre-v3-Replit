@@ -44,6 +44,33 @@ const PERFORMANCE_STANDARD_LABELS = {
   kpi_name: "KPI Name"
 };
 
+let manageDraftSequence = 0;
+
+function nextManageDraftId(prefix) {
+  manageDraftSequence += 1;
+  return `${prefix}-${manageDraftSequence}`;
+}
+
+function createAppUserDraft() {
+  return {
+    draftId: nextManageDraftId("app-user"),
+    email: "",
+    name: "",
+    role: "project_user",
+    internalPocId: "",
+    active: true,
+    permissions: defaultPermissions("project_user")
+  };
+}
+
+function createStandardDraft() {
+  return { draftId: nextManageDraftId("standard"), value: "", active: true };
+}
+
+function initialStandardDrafts() {
+  return Object.fromEntries(Object.keys(PERFORMANCE_STANDARD_LABELS).map((category) => [category, [createStandardDraft()]]));
+}
+
 const EMPTY_POC = {
   projectId: "", name: "", designation: "", contactWhatsapp: "",
   contactEmail: "", birthDate: "", salutation: "", honorific: "", levelId: "", weightPercentage: 0, active: true
@@ -1210,8 +1237,9 @@ export default function Manage({ onReload, currentUser = null }) {
   const [cleaning, setCleaning] = useState("");
   const [appUsers, setAppUsers] = useState([]);
   const [performanceStandards, setPerformanceStandards] = useState([]);
-  const [newAppUser, setNewAppUser] = useState({ email: "", name: "", role: "project_user", internalPocId: "", permissions: defaultPermissions("project_user") });
-  const [newStandard, setNewStandard] = useState({ category: "performance_status", value: "" });
+  const [newAppUsers, setNewAppUsers] = useState(() => [createAppUserDraft()]);
+  const [standardDrafts, setStandardDrafts] = useState(initialStandardDrafts);
+  const [selectedStandardIds, setSelectedStandardIds] = useState([]);
   const formRef = useRef(null);
   const workbookInputRef = useRef(null);
 
@@ -1264,77 +1292,174 @@ export default function Manage({ onReload, currentUser = null }) {
     }
   }
 
-  async function addAppUser() {
+  function updateNewAppUser(draftId, patch) {
+    setNewAppUsers((current) => current.map((row) => (
+      row.draftId === draftId ? { ...row, ...patch } : row
+    )));
+  }
+
+  async function addAppUsers() {
+    const pending = newAppUsers.filter((row) => row.email.trim());
+    if (!pending.length) {
+      showToast("Enter at least one Google Workspace email.");
+      return;
+    }
+    const missingInternalPoc = pending.find((row) => row.role === "project_user" && !row.internalPocId);
+    if (missingInternalPoc) {
+      showToast(`Select an Internal POC for ${missingInternalPoc.email}.`);
+      return;
+    }
     setSaving(true);
+    let added = 0;
     try {
-      await apiWrite("/api/admin/app-users", newAppUser, "POST");
-      setNewAppUser({ email: "", name: "", role: "project_user", internalPocId: "", permissions: defaultPermissions("project_user") });
-      showToast("Application user added. They can sign in with this Google email.");
-      await loadAll(clientId);
+      for (const row of pending) {
+        const result = await apiWrite("/api/admin/app-users", {
+          email: row.email,
+          name: row.name,
+          role: row.role,
+          internalPocId: row.role === "project_user" ? row.internalPocId : null,
+          active: row.active,
+          permissions: row.permissions
+        }, "POST");
+        added += 1;
+        setAppUsers((current) => [...current, result.user].sort((left, right) => left.email.localeCompare(right.email)));
+        setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId));
+      }
+      setNewAppUsers((current) => current.length ? current : [createAppUserDraft()]);
+      showToast(`${added} application user${added === 1 ? "" : "s"} added. They can now sign in with Google.`);
     } catch (saveError) {
-      showToast(saveError.message);
+      showToast(`${added ? `${added} added. ` : ""}${saveError.message}`);
     } finally {
       setSaving(false);
     }
   }
 
-  async function saveAppUser(user) {
+  async function saveAllAppUsers() {
+    const invalid = appUsers.find((user) => user.role === "project_user" && !user.internalPocId);
+    if (invalid) {
+      showToast(`Select an Internal POC for ${invalid.email}.`);
+      return;
+    }
     setSaving(true);
+    let savedCount = 0;
     try {
-      await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {
-        name: user.name,
-        role: user.role,
-        permissions: user.permissions,
-        internalPocId: user.internalPocId || null,
-        active: user.active
-      }, "PATCH");
-      showToast("Application user updated.");
-      await loadAll(clientId);
+      for (const user of appUsers) {
+        const result = await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {
+          name: user.name,
+          role: user.role,
+          permissions: user.permissions,
+          internalPocId: user.role === "project_user" ? user.internalPocId || null : null,
+          active: user.active
+        }, "PATCH");
+        savedCount += 1;
+        setAppUsers((current) => current.map((item) => item.id === user.id ? result.user : item));
+      }
+      showToast(`${savedCount} application user${savedCount === 1 ? "" : "s"} updated without leaving this section.`);
     } catch (saveError) {
-      showToast(saveError.message);
+      showToast(`${savedCount ? `${savedCount} updated. ` : ""}${saveError.message}`);
     } finally {
       setSaving(false);
     }
   }
 
-  async function addPerformanceStandard() {
+  function updateStandardDraft(category, draftId, patch) {
+    setStandardDrafts((current) => ({
+      ...current,
+      [category]: (current[category] || []).map((row) => row.draftId === draftId ? { ...row, ...patch } : row)
+    }));
+  }
+
+  function addStandardDraft(category) {
+    setStandardDrafts((current) => ({
+      ...current,
+      [category]: [...(current[category] || []), createStandardDraft()]
+    }));
+  }
+
+  function removeStandardDraft(category, draftId) {
+    setStandardDrafts((current) => {
+      const remaining = (current[category] || []).filter((row) => row.draftId !== draftId);
+      return { ...current, [category]: remaining.length ? remaining : [createStandardDraft()] };
+    });
+  }
+
+  async function savePerformanceStandardCategory(category) {
+    const existing = performanceStandards.filter((item) => item.category === category);
+    const drafts = (standardDrafts[category] || []).filter((item) => item.value.trim());
+    const allValues = [...existing.map((item) => item.value.trim()), ...drafts.map((item) => item.value.trim())];
+    const duplicate = allValues.find((value, index) => allValues.findIndex((candidate) => candidate.toLowerCase() === value.toLowerCase()) !== index);
+    if (existing.some((item) => !item.value.trim())) {
+      showToast(`${PERFORMANCE_STANDARD_LABELS[category]} contains an empty existing value.`);
+      return;
+    }
+    if (duplicate) {
+      showToast(`${duplicate} appears more than once in ${PERFORMANCE_STANDARD_LABELS[category]}.`);
+      return;
+    }
     setSaving(true);
+    let updatedCount = 0;
+    let addedCount = 0;
     try {
-      await apiWrite("/api/admin/performance-standards", newStandard, "POST");
-      setNewStandard((current) => ({ ...current, value: "" }));
-      showToast("Project Performance standard added.");
-      await loadAll(clientId);
+      for (const item of existing) {
+        const result = await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {
+          value: item.value,
+          sortOrder: item.sortOrder,
+          active: item.active
+        }, "PATCH");
+        updatedCount += 1;
+        setPerformanceStandards((current) => current.map((value) => value.id === item.id ? result.value : value));
+      }
+      for (const [index, draft] of drafts.entries()) {
+        const result = await apiWrite("/api/admin/performance-standards", {
+          category,
+          value: draft.value,
+          active: draft.active,
+          sortOrder: existing.length + index
+        }, "POST");
+        addedCount += 1;
+        setPerformanceStandards((current) => [...current, result.value]);
+        setStandardDrafts((current) => ({
+          ...current,
+          [category]: (current[category] || []).filter((item) => item.draftId !== draft.draftId)
+        }));
+      }
+      setStandardDrafts((current) => ({
+        ...current,
+        [category]: (current[category] || []).some((item) => !item.value.trim())
+          ? current[category]
+          : [...(current[category] || []), createStandardDraft()]
+      }));
+      showToast(`${PERFORMANCE_STANDARD_LABELS[category]} saved: ${updatedCount} updated, ${addedCount} added.`);
     } catch (saveError) {
-      showToast(saveError.message);
+      showToast(`${updatedCount} updated and ${addedCount} added before this error: ${saveError.message}`);
     } finally {
       setSaving(false);
     }
   }
 
-  async function savePerformanceStandard(item) {
-    setSaving(true);
-    try {
-      await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {
-        value: item.value,
-        sortOrder: item.sortOrder,
-        active: item.active
-      }, "PATCH");
-      showToast("Standard value updated.");
-      await loadAll(clientId);
-    } catch (saveError) {
-      showToast(saveError.message);
-    } finally {
-      setSaving(false);
+  async function removeSelectedPerformanceStandards(category) {
+    const selected = performanceStandards.filter((item) => item.category === category && selectedStandardIds.includes(item.id));
+    if (!selected.length) {
+      showToast(`Select one or more ${PERFORMANCE_STANDARD_LABELS[category]} values to remove.`);
+      return;
     }
-  }
-
-  async function removePerformanceStandard(item) {
-    if (!window.confirm(`Remove ${item.value} from future selections? Values already used by projects will be archived, not erased.`)) return;
+    if (!window.confirm(`Remove ${selected.length} selected value${selected.length === 1 ? "" : "s"}? Values already used by projects will be archived, not erased.`)) return;
     setSaving(true);
+    let deleted = 0;
+    let archived = 0;
     try {
-      const result = await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {}, "DELETE");
-      showToast(result.action === "archived" ? "Value is in use, so it was safely archived." : "Unused standard value deleted.");
-      await loadAll(clientId);
+      for (const item of selected) {
+        const result = await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {}, "DELETE");
+        if (result.action === "archived") {
+          archived += 1;
+          setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, active: false } : value));
+        } else {
+          deleted += 1;
+          setPerformanceStandards((current) => current.filter((value) => value.id !== item.id));
+        }
+        setSelectedStandardIds((current) => current.filter((id) => id !== item.id));
+      }
+      showToast(`${deleted} deleted and ${archived} safely archived because they are already in use.`);
     } catch (saveError) {
       showToast(saveError.message);
     } finally {
@@ -2069,15 +2194,32 @@ export default function Manage({ onReload, currentUser = null }) {
           </summary>
           <div className="admin-collapsible-body">
             <p className="form-note">Super Admin always has full access. Super Admin can configure Admins and Project Users. Admins with this permission can manage Project Users only and can never change an Admin or Super Admin account.</p>
-            <div className="form-grid app-user-add-row">
-              <Field label="Google Workspace Email"><input type="email" value={newAppUser.email} onChange={(event) => setNewAppUser((current) => ({ ...current, email: event.target.value }))} placeholder="name@srvmedia.com" /></Field>
-              <Field label="Name"><input value={newAppUser.name} onChange={(event) => setNewAppUser((current) => ({ ...current, name: event.target.value }))} /></Field>
-              <Field label="Role"><select value={newAppUser.role} onChange={(event) => { const role = event.target.value; setNewAppUser((current) => ({ ...current, role, permissions: defaultPermissions(role) })); }}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select></Field>
-              {newAppUser.role === "project_user" ? <Field label="Internal POC"><select value={newAppUser.internalPocId} onChange={(event) => setNewAppUser((current) => ({ ...current, internalPocId: event.target.value }))}><option value="">Select person</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></Field> : null}
-              <Button icon={Plus} variant="primary" onClick={addAppUser} disabled={saving || !newAppUser.email.trim() || (newAppUser.role === "project_user" && !newAppUser.internalPocId)}>Add User</Button>
+            <div className="bulk-editor-block">
+              <div className="bulk-editor-heading">
+                <span><strong>Add multiple users</strong><small>Enter all users and roles, then add them together. Role permissions can be adjusted below.</small></span>
+              </div>
+              <div className="app-user-draft-list">
+                {newAppUsers.map((row) => (
+                  <div className="app-user-draft-row" key={row.draftId}>
+                    <input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" />
+                    <input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder="Name" aria-label="User name" />
+                    <select value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", permissions: defaultPermissions(role) }); }} aria-label="Application role">
+                      <option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}
+                    </select>
+                    {row.role === "project_user" ? <select value={row.internalPocId} onChange={(event) => updateNewAppUser(row.draftId, { internalPocId: event.target.value })} aria-label="Internal POC"><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">All projects</span>}
+                    <select value={row.active ? "active" : "inactive"} onChange={(event) => updateNewAppUser(row.draftId, { active: event.target.value === "active" })} aria-label="User status"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+                    <button type="button" className="icon-button danger" disabled={newAppUsers.length === 1} onClick={() => setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId))} aria-label="Remove pending user"><Trash2 size={15} /></button>
+                  </div>
+                ))}
+              </div>
+              <div className="button-row bulk-editor-actions">
+                <Button icon={Plus} onClick={() => setNewAppUsers((current) => [...current, createAppUserDraft()])}>Add another user</Button>
+                <Button variant="primary" onClick={addAppUsers} disabled={saving || !newAppUsers.some((row) => row.email.trim())}>{saving ? "Adding users…" : `Add ${newAppUsers.filter((row) => row.email.trim()).length || ""} user${newAppUsers.filter((row) => row.email.trim()).length === 1 ? "" : "s"}`.trim()}</Button>
+              </div>
             </div>
-            <div className="app-permission-grid new-user-permissions">
-              {permissionsForRole(newAppUser.role).map((permission) => <label key={permission}><input type="checkbox" checked={newAppUser.role === "super_admin" || newAppUser.permissions?.[permission] === true} disabled={newAppUser.role === "super_admin"} onChange={(event) => setNewAppUser((current) => ({ ...current, permissions: { ...current.permissions, [permission]: event.target.checked } }))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
+            <div className="bulk-editor-heading existing-users-heading">
+              <span><strong>Edit users and roles together</strong><small>Make all required role, status and permission changes, then save once.</small></span>
+              <Button variant="primary" onClick={saveAllAppUsers} disabled={saving || !appUsers.length}>{saving ? "Saving users…" : "Save all user changes"}</Button>
             </div>
             <div className="admin-control-scroll">
               {appUsers.map((user) => (
@@ -2089,7 +2231,6 @@ export default function Manage({ onReload, currentUser = null }) {
                       <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => { const role = event.target.value; setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, role, permissions: defaultPermissions(role) } : item)); }} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
                       {user.role === "project_user" ? <select value={user.internalPocId || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: event.target.value } : item))} aria-label={`Internal POC for ${user.email}`}><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : null}
                       <select value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></select>
-                      <Button onClick={() => saveAppUser(user)} disabled={saving}>Save User</Button>
                     </div>
                     <div className="app-permission-grid">
                       {permissionsForRole(user.role).map((permission) => <label key={permission}><input type="checkbox" checked={user.role === "super_admin" || user.permissions?.[permission] === true} disabled={user.role === "super_admin"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, permissions: { ...item.permissions, [permission]: event.target.checked } } : item))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
@@ -2109,26 +2250,37 @@ export default function Manage({ onReload, currentUser = null }) {
             <span><strong>Project Performance Standards</strong><small>Controlled dropdown values · Super Admin only</small></span>
           </summary>
           <div className="admin-collapsible-body">
-            <div className="form-grid standard-add-row">
-              <Field label="Standard"><select value={newStandard.category} onChange={(event) => setNewStandard({ category: event.target.value, value: "" })}>{Object.entries(PERFORMANCE_STANDARD_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-              <Field label="New Value"><input value={newStandard.value} onChange={(event) => setNewStandard((current) => ({ ...current, value: event.target.value }))} /></Field>
-              <Button icon={Plus} variant="primary" onClick={addPerformanceStandard} disabled={saving || !newStandard.value.trim()}>Add Value</Button>
-            </div>
+            <p className="form-note">Open any standard below. Add multiple new rows, edit existing values or statuses, select values for removal, and save that standard once. The page and scroll position remain unchanged.</p>
             <div className="admin-control-scroll standards-scroll">
               {Object.entries(PERFORMANCE_STANDARD_LABELS).map(([category, label]) => {
                 const values = performanceStandards.filter((item) => item.category === category);
+                const drafts = standardDrafts[category] || [];
+                const selectedIds = values.filter((item) => selectedStandardIds.includes(item.id)).map((item) => item.id);
                 return (
                   <details className="standard-category" key={category}>
-                    <summary><strong>{label}</strong><small>{values.filter((item) => item.active).length} active · {values.length} total</small></summary>
+                    <summary><strong>{label}</strong><small>{values.filter((item) => item.active).length} active · {values.length} saved</small></summary>
                     <div className="standard-value-list">
+                      {values.length ? <label className="standard-select-all"><input type="checkbox" checked={selectedIds.length === values.length} onChange={(event) => setSelectedStandardIds((current) => event.target.checked ? [...new Set([...current, ...values.map((item) => item.id)])] : current.filter((id) => !values.some((item) => item.id === id)))} /><span>Select all saved values</span></label> : null}
                       {values.map((item) => (
                         <div className="standard-value-row" key={item.id}>
-                          <input value={item.value} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, value: event.target.value } : value))} />
+                          <input type="checkbox" className="standard-row-checkbox" checked={selectedStandardIds.includes(item.id)} onChange={(event) => setSelectedStandardIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} aria-label={`Select ${item.value}`} />
+                          <input value={item.value} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, value: event.target.value } : value))} aria-label={`${label} value`} />
                           <select value={item.active ? "active" : "inactive"} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, active: event.target.value === "active" } : value))}><option value="active">Active</option><option value="inactive">Archived</option></select>
-                          <Button onClick={() => savePerformanceStandard(item)} disabled={saving}>Save</Button>
-                          <button type="button" className="icon-button danger" onClick={() => removePerformanceStandard(item)} disabled={saving} aria-label={`Remove ${item.value}`}><Trash2 size={15} /></button>
                         </div>
                       ))}
+                      {drafts.map((item) => (
+                        <div className="standard-value-row standard-draft-row" key={item.draftId}>
+                          <span className="standard-new-badge">New</span>
+                          <input value={item.value} onChange={(event) => updateStandardDraft(category, item.draftId, { value: event.target.value })} placeholder={`New ${label}`} aria-label={`New ${label}`} />
+                          <select value={item.active ? "active" : "inactive"} onChange={(event) => updateStandardDraft(category, item.draftId, { active: event.target.value === "active" })}><option value="active">Active</option><option value="inactive">Archived</option></select>
+                          <button type="button" className="icon-button danger" onClick={() => removeStandardDraft(category, item.draftId)} disabled={saving || drafts.length === 1} aria-label={`Remove new ${label} row`}><Trash2 size={15} /></button>
+                        </div>
+                      ))}
+                      <div className="button-row standard-bulk-actions">
+                        <Button icon={Plus} onClick={() => addStandardDraft(category)} disabled={saving}>Add another value</Button>
+                        <Button variant="danger" onClick={() => removeSelectedPerformanceStandards(category)} disabled={saving || !selectedIds.length}>Remove selected ({selectedIds.length})</Button>
+                        <Button variant="primary" onClick={() => savePerformanceStandardCategory(category)} disabled={saving}>{saving ? "Saving…" : `Save all ${label}`}</Button>
+                      </div>
                     </div>
                   </details>
                 );
