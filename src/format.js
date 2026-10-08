@@ -247,9 +247,12 @@ export function formatGuardrail(code) {
 
 export function riskClass(value) {
   const normalized = String(value || "").toLowerCase();
-  if (normalized.includes("high") || normalized.includes("weak") || normalized.includes("failed") || normalized.includes("escalation")) return "weak";
+  if (normalized.includes("off track") || normalized.includes("at risk") || normalized.includes("critical")
+    || normalized.includes("concerned") || normalized.includes("escalated") || normalized.includes("high")
+    || normalized.includes("weak") || normalized.includes("failed") || normalized.includes("escalation")) return "weak";
   if (normalized.includes("watch") || normalized.includes("partial") || normalized.includes("pending") || normalized.includes("attention")) return "watch";
-  if (normalized.includes("closed") || normalized.includes("completed") || normalized.includes("low") || normalized.includes("sent")) return "strong";
+  if (normalized.includes("on track") || normalized.includes("positive") || normalized.includes("closed")
+    || normalized.includes("completed") || normalized.includes("low") || normalized.includes("sent")) return "strong";
   return "neutral";
 }
 

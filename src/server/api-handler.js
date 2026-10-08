@@ -6,6 +6,8 @@ const { processWhatsAppReply, getConversationState, buildChecklist, applyCapture
 const { offScriptReply, reviewIssues, readTone, readNps, interpretReply, conductTurn, predictSatisfaction, cleanRepeatedText, extractExplicitAppreciations, hasSatisfactionEvidence, ALERT_CONFIDENCE_THRESHOLD } = require("../lib/gemini");
 const { emitAutomation } = require("../lib/n8n");
 const { importAdminWorkbook } = require("../lib/admin-import");
+const { buildCsatImportWorkbook } = require("../lib/csat-workbook-template");
+const { recipientList, sendEmail, smtpConfigured } = require("../lib/email");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -59,6 +61,91 @@ function automaticProjectEndFeedbackEnabled() {
   const configured = String(process.env.AUTO_PROJECT_END_FEEDBACK || "").trim().toLowerCase();
   if (!configured) return false;
   return ["1", "true", "yes", "on"].includes(configured);
+}
+
+function escapeEmailHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+async function notifySetupRecordCreated(store, { kind, client, project = null, actor, source, baseUrl }) {
+  if (!smtpConfigured()) return { status: "not_configured" };
+  try {
+    const users = typeof store.listAppUsers === "function" ? await store.listAppUsers() : [];
+    const recipients = recipientList([
+      ...users.filter((user) => user.active !== false && user.role === "super_admin").map((user) => user.email),
+      process.env.PROJECT_SETUP_ALERT_EMAILS || ""
+    ].join(","));
+    if (!recipients.length) return { status: "no_recipients" };
+
+    const recordId = project?.id || client?.id || "unknown";
+    const dedupeKey = `setup_email:${kind}:${recordId}`;
+    const payload = {
+      kind,
+      clientId: client?.id || null,
+      clientName: client?.name || null,
+      projectId: project?.id || null,
+      projectKey: project?.key || null,
+      projectName: project?.name || null,
+      actor: actor || "Unknown user",
+      source: source || "application",
+      recipients
+    };
+    let claim = null;
+    if (typeof store.claimAutomationEvent === "function") {
+      claim = await store.claimAutomationEvent("project_setup_email", payload, dedupeKey);
+      if (!claim) return { status: "duplicate" };
+    }
+
+    const title = project ? `New project needs review: ${project.name}` : `New client added: ${client?.name || "Unnamed client"}`;
+    const appUrl = String(baseUrl || process.env.PUBLIC_APP_URL || "").replace(/\/$/, "");
+    const details = [
+      `Record: ${project ? "Project" : "Client"}`,
+      `Client: ${client?.name || "Not set"}`,
+      ...(project ? [`Project: ${project.name}`, `Project ID: ${project.key}`] : []),
+      `Created by: ${actor || "Unknown user"}`,
+      `Source: ${source || "application"}`,
+      project?.activeStatus === "paused" ? "Status: Paused — complete setup before activation" : `Status: ${project?.activeStatus || client?.activeStatus || "Not set"}`,
+      appUrl ? `Open application: ${appUrl}` : ""
+    ].filter(Boolean);
+    try {
+      const result = await sendEmail({
+        to: recipients,
+        subject: `[CSAT Command Centre] ${title}`,
+        text: details.join("\n"),
+        html: `<h2>${escapeEmailHtml(title)}</h2><ul>${details.slice(0, -1).map((line) => `<li>${escapeEmailHtml(line)}</li>`).join("")}</ul>${appUrl ? `<p><a href="${escapeEmailHtml(appUrl)}">Open CSAT Command Centre</a></p>` : ""}`
+      });
+      const event = {
+        eventType: "project_setup_email",
+        dedupeKey,
+        payload: { ...payload, messageId: result.messageId || null },
+        status: result.sent ? "sent" : "failed",
+        webhookUrlConfigured: false,
+        statusCode: result.sent ? 200 : null,
+        sentAt: new Date().toISOString(),
+        error: result.error || null
+      };
+      if (claim && typeof store.completeAutomationEvent === "function") await store.completeAutomationEvent(claim.id, event);
+      else if (typeof store.recordAutomationEvent === "function") await store.recordAutomationEvent(event);
+      return event;
+    } catch (emailError) {
+      const event = {
+        eventType: "project_setup_email", dedupeKey, payload, status: "failed", webhookUrlConfigured: false,
+        sentAt: new Date().toISOString(), error: emailError.message
+      };
+      if (claim && typeof store.completeAutomationEvent === "function") await store.completeAutomationEvent(claim.id, event);
+      else if (typeof store.recordAutomationEvent === "function") await store.recordAutomationEvent(event);
+      console.warn("[email] project setup alert failed:", emailError.message);
+      return event;
+    }
+  } catch (error) {
+    console.warn("[email] could not prepare project setup alert:", error.message);
+    return { status: "failed", error: error.message };
+  }
 }
 
 function automaticFeedbackTargets(targets = []) {
@@ -1697,6 +1784,7 @@ function adminRoutePermission(method, pathname) {
   if (/^\/api\/admin\/bulk-feedback\//.test(pathname)) return "bulk_sends";
   if (/^\/api\/admin\/app-users(?:\/|$)/.test(pathname)) return "manage_project_users";
   if (/^\/api\/admin\/(?:performance-standards|service-catalog)(?:\/|$)/.test(pathname)) return "manage_catalogues";
+  if (/^\/api\/admin\/organization-standards(?:\/|$)/.test(pathname)) return "manage_internal_pocs";
   if (/^\/api\/admin\/(?:internal-pocs|departments|sub-departments)(?:\/|$)/.test(pathname)) return "manage_internal_pocs";
   if (/^\/api\/admin\/(?:poc-levels|poc-control)(?:\/|$)/.test(pathname) || /^\/api\/admin\/projects\/[^/]+\/pocs$/.test(pathname)) return "manage_pocs";
   if (pathname === "/api/admin/directory" || /^\/api\/admin\/clients\//.test(pathname)) {
@@ -3747,6 +3835,14 @@ async function handleApiRequest(request) {
         kpis: []
       });
     }
+    await notifySetupRecordCreated(store, {
+      kind: "project",
+      client,
+      project,
+      actor: appAccess.email || appAccess.name || "Password Super Admin",
+      source: "Project Performance",
+      baseUrl
+    });
     return json(201, {
       project,
       requiresSuperAdminSetup: true,
@@ -3823,7 +3919,7 @@ async function handleApiRequest(request) {
     const data = await store.getProjectPerformanceData();
     const existingPerformanceProject = data.projects.find((item) => item.id === projectId) || null;
     const referenceChecks = {
-      clientCategory: [body.clientProfile?.clientCategory, "client_category", existingPerformanceProject?.clientCategory],
+      clientCriticality: [body.clientProfile?.clientCriticality, "client_criticality", existingPerformanceProject?.clientCriticality],
       clientGroup: [body.clientProfile?.clientGroup, "client_group", existingPerformanceProject?.clientGroup],
       projectType: [profile.projectType, "project_type", existingPerformanceProject?.projectType],
       revenueCategory: [profile.revenueCategory, "revenue_category", existingPerformanceProject?.revenueCategory],
@@ -5113,8 +5209,30 @@ async function handleApiRequest(request) {
     return json(200, { user });
   }
 
+  if (method === "DELETE" && appUserMatch) {
+    const appUserId = decodeURIComponent(appUserMatch[1]);
+    const users = await store.listAppUsers();
+    const existing = users.find((item) => item.id === appUserId);
+    if (!existing) return error(404, "Application user not found");
+    if (appAccess.appUserId === appUserId) {
+      return error(409, "You cannot delete your own Application User account");
+    }
+    if (existing.role === "super_admin") {
+      return error(409, "Super Admin accounts cannot be deleted", "Keep the account for access continuity, or deactivate it after another active Super Admin exists.");
+    }
+    if (appAccess.role !== "super_admin" && existing.role !== "project_user") {
+      return error(403, "Admins cannot delete Super Admin or Admin accounts");
+    }
+    const result = await store.deleteAppUserIfNoHistory(appUserId);
+    if (!result) return error(404, "Application user not found");
+    if (result.action === "blocked") {
+      return error(409, "This Application User has Project Performance history and cannot be deleted", "Deactivate the account instead so its saved update and audit attribution is retained.");
+    }
+    return json(200, result);
+  }
+
   const PERFORMANCE_STANDARD_CATEGORIES = new Set([
-    "client_group", "client_category", "project_type", "revenue_category", "portfolio_type", "currency",
+    "client_group", "client_criticality", "project_type", "revenue_category", "portfolio_type", "currency",
     "performance_status", "current_phase", "campaign_status", "client_sentiment", "relationship_strength",
     "meeting_cadence", "suggestion_frequency", "kpi_name"
   ]);
@@ -5153,7 +5271,7 @@ async function handleApiRequest(request) {
   }
 
   if (method === "DELETE" && performanceStandardMatch) {
-    const result = await store.deleteOrArchivePerformanceReferenceValue(decodeURIComponent(performanceStandardMatch[1]));
+    const result = await store.deletePerformanceReferenceValue(decodeURIComponent(performanceStandardMatch[1]));
     if (!result) return error(404, "Standard value not found");
     return json(200, result);
   }
@@ -5275,6 +5393,27 @@ async function handleApiRequest(request) {
     return json(200, { internalPoc });
   }
 
+  if (method === "DELETE" && internalPocUpdateMatch) {
+    const internalPocId = decodeURIComponent(internalPocUpdateMatch[1]);
+    const result = await store.deleteInternalPoc(internalPocId);
+    if (!result.internalPocsDeleted) return error(404, "Internal POC not found");
+    return json(200, result);
+  }
+
+  const departmentDeleteMatch = pathname.match(/^\/api\/admin\/departments\/([^/]+)$/);
+  if (method === "DELETE" && departmentDeleteMatch) {
+    const result = await store.deleteDepartment(decodeURIComponent(departmentDeleteMatch[1]));
+    if (!result.departmentsDeleted) return error(404, "Department not found");
+    return json(200, result);
+  }
+
+  const subDepartmentDeleteMatch = pathname.match(/^\/api\/admin\/sub-departments\/([^/]+)$/);
+  if (method === "DELETE" && subDepartmentDeleteMatch) {
+    const result = await store.deleteSubDepartment(decodeURIComponent(subDepartmentDeleteMatch[1]));
+    if (!result.subDepartmentsDeleted) return error(404, "Sub-department not found");
+    return json(200, result);
+  }
+
   if (method === "POST" && pathname === "/api/admin/services") {
     const missing = ["projectId", "name"].filter((field) => !String(body[field] || "").trim());
     if (missing.length) return error(400, "Missing required fields", missing.join(", "));
@@ -5358,6 +5497,48 @@ async function handleApiRequest(request) {
     return json(200, { service });
   }
 
+  if (method === "POST" && pathname === "/api/admin/organization-standards/bulk") {
+    const clusterNames = [...new Set((Array.isArray(body.clusters) ? body.clusters : []).map((item) => String(item || "").trim()).filter(Boolean))];
+    const departmentNames = [...new Set((Array.isArray(body.departments) ? body.departments : []).map((item) => String(item || "").trim()).filter(Boolean))];
+    const subDepartmentRows = (Array.isArray(body.subDepartments) ? body.subDepartments : [])
+      .map((item) => ({ departmentId: String(item?.departmentId || "").trim(), name: String(item?.name || "").trim() }))
+      .filter((item) => item.name || item.departmentId);
+    if (!clusterNames.length && !departmentNames.length && !subDepartmentRows.length) {
+      return error(400, "Add at least one Cluster, Department or Sub-department");
+    }
+    if (clusterNames.length + departmentNames.length + subDepartmentRows.length > 150) {
+      return error(400, "Add no more than 150 organization standards in one save");
+    }
+    const directory = await store.getDirectory();
+    const clusterKeys = new Set((directory.clusters || []).map((item) => item.name.trim().toLowerCase()));
+    const departmentKeys = new Set((directory.departments || []).map((item) => item.name.trim().toLowerCase()));
+    const departmentIds = new Set((directory.departments || []).map((item) => item.id));
+    const subKeys = new Set((directory.subDepartments || []).map((item) => `${item.departmentId}|${item.name.trim().toLowerCase()}`));
+    const created = { clusters: [], departments: [], subDepartments: [] };
+    for (const name of clusterNames) {
+      const key = name.toLowerCase();
+      if (clusterKeys.has(key)) continue;
+      created.clusters.push(await store.createCluster({ name }));
+      clusterKeys.add(key);
+    }
+    for (const name of departmentNames) {
+      const key = name.toLowerCase();
+      if (departmentKeys.has(key)) continue;
+      created.departments.push(await store.createDepartment({ name }));
+      departmentKeys.add(key);
+    }
+    for (let index = 0; index < subDepartmentRows.length; index += 1) {
+      const row = subDepartmentRows[index];
+      if (!row.departmentId || !departmentIds.has(row.departmentId)) return error(400, `Sub-department ${index + 1}: select an existing Department`);
+      if (!row.name) return error(400, `Sub-department ${index + 1}: name is required`);
+      const key = `${row.departmentId}|${row.name.toLowerCase()}`;
+      if (subKeys.has(key)) continue;
+      created.subDepartments.push(await store.createSubDepartment(row));
+      subKeys.add(key);
+    }
+    return json(201, { created });
+  }
+
   if (method === "POST" && pathname === "/api/admin/clusters") {
     const name = String(body.name || "").trim();
     if (!name) return error(400, "Cluster name is required");
@@ -5394,7 +5575,15 @@ async function handleApiRequest(request) {
       return error(409, "That client ID is already used", requestedKey);
     }
     const key = requestedKey || await availableIdentifier(name, (candidate) => store.clientKeyExists(candidate));
-    return json(201, { client: await store.createClient({ ...body, name, key }) });
+    const client = await store.createClient({ ...body, name, key });
+    await notifySetupRecordCreated(store, {
+      kind: "client",
+      client,
+      actor: appAccess.email || appAccess.name || "Password Super Admin",
+      source: "Manage",
+      baseUrl
+    });
+    return json(201, { client });
   }
 
   const clientUpdateMatch = pathname.match(/^\/api\/admin\/clients\/([^/]+)$/);
@@ -5419,6 +5608,17 @@ async function handleApiRequest(request) {
       return error(400, "Workbook validation failed", result.errors.slice(0, 40));
     }
     return json(200, result);
+  }
+
+  if (method === "GET" && pathname === "/api/admin/import-workbook-template") {
+    const directory = await store.getDirectory();
+    const workbook = await buildCsatImportWorkbook(directory);
+    const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+    return json(200, {
+      filename: `SRV_CSAT_Client_Project_Import_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      base64: buffer.toString("base64")
+    });
   }
 
   if (method === "POST" && pathname === "/api/admin/project-setups") {
@@ -5520,6 +5720,16 @@ async function handleApiRequest(request) {
         recovery: "The project remains paused. Open it in Manage, complete the missing records, then activate it."
       });
     }
+    const directory = await store.getDirectory();
+    const client = (directory.clients || []).find((item) => item.id === project.clientId) || { id: project.clientId, name: "Unknown client" };
+    await notifySetupRecordCreated(store, {
+      kind: "project",
+      client,
+      project,
+      actor: appAccess.email || appAccess.name || "Password Super Admin",
+      source: "Manage complete project setup",
+      baseUrl
+    });
     return json(201, { project, pocs: createdPocs, services: createdServices });
   }
 
@@ -5842,7 +6052,20 @@ async function handleApiRequest(request) {
     }
 
     const projects = [];
-    for (const project of prepared) projects.push(await store.createProject(project));
+    const directory = await store.getDirectory();
+    const client = (directory.clients || []).find((item) => item.id === clientId) || { id: clientId, name: "Unknown client" };
+    for (const input of prepared) {
+      const project = await store.createProject(input);
+      projects.push(project);
+      await notifySetupRecordCreated(store, {
+        kind: "project",
+        client,
+        project,
+        actor: appAccess.email || appAccess.name || "Password Super Admin",
+        source: "Manage bulk project upload",
+        baseUrl
+      });
+    }
     return json(201, { projects, imported: projects.length });
   }
 
@@ -5862,6 +6085,16 @@ async function handleApiRequest(request) {
     }
     const project = await store.createProject({ ...body, key: requestedKey });
     if (typeof store.ensureProjectSchedule === "function") await store.ensureProjectSchedule(project.id);
+    const directory = await store.getDirectory();
+    const client = (directory.clients || []).find((item) => item.id === project.clientId) || { id: project.clientId, name: "Unknown client" };
+    await notifySetupRecordCreated(store, {
+      kind: "project",
+      client,
+      project,
+      actor: appAccess.email || appAccess.name || "Password Super Admin",
+      source: "Manage",
+      baseUrl
+    });
     return json(201, { project });
   }
 

@@ -29,7 +29,7 @@ function formFromProject(project, editor = "") {
   return {
     updatedBy: editor,
     clientGroup: project?.clientGroup || "",
-    clientCategory: project?.clientCategory || "",
+    clientCriticality: project?.clientCriticality || "",
     financialYear: project?.financialYear || "",
     projectType: project?.projectType || "",
     revenueCategory: project?.revenueCategory || "",
@@ -107,6 +107,14 @@ function valueOrDash(value) {
   return value === null || value === undefined || value === "" ? "—" : value;
 }
 
+function budgetPosition(project) {
+  const allocated = Number(project?.budgetAllocatedLocal);
+  const spent = Number(project?.budgetSpentLocal);
+  if (!Number.isFinite(allocated) || !Number.isFinite(spent)) return { left: null, percent: null };
+  const left = allocated - spent;
+  return { left, percent: allocated > 0 ? (left / allocated) * 100 : null };
+}
+
 function kpiAchievement(kpi) {
   const target = Number(kpi?.target);
   const actual = Number(kpi?.actual);
@@ -143,6 +151,7 @@ function ProjectDetailCards({ project, serviceCatalog, canManageServices, removi
   const [serviceCatalogId, setServiceCatalogId] = useState("");
   const attachedKeys = new Set((project.services || []).flatMap((service) => [service.serviceCatalogId, service.serviceKey]).filter(Boolean));
   const availableServices = (serviceCatalog || []).filter((service) => service.active !== false && !attachedKeys.has(service.id) && !attachedKeys.has(service.serviceKey));
+  const budget = budgetPosition(project);
 
   async function addService() {
     if (!serviceCatalogId) return;
@@ -156,13 +165,13 @@ function ProjectDetailCards({ project, serviceCatalog, canManageServices, removi
         <div><dt>Cluster</dt><dd>{project.clusterName || "Not set"}</dd></div><div><dt>Client</dt><dd>{project.clientName || "Not set"}</dd></div><div><dt>Project ID</dt><dd>{project.key}</dd></div><div><dt>Project Name</dt><dd>{project.name}</dd></div><div><dt>Start Date</dt><dd>{formatDate(project.startDate)}</dd></div><div><dt>End Date</dt><dd>{formatDate(project.endDate)}</dd></div><div><dt>CSAT Active Status</dt><dd><StatusPill value={project.activeStatus} /></dd></div>
       </dl></Panel>
       <Panel title="Client and Project Profile" className="performance-card tone-violet"><dl className="detail-list">
-        <div><dt>Client Group</dt><dd>{project.clientGroup || "Not set"}</dd></div><div><dt>Client Category</dt><dd>{project.clientCategory || "Not set"}</dd></div><div><dt>Financial Year</dt><dd>{project.financialYear || "Not set"}</dd></div><div><dt>Project Type</dt><dd>{project.projectType || "Not set"}</dd></div><div><dt>Revenue Category</dt><dd>{project.revenueCategory || "Not set"}</dd></div><div><dt>Portfolio Type</dt><dd>{project.portfolioType || "Not set"}</dd></div>
+        <div><dt>Client Group</dt><dd>{project.clientGroup || "Not set"}</dd></div><div><dt>Client Criticality</dt><dd><StatusPill value={project.clientCriticality || "Not set"} /></dd></div><div><dt>Financial Year</dt><dd>{project.financialYear || "Not set"}</dd></div><div><dt>Project Type</dt><dd>{project.projectType || "Not set"}</dd></div><div><dt>Revenue Category</dt><dd>{project.revenueCategory || "Not set"}</dd></div><div><dt>Portfolio Type</dt><dd>{project.portfolioType || "Not set"}</dd></div>
       </dl></Panel>
       <Panel title="Project Team" className="performance-card tone-sky"><dl className="detail-list">
         <div><dt>Project Director</dt><dd>{project.team?.projectDirector?.name || "Not set"}</dd></div><div><dt>AM</dt><dd>{project.team?.am?.name || "Not set"}</dd></div><div><dt>TL</dt><dd>{project.team?.tl?.name || "Not set"}</dd></div><div><dt>AD</dt><dd>{project.team?.ad?.name || "Not set"}</dd></div><div><dt>AVP</dt><dd>{project.team?.avp?.name || "Not set"}</dd></div>
       </dl></Panel>
       <Panel title="Commercial Profile" className="performance-card tone-amber"><dl className="detail-list">
-        <div><dt>Currency</dt><dd>{project.currency || "INR"}</dd></div><div><dt>FX Rate to INR</dt><dd>{valueOrDash(project.fxRateToInr)}</dd></div><div><dt>PO Amount</dt><dd>{money(project.poAmountLocal, project.currency)}</dd></div><div><dt>Budget Allocated</dt><dd>{money(project.budgetAllocatedLocal, project.currency)}</dd></div><div><dt>Budget Spent</dt><dd>{money(project.budgetSpentLocal, project.currency)}</dd></div><div><dt>Revenue Generated</dt><dd>{money(project.revenueGeneratedLocal, project.currency)}</dd></div>
+        <div><dt>Currency</dt><dd>{project.currency || "INR"}</dd></div><div><dt>FX Rate to INR</dt><dd>{valueOrDash(project.fxRateToInr)}</dd></div><div><dt>PO Amount</dt><dd>{money(project.poAmountLocal, project.currency)}</dd></div><div><dt>Budget Allocated</dt><dd>{money(project.budgetAllocatedLocal, project.currency)}</dd></div><div><dt>Budget Spent</dt><dd>{money(project.budgetSpentLocal, project.currency)}</dd></div><div><dt>Budget Left</dt><dd className={budget.left !== null && budget.left < 0 ? "performance-negative-value" : ""}>{money(budget.left, project.currency)}</dd></div><div><dt>Budget Left %</dt><dd className={budget.percent !== null && budget.percent < 0 ? "performance-negative-value" : ""}>{budget.percent === null ? "Not set" : `${budget.percent.toFixed(1)}%`}</dd></div><div><dt>Revenue Generated</dt><dd>{money(project.revenueGeneratedLocal, project.currency)}</dd></div>
       </dl></Panel>
       <Panel title="Current Performance" className="performance-card tone-green"><dl className="detail-list">
         <div><dt>Performance Status</dt><dd><StatusPill value={project.performanceStatus || "Not set"} /></dd></div><div><dt>Current Phase</dt><dd>{project.currentPhase || "Not set"}</dd></div><div><dt>Campaign Status</dt><dd>{project.campaignStatus || "Not set"}</dd></div>
@@ -210,6 +219,8 @@ export default function ProjectPerformance({ currentUser = null }) {
   const [sentiment, setSentiment] = useState("");
   const [amFilter, setAmFilter] = useState("");
   const [avpFilter, setAvpFilter] = useState("");
+  const [yearFilter, setYearFilter] = useState("");
+  const [phaseFilter, setPhaseFilter] = useState("");
   const [projectSearch, setProjectSearch] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [form, setForm] = useState(formFromProject(null, editorIdentity));
@@ -259,6 +270,8 @@ export default function ProjectPerformance({ currentUser = null }) {
   const sentimentValues = useMemo(() => (data?.referenceValues?.client_sentiment || []).map((item) => item.value), [data]);
   const amOptions = useMemo(() => [...new Map(projects.map((item) => item.team?.am).filter(Boolean).map((item) => [item.id, item])).values()].map((item) => ({ value: item.id, label: item.name })), [projects]);
   const avpOptions = useMemo(() => [...new Map(projects.map((item) => item.team?.avp).filter(Boolean).map((item) => [item.id, item])).values()].map((item) => ({ value: item.id, label: item.name })), [projects]);
+  const yearOptions = useMemo(() => [...new Set(projects.map((item) => item.financialYear).filter(Boolean))].sort().map((value) => ({ value, label: value })), [projects]);
+  const phaseOptions = useMemo(() => (data?.referenceValues?.current_phase || []).filter((item) => item.active !== false).map((item) => ({ value: item.value, label: item.value })), [data]);
 
   const filteredProjects = useMemo(() => projects
     .filter((item) => !cluster || item.clusterName === cluster)
@@ -267,8 +280,10 @@ export default function ProjectPerformance({ currentUser = null }) {
     .filter((item) => !status || item.performanceStatus === status)
     .filter((item) => !sentiment || item.clientSentiment === sentiment)
     .filter((item) => !amFilter || item.team?.amId === amFilter)
-    .filter((item) => !avpFilter || item.team?.avpId === avpFilter),
-  [projects, cluster, client, projectFilter, status, sentiment, amFilter, avpFilter]);
+    .filter((item) => !avpFilter || item.team?.avpId === avpFilter)
+    .filter((item) => !yearFilter || item.financialYear === yearFilter)
+    .filter((item) => !phaseFilter || item.currentPhase === phaseFilter),
+  [projects, cluster, client, projectFilter, status, sentiment, amFilter, avpFilter, yearFilter, phaseFilter]);
 
   const searchedProjects = useMemo(() => {
     const needle = projectSearch.trim().toLowerCase();
@@ -288,7 +303,7 @@ export default function ProjectPerformance({ currentUser = null }) {
     ].some((value) => String(value || "").toLowerCase().includes(needle)));
   }, [filteredProjects, projectSearch]);
 
-  const selectedProject = projects.find((item) => item.id === selectedProjectId) || null;
+  const selectedProject = searchedProjects.find((item) => item.id === selectedProjectId) || null;
   const concernedCount = searchedProjects.filter((item) => ["Concerned", "Escalated"].includes(item.clientSentiment)).length;
 
   function chooseProject(projectId, move = false) {
@@ -299,6 +314,11 @@ export default function ProjectPerformance({ currentUser = null }) {
     setNotice("");
     if (move) scrollToSection("performance-project-details");
   }
+
+  useEffect(() => {
+    if (searchedProjects.some((item) => item.id === selectedProjectId)) return;
+    chooseProject(searchedProjects[0]?.id || "");
+  }, [searchedProjects, selectedProjectId]);
 
   function updateField(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -403,7 +423,7 @@ export default function ProjectPerformance({ currentUser = null }) {
       await apiPut(`/api/project-performance/${encodeURIComponent(selectedProject.id)}`, {
         updatedBy: form.updatedBy,
         expectedVersion: selectedProject.version || 0,
-        clientProfile: { clientGroup: form.clientGroup, clientCategory: form.clientCategory },
+        clientProfile: { clientGroup: form.clientGroup, clientCriticality: form.clientCriticality },
         profile: {
           financialYear: form.financialYear,
           projectType: form.projectType,
@@ -506,7 +526,7 @@ export default function ProjectPerformance({ currentUser = null }) {
   if (error && !data) return <ErrorBlock error={error} onRetry={() => load("")} />;
 
   const internalPocOptions = options((data?.internalPocs || []).filter((item) => item.active !== false));
-  const allFiltersClear = !cluster && !client && !projectFilter && !status && !sentiment && !amFilter && !avpFilter && !projectSearch;
+  const allFiltersClear = !cluster && !client && !projectFilter && !status && !sentiment && !amFilter && !avpFilter && !yearFilter && !phaseFilter && !projectSearch;
   const currencySymbol = CURRENCY_SYMBOLS[selectedProject?.currency || "INR"] || selectedProject?.currency || "";
 
   return (
@@ -624,7 +644,7 @@ export default function ProjectPerformance({ currentUser = null }) {
         </div>
         <FilterBar
           showReset={!allFiltersClear}
-          onReset={() => { setCluster(""); setClient(""); setProjectFilter(""); setStatus(""); setSentiment(""); setAmFilter(""); setAvpFilter(""); setProjectSearch(""); }}
+          onReset={() => { setCluster(""); setClient(""); setProjectFilter(""); setStatus(""); setSentiment(""); setAmFilter(""); setAvpFilter(""); setYearFilter(""); setPhaseFilter(""); setProjectSearch(""); }}
         >
           <label className="performance-filter-search"><span>Search Projects</span><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Project, ID, client, team or status" /></label>
           <SingleSelect label="Cluster" options={clusterNames.map((value) => ({ value, label: value }))} value={cluster} onChange={(value) => { setCluster(value); setClient(""); setProjectFilter(""); }} placeholder="All clusters" />
@@ -634,6 +654,8 @@ export default function ProjectPerformance({ currentUser = null }) {
           <SingleSelect label="Client Sentiment" options={sentimentValues.map((value) => ({ value, label: value }))} value={sentiment} onChange={setSentiment} placeholder="All sentiments" />
           <SingleSelect label="AM" options={amOptions} value={amFilter} onChange={setAmFilter} placeholder="All AMs" />
           <SingleSelect label="AVP" options={avpOptions} value={avpFilter} onChange={setAvpFilter} placeholder="All AVPs" />
+          <SingleSelect label="Financial Year" options={yearOptions} value={yearFilter} onChange={setYearFilter} placeholder="All years" />
+          <SingleSelect label="Current Phase" options={phaseOptions} value={phaseFilter} onChange={setPhaseFilter} placeholder="All phases" />
         </FilterBar>
 
         <div className="performance-metrics">
@@ -709,7 +731,7 @@ export default function ProjectPerformance({ currentUser = null }) {
               <Panel title="Client and Project Profile">
                 <dl className="detail-list">
                   <div><dt>Client Group</dt><dd>{selectedProject.clientGroup || "Not set"}</dd></div>
-                  <div><dt>Client Category</dt><dd>{selectedProject.clientCategory || "Not set"}</dd></div>
+                  <div><dt>Client Criticality</dt><dd><StatusPill value={selectedProject.clientCriticality || "Not set"} /></dd></div>
                   <div><dt>Financial Year</dt><dd>{selectedProject.financialYear || "Not set"}</dd></div>
                   <div><dt>Project Type</dt><dd>{selectedProject.projectType || "Not set"}</dd></div>
                   <div><dt>Revenue Category</dt><dd>{selectedProject.revenueCategory || "Not set"}</dd></div>
@@ -796,7 +818,7 @@ export default function ProjectPerformance({ currentUser = null }) {
       {canEditPerformance ? <section id="performance-update" className="performance-section-anchor">
         <div className="section-heading-inline"><div><p className="eyebrow">Update Project</p><h3>Maintain current project performance</h3></div></div>
         {!selectedProject ? <EmptyState title="Select a project before updating" /> : (
-          <Panel title={`Update ${selectedProject.name}`} badge={`Version ${selectedProject.version || 0}`}>
+          <Panel title={<>Update <span className="performance-update-client">{selectedProject.clientName}</span> · {selectedProject.name}</>} badge={`Version ${selectedProject.version || 0}`}>
             <div className="performance-form-scroll">
               <div className="performance-form-section">
                 <h4>Update owner</h4>
@@ -807,7 +829,7 @@ export default function ProjectPerformance({ currentUser = null }) {
                 <h4>Client and Project Profile</h4>
                 <div className="performance-form-grid">
                   <Field label="Client Group"><NativeSelect value={form.clientGroup} onChange={(value) => updateField("clientGroup", value)} items={referenceOptions(data, "client_group")} placeholder="Not yet standardized" /></Field>
-                  <Field label="Client Category"><NativeSelect value={form.clientCategory} onChange={(value) => updateField("clientCategory", value)} items={referenceOptions(data, "client_category")} /></Field>
+                  <Field label="Client Criticality"><NativeSelect value={form.clientCriticality} onChange={(value) => updateField("clientCriticality", value)} items={referenceOptions(data, "client_criticality")} /></Field>
                   <Field label="Financial Year"><NativeSelect value={form.financialYear} onChange={(value) => updateField("financialYear", value)} items={(data.financialYears || []).map((value) => ({ value, label: value }))} /></Field>
                   <Field label="Project Type"><NativeSelect value={form.projectType} onChange={(value) => updateField("projectType", value)} items={referenceOptions(data, "project_type")} /></Field>
                   <Field label="Revenue Category"><NativeSelect value={form.revenueCategory} onChange={(value) => updateField("revenueCategory", value)} items={referenceOptions(data, "revenue_category")} /></Field>
@@ -834,6 +856,8 @@ export default function ProjectPerformance({ currentUser = null }) {
                   <Field label={`PO Amount (${currencySymbol})`}><input type="number" min="0" step="0.01" value={form.poAmountLocal} onChange={(event) => updateField("poAmountLocal", event.target.value)} /></Field>
                   <Field label={`Budget Allocated (${currencySymbol})`}><input type="number" min="0" step="0.01" value={form.budgetAllocatedLocal} onChange={(event) => updateField("budgetAllocatedLocal", event.target.value)} /></Field>
                   <Field label={`Budget Spent (${currencySymbol})`}><input type="number" min="0" step="0.01" value={form.budgetSpentLocal} onChange={(event) => updateField("budgetSpentLocal", event.target.value)} /></Field>
+                  <Field label={`Budget Left (${currencySymbol})`}><input value={money((Number(form.budgetAllocatedLocal) || 0) - (Number(form.budgetSpentLocal) || 0), form.currency)} readOnly /></Field>
+                  <Field label="Budget Left %"><input value={Number(form.budgetAllocatedLocal) > 0 ? `${((((Number(form.budgetAllocatedLocal) || 0) - (Number(form.budgetSpentLocal) || 0)) / Number(form.budgetAllocatedLocal)) * 100).toFixed(1)}%` : "Not set"} readOnly /></Field>
                   <Field label={`Revenue Generated (${currencySymbol})`}><input type="number" min="0" step="0.01" value={form.revenueGeneratedLocal} onChange={(event) => updateField("revenueGeneratedLocal", event.target.value)} /></Field>
                 </div>
               </div>

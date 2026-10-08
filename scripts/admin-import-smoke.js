@@ -8,7 +8,11 @@ function emptyDirectory() {
       { id: "level-normal", name: "Normal", weight: 40 },
       { id: "level-important", name: "Important", weight: 60 }
     ],
-    departments: [], subDepartments: [], internalPocs: []
+    departments: [], subDepartments: [], internalPocs: [],
+    serviceCatalog: [
+      { id: "service-ppc", name: "PPC / Media", serviceKey: "ppc", active: true },
+      { id: "service-website", name: "Website", serviceKey: "website", active: true }
+    ]
   };
 }
 

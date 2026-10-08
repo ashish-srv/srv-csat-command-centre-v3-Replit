@@ -2401,6 +2401,69 @@ class SupabaseStore {
     return rows.length ? toInternalPocRow(rows[0]) : null;
   }
 
+  async deleteInternalPoc(internalPocId) {
+    const encodedId = encodeURIComponent(internalPocId);
+    const [services, directReports, appUsers] = await Promise.all([
+      this.request("project_services", { query: `internal_poc_id=eq.${encodedId}&select=id` }),
+      this.request("internal_pocs", { query: `reporting_manager_id=eq.${encodedId}&select=id` }),
+      this.request("app_users", { query: `internal_poc_id=eq.${encodedId}&select=id` })
+    ]);
+    const teamColumns = ["project_director_id", "am_id", "tl_id", "ad_id", "avp_id"];
+    let projectTeamAssignmentsCleared = 0;
+    for (const column of teamColumns) {
+      const assignments = await this.request("project_performance_profiles", {
+        query: `${column}=eq.${encodedId}&select=project_id`
+      });
+      projectTeamAssignmentsCleared += assignments.length;
+    }
+    const deleted = await this.request("internal_pocs", {
+      method: "DELETE",
+      query: `id=eq.${encodedId}&select=id`,
+      prefer: "return=representation"
+    });
+    return {
+      internalPocsDeleted: Array.isArray(deleted) ? deleted.length : 0,
+      servicesUnassigned: services.length,
+      directReportsUnassigned: directReports.length,
+      appUsersUnlinked: appUsers.length,
+      projectTeamAssignmentsCleared
+    };
+  }
+
+  async deleteDepartment(departmentId) {
+    const encodedId = encodeURIComponent(departmentId);
+    const [subDepartments, internalPocs] = await Promise.all([
+      this.request("sub_departments", { query: `department_id=eq.${encodedId}&select=id` }),
+      this.request("internal_pocs", { query: `department_id=eq.${encodedId}&select=id` })
+    ]);
+    const deleted = await this.request("departments", {
+      method: "DELETE",
+      query: `id=eq.${encodedId}&select=id`,
+      prefer: "return=representation"
+    });
+    return {
+      departmentsDeleted: Array.isArray(deleted) ? deleted.length : 0,
+      subDepartmentsDeleted: subDepartments.length,
+      internalPocsUnassigned: internalPocs.length
+    };
+  }
+
+  async deleteSubDepartment(subDepartmentId) {
+    const encodedId = encodeURIComponent(subDepartmentId);
+    const internalPocs = await this.request("internal_pocs", {
+      query: `sub_department_id=eq.${encodedId}&select=id`
+    });
+    const deleted = await this.request("sub_departments", {
+      method: "DELETE",
+      query: `id=eq.${encodedId}&select=id`,
+      prefer: "return=representation"
+    });
+    return {
+      subDepartmentsDeleted: Array.isArray(deleted) ? deleted.length : 0,
+      internalPocsUnassigned: internalPocs.length
+    };
+  }
+
   /**
    * Walk the reporting chain upward. A loop (A reports to B, B reports to A)
    * would make manager lookup for alerts never terminate at a real person.
@@ -3545,6 +3608,46 @@ class SupabaseStore {
     return rows.length ? this.getAppUserByEmail(rows[0].email) : null;
   }
 
+  async deleteAppUserIfNoHistory(appUserId) {
+    const rows = await this.request("app_users", {
+      query: `id=eq.${encodeURIComponent(appUserId)}&select=*&limit=1`
+    });
+    if (!rows.length) return null;
+    const row = rows[0];
+    const email = String(row.email || "").trim().toLowerCase();
+    const encodedEmail = encodeURIComponent(email);
+    const [auditRows, profileRows] = await Promise.all([
+      this.request("project_performance_audit", {
+        query: `updated_by=ilike.${encodedEmail}&select=id&limit=1`
+      }),
+      this.request("project_performance_profiles", {
+        query: `updated_by=ilike.${encodedEmail}&select=project_id&limit=1`
+      })
+    ]);
+    if (auditRows.length || profileRows.length) {
+      return {
+        action: "blocked",
+        reason: "history",
+        hasAuditHistory: auditRows.length > 0,
+        hasCurrentProjectUpdates: profileRows.length > 0
+      };
+    }
+    const deleted = await this.request("app_users", {
+      method: "DELETE",
+      query: `id=eq.${encodeURIComponent(appUserId)}`
+    });
+    return {
+      action: "deleted",
+      deleted: deleted.length,
+      user: {
+        id: row.id,
+        email: row.email,
+        name: row.name || "",
+        role: row.role
+      }
+    };
+  }
+
   async activeSuperAdminCount() {
     const rows = await this.request("app_users", {
       query: "role=eq.super_admin&active=is.true&select=id"
@@ -3599,7 +3702,7 @@ class SupabaseStore {
     if (body.value && body.value !== current.value) {
       const usageMap = {
         client_group: ["client_performance_profiles", "client_group"],
-        client_category: ["client_performance_profiles", "client_category"],
+        client_criticality: ["client_performance_profiles", "client_criticality"],
         project_type: ["project_performance_profiles", "project_type"],
         revenue_category: ["project_performance_profiles", "revenue_category"],
         portfolio_type: ["project_performance_profiles", "portfolio_type"],
@@ -3626,41 +3729,21 @@ class SupabaseStore {
     return { id: row.id, category: row.category, value: row.value, sortOrder: Number(row.sort_order) || 0, active: row.active !== false };
   }
 
-  async deleteOrArchivePerformanceReferenceValue(referenceId) {
+  async deletePerformanceReferenceValue(referenceId) {
     const rows = await this.request("performance_reference_values", {
       query: `id=eq.${encodeURIComponent(referenceId)}&select=*&limit=1`
     });
     if (!rows.length) return null;
-    const row = rows[0];
-    const usageMap = {
-      client_group: ["client_performance_profiles", "client_group", "client_id"],
-      client_category: ["client_performance_profiles", "client_category", "client_id"],
-      project_type: ["project_performance_profiles", "project_type", "project_id"],
-      revenue_category: ["project_performance_profiles", "revenue_category", "project_id"],
-      portfolio_type: ["project_performance_profiles", "portfolio_type", "project_id"],
-      currency: ["project_performance_profiles", "currency", "project_id"],
-      performance_status: ["project_performance_profiles", "performance_status", "project_id"],
-      current_phase: ["project_performance_profiles", "current_phase", "project_id"],
-      campaign_status: ["project_performance_profiles", "campaign_status", "project_id"],
-      client_sentiment: ["project_performance_profiles", "client_sentiment", "project_id"],
-      relationship_strength: ["project_performance_profiles", "relationship_strength", "project_id"],
-      meeting_cadence: ["project_performance_profiles", "meeting_cadence", "project_id"],
-      suggestion_frequency: ["project_performance_profiles", "suggestion_frequency", "project_id"],
-      kpi_name: ["project_performance_kpis", "kpi_name", "id"]
-    };
-    const usage = usageMap[row.category];
-    const inUse = usage
-      ? (await this.request(usage[0], { query: `${usage[1]}=eq.${encodeURIComponent(row.value)}&select=${usage[2]}&limit=1` })).length > 0
-      : true;
-    if (inUse) {
-      await this.updatePerformanceReferenceValue(referenceId, { active: false });
-      return { action: "archived", id: referenceId };
-    }
     await this.request("performance_reference_values", {
       method: "DELETE",
       query: `id=eq.${encodeURIComponent(referenceId)}`
     });
-    return { action: "deleted", id: referenceId };
+    return {
+      action: "deleted",
+      id: referenceId,
+      value: rows[0].value,
+      category: rows[0].category
+    };
   }
 
   async hasOpenFeedbackCycle(projectId) {
@@ -3671,7 +3754,7 @@ class SupabaseStore {
   }
 
   async getProjectPerformanceData() {
-    const [projects, clients, clientProfiles, profiles, kpiRows, auditRows, internalRows, serviceRows, catalogRows, referenceRows] = await Promise.all([
+    const [projects, clients, clientProfiles, profiles, kpiRows, auditRows, internalRows, serviceRows, clientPocRows, catalogRows, referenceRows] = await Promise.all([
       this.listProjects(),
       this.request("clients", { query: "select=id,client_key,name,cluster_id,active_status,clusters(id,name)&order=name.asc" }),
       this.request("client_performance_profiles", { query: "select=*" }),
@@ -3680,6 +3763,7 @@ class SupabaseStore {
       this.request("project_performance_audit", { query: "select=*&order=changed_at.desc&limit=500" }),
       this.request("internal_pocs", { query: "select=*&order=name.asc" }),
       this.request("project_services", { query: "select=id,project_id,service_catalog_id,service_key,name&order=name.asc" }),
+      this.request("client_pocs", { query: "select=id,project_id,name,designation,contact_email,contact_whatsapp,active&order=name.asc" }),
       this.request("service_catalog", { query: "active=is.true&select=id,service_key,name,active&order=name.asc" }),
       this.request("performance_reference_values", { query: "select=*&order=category.asc,sort_order.asc,value.asc" })
     ]);
@@ -3691,6 +3775,7 @@ class SupabaseStore {
     const kpisByProject = new Map();
     const auditsByProject = new Map();
     const servicesByProject = new Map();
+    const clientPocsByProject = new Map();
     for (const row of kpiRows) {
       const items = kpisByProject.get(row.project_id) || [];
       items.push({
@@ -3722,6 +3807,18 @@ class SupabaseStore {
       items.push({ id: row.id, serviceCatalogId: row.service_catalog_id || null, serviceKey: row.service_key, name: row.name });
       servicesByProject.set(row.project_id, items);
     }
+    for (const row of clientPocRows) {
+      const items = clientPocsByProject.get(row.project_id) || [];
+      items.push({
+        id: row.id,
+        name: row.name,
+        designation: row.designation,
+        contactEmail: row.contact_email,
+        contactWhatsapp: row.contact_whatsapp,
+        active: row.active !== false
+      });
+      clientPocsByProject.set(row.project_id, items);
+    }
 
     const mappedProjects = projects.map((project) => {
       const row = profilesById.get(project.id) || {};
@@ -3731,7 +3828,7 @@ class SupabaseStore {
       return {
         ...project,
         clientGroup: clientRow.client_group || null,
-        clientCategory: clientRow.client_category || null,
+        clientCriticality: clientRow.client_criticality || null,
         financialYear: row.financial_year || null,
         projectType: row.project_type || null,
         revenueCategory: row.revenue_category || null,
@@ -3778,6 +3875,7 @@ class SupabaseStore {
         updatedBy: row.updated_by || null,
         performanceUpdatedAt: row.updated_at || null,
         services: servicesByProject.get(project.id) || [],
+        clientPocs: clientPocsByProject.get(project.id) || [],
         kpis,
         primaryKpi,
         auditHistory: auditsByProject.get(project.id) || []
@@ -3835,7 +3933,7 @@ class SupabaseStore {
     const clientInput = input.clientProfile || {};
     const clientBody = {
       client_group: clientInput.clientGroup || null,
-      client_category: clientInput.clientCategory || null
+      client_criticality: clientInput.clientCriticality || null
     };
     const profileInput = input.profile || {};
     const team = profileInput.team || {};

@@ -14,7 +14,7 @@ const project = {
   endDate: "2026-12-31",
   activeStatus: "active",
   clientGroup: "Group",
-  clientCategory: "Symbi",
+  clientCriticality: "Critical",
   financialYear: "2026-2027",
   projectType: "Performance Only",
   revenueCategory: "Below 1 CR",
@@ -55,7 +55,7 @@ const data = {
   financialYears: ["2026-2027"],
   referenceValues: {
     client_group: [{ value: "Group" }],
-    client_category: [{ value: "Symbi" }], project_type: [{ value: "Performance Only" }], revenue_category: [{ value: "Below 1 CR" }],
+    client_criticality: [{ value: "Critical" }], project_type: [{ value: "Performance Only" }], revenue_category: [{ value: "Below 1 CR" }],
     portfolio_type: [{ value: "Portfolio" }], campaign_status: [{ value: "LIVE" }], current_phase: [{ value: "Execution" }],
     performance_status: [{ value: "On Track" }], currency: [{ value: "INR" }], relationship_strength: [{ value: "Strong" }],
     meeting_cadence: [{ value: "Monthly" }], suggestion_frequency: [{ value: "Monthly" }], client_sentiment: [{ value: "Positive" }],
@@ -72,7 +72,9 @@ const parsed = await parseProjectPerformanceBuffer(buffer, data, "roundtrip.xlsx
 const row = parsed.rows[0];
 if (workbook.worksheets.length !== 1 || workbook.worksheets[0].name !== "Project Performance") throw new Error("Expected exactly one worksheet");
 if (!row || row.projectKey !== "PRJ-1" || row.errors.length || row.eligible) throw new Error(`Round-trip mismatch: ${JSON.stringify(row)}`);
-workbook.worksheets[0].getCell(2, 35).value = 14;
+const actualColumn = workbook.worksheets[0].getRow(1).values.findIndex((value) => value === "KPI 1 Actual");
+if (actualColumn < 1) throw new Error("KPI 1 Actual column was not generated");
+workbook.worksheets[0].getCell(2, actualColumn).value = 14;
 const changedBuffer = await workbook.xlsx.writeBuffer();
 const changed = await parseProjectPerformanceBuffer(changedBuffer, data, "changed.xlsx");
 if (!changed.rows[0]?.eligible || changed.rows[0]?.errors.length) throw new Error(`Changed-row mismatch: ${JSON.stringify(changed.rows[0])}`);

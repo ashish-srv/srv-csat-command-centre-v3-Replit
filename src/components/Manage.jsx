@@ -29,7 +29,7 @@ const EMPTY_PROJECT = {
 
 const PERFORMANCE_STANDARD_LABELS = {
   client_group: "Client Group",
-  client_category: "Client Category",
+  client_criticality: "Client Criticality",
   project_type: "Project Type",
   revenue_category: "Revenue Category",
   portfolio_type: "Portfolio Type",
@@ -65,6 +65,22 @@ function createAppUserDraft() {
 
 function createStandardDraft() {
   return { draftId: nextManageDraftId("standard"), value: "", active: true };
+}
+
+function createInternalPocDraft(clusterId = "") {
+  return { ...EMPTY_INTERNAL, clusterId, draftId: nextManageDraftId("internal-poc") };
+}
+
+function createOrganizationNameDraft(kind) {
+  return { draftId: nextManageDraftId(kind), name: "" };
+}
+
+function initialOrganizationDrafts() {
+  return {
+    clusters: [createOrganizationNameDraft("cluster")],
+    departments: [createOrganizationNameDraft("department")],
+    subDepartments: [{ draftId: nextManageDraftId("sub-department"), departmentId: "", name: "" }]
+  };
 }
 
 function initialStandardDrafts() {
@@ -247,35 +263,18 @@ function InternalPocForm({ value, clusters, departments, subDepartments, people,
         <Field label="Phone">
           <input value={value.phone || ""} onChange={(event) => onChange({ ...value, phone: event.target.value })} />
         </Field>
-        <Field label="Cluster">
-          <select value={value.clusterId || ""} onChange={(event) => onChange({ ...value, clusterId: event.target.value })}>
-            <option value="">Not set</option>
-            {clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Department">
-          <select
-            value={value.departmentId || ""}
-            onChange={(event) => onChange({ ...value, departmentId: event.target.value, subDepartmentId: "" })}
-          >
-            <option value="">Not set</option>
-            {departments.map((dept) => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Sub-department">
-          <select value={value.subDepartmentId || ""} onChange={(event) => onChange({ ...value, subDepartmentId: event.target.value })}>
-            <option value="">Not set</option>
-            {subs.map((sub) => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Reporting manager" hint="receives the alert when this person's service scores badly">
-          <select value={value.reportingManagerId || ""} onChange={(event) => onChange({ ...value, reportingManagerId: event.target.value })}>
-            <option value="">Not set</option>
-            {people.map((person) => (
-              <option key={person.id} value={person.id}>{person.name}</option>
-            ))}
-          </select>
-        </Field>
+        <SingleSelect label="Cluster" value={value.clusterId || ""} placeholder="Not set"
+          options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
+          onChange={(clusterId) => onChange({ ...value, clusterId })} />
+        <SingleSelect label="Department" value={value.departmentId || ""} placeholder="Not set"
+          options={departments.map((department) => ({ value: department.id, label: department.name }))}
+          onChange={(departmentId) => onChange({ ...value, departmentId, subDepartmentId: "" })} />
+        <SingleSelect label="Sub-department" value={value.subDepartmentId || ""} placeholder="Not set"
+          options={subs.map((sub) => ({ value: sub.id, label: sub.name }))}
+          onChange={(subDepartmentId) => onChange({ ...value, subDepartmentId })} />
+        <SingleSelect label="Reporting manager" value={value.reportingManagerId || ""} placeholder="Not set"
+          options={people.filter((person) => person.id !== value.id).map((person) => ({ value: person.id, label: person.name }))}
+          onChange={(reportingManagerId) => onChange({ ...value, reportingManagerId })} />
         <Field label="Active">
           <select value={value.active ? "yes" : "no"} onChange={(event) => onChange({ ...value, active: event.target.value === "yes" })}>
             <option value="yes">Yes</option>
@@ -455,6 +454,7 @@ function internalPocRowsForBatch(people) {
 }
 
 function InternalPocBatchForm({ rows, clusters, departments, subDepartments, people, onChange, onSave, onCancel, saving }) {
+  const adding = rows.every((row) => !row.id);
   function updateRow(index, patch) {
     onChange(rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
   }
@@ -462,14 +462,14 @@ function InternalPocBatchForm({ rows, clusters, departments, subDepartments, peo
   return (
     <div className="edit-form">
       <div className="edit-form-head">
-        <strong>Edit all displayed internal POCs in one save</strong>
+        <strong>{adding ? "Add multiple internal POCs in one save" : "Edit all displayed internal POCs in one save"}</strong>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
       </div>
       <div className="batch-editor">
         {rows.map((row, index) => {
           const subs = subDepartments.filter((item) => !row.departmentId || item.departmentId === row.departmentId);
           return (
-            <div className="batch-editor-row batch-editor-row-full" key={row.id}>
+            <div className="batch-editor-row batch-editor-row-full" key={row.id || row.draftId}>
               <div className="form-grid">
                 <Field label={`Internal POC ${index + 1}`}>
                   <input value={row.name} onChange={(event) => updateRow(index, { name: event.target.value })} />
@@ -480,32 +480,18 @@ function InternalPocBatchForm({ rows, clusters, departments, subDepartments, peo
                 <Field label="Phone">
                   <input value={row.phone} onChange={(event) => updateRow(index, { phone: event.target.value })} />
                 </Field>
-                <Field label="Cluster">
-                  <select value={row.clusterId} onChange={(event) => updateRow(index, { clusterId: event.target.value })}>
-                    <option value="">Not set</option>
-                    {clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.name}</option>)}
-                  </select>
-                </Field>
-                <Field label="Department">
-                  <select value={row.departmentId} onChange={(event) => updateRow(index, { departmentId: event.target.value, subDepartmentId: "" })}>
-                    <option value="">Not set</option>
-                    {departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
-                  </select>
-                </Field>
-                <Field label="Sub-department">
-                  <select value={row.subDepartmentId} onChange={(event) => updateRow(index, { subDepartmentId: event.target.value })}>
-                    <option value="">Not set</option>
-                    {subs.map((sub) => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
-                  </select>
-                </Field>
-                <Field label="Reporting manager">
-                  <select value={row.reportingManagerId} onChange={(event) => updateRow(index, { reportingManagerId: event.target.value })}>
-                    <option value="">Not set</option>
-                    {people.map((person) => (
-                      <option key={person.id} value={person.id}>{person.name}</option>
-                    ))}
-                  </select>
-                </Field>
+                <SingleSelect label="Cluster" value={row.clusterId} placeholder="Not set"
+                  options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
+                  onChange={(clusterId) => updateRow(index, { clusterId })} />
+                <SingleSelect label="Department" value={row.departmentId} placeholder="Not set"
+                  options={departments.map((department) => ({ value: department.id, label: department.name }))}
+                  onChange={(departmentId) => updateRow(index, { departmentId, subDepartmentId: "" })} />
+                <SingleSelect label="Sub-department" value={row.subDepartmentId} placeholder="Not set"
+                  options={subs.map((sub) => ({ value: sub.id, label: sub.name }))}
+                  onChange={(subDepartmentId) => updateRow(index, { subDepartmentId })} />
+                <SingleSelect label="Reporting manager" value={row.reportingManagerId} placeholder="Not set"
+                  options={people.filter((person) => person.id !== row.id).map((person) => ({ value: person.id, label: person.name }))}
+                  onChange={(reportingManagerId) => updateRow(index, { reportingManagerId })} />
                 <Field label="Active">
                   <select value={row.active ? "yes" : "no"} onChange={(event) => updateRow(index, { active: event.target.value === "yes" })}>
                     <option value="yes">Yes</option>
@@ -513,17 +499,62 @@ function InternalPocBatchForm({ rows, clusters, departments, subDepartments, peo
                   </select>
                 </Field>
               </div>
+              {adding ? (
+                <button type="button" className="icon-button danger" disabled={rows.length === 1}
+                  onClick={() => onChange(rows.filter((_, rowIndex) => rowIndex !== index))}
+                  aria-label={`Remove internal POC ${index + 1}`}><Trash2 size={15} aria-hidden="true" /></button>
+              ) : null}
             </div>
           );
         })}
       </div>
-      <p className="form-note">Nothing is written until Save displayed internal POCs. The current client and cluster filters control this draft.</p>
+      {adding ? <Button icon={Plus} onClick={() => onChange([...rows, createInternalPocDraft(rows[0]?.clusterId || "")])}>Add another internal POC</Button> : null}
+      <p className="form-note">Nothing is written until {adding ? "all new Internal POCs are saved" : "Save displayed internal POCs"}. The current client and cluster filters control this draft.</p>
       <div className="button-row">
         <Button onClick={onCancel}>Cancel</Button>
-        <Button variant="primary" onClick={onSave} disabled={saving || !rows.length}>{saving ? "Saving…" : "Save displayed internal POCs"}</Button>
+        <Button variant="primary" onClick={onSave} disabled={saving || !rows.length}>{saving ? "Saving…" : adding ? `Add ${rows.length} internal POC${rows.length === 1 ? "" : "s"}` : "Save displayed internal POCs"}</Button>
       </div>
     </div>
   );
+}
+
+function OrganizationStandardsEditor({ value, clusters, departments, subDepartments, onChange, onSave, onDelete, saving }) {
+  const add = (kind, row) => onChange({ ...value, [kind]: [...value[kind], row] });
+  const update = (kind, draftId, patch) => onChange({ ...value, [kind]: value[kind].map((row) => row.draftId === draftId ? { ...row, ...patch } : row) });
+  const remove = (kind, draftId, fallback) => {
+    const remaining = value[kind].filter((row) => row.draftId !== draftId);
+    onChange({ ...value, [kind]: remaining.length ? remaining : [fallback()] });
+  };
+  const sections = [
+    { kind: "clusters", label: "Clusters", saved: clusters, prefix: "cluster" },
+    { kind: "departments", label: "Departments", saved: departments, prefix: "department" }
+  ];
+  return <div className="organization-standards-grid">
+    {sections.map((section) => <details className="standard-category" open key={section.kind}>
+      <summary><span><strong>{section.label}</strong><small>{section.saved.length} saved</small></span></summary>
+      <div className="organization-standard-body">
+        <div className="organization-standard-existing">{section.saved.map((item) => <span key={item.id}>{item.name}<button type="button" className="standard-chip-delete" onClick={() => onDelete(section.kind, item)} aria-label={`Delete ${item.name}`}><Trash2 size={12} /></button></span>)}</div>
+        {value[section.kind].map((row, index) => <div className="organization-standard-row" key={row.draftId}>
+          <input value={row.name} onChange={(event) => update(section.kind, row.draftId, { name: event.target.value })} placeholder={`New ${section.label.slice(0, -1).toLowerCase()} ${index + 1}`} />
+          <button type="button" className="icon-button danger" onClick={() => remove(section.kind, row.draftId, () => createOrganizationNameDraft(section.prefix))}><Trash2 size={14} /></button>
+        </div>)}
+        <Button icon={Plus} onClick={() => add(section.kind, createOrganizationNameDraft(section.prefix))}>Add another {section.label.slice(0, -1).toLowerCase()}</Button>
+      </div>
+    </details>)}
+    <details className="standard-category" open>
+      <summary><span><strong>Sub-departments</strong><small>{subDepartments.length} saved</small></span></summary>
+      <div className="organization-standard-body">
+        <div className="organization-standard-existing">{subDepartments.map((item) => <span key={item.id}>{departments.find((department) => department.id === item.departmentId)?.name || "No department"} · {item.name}<button type="button" className="standard-chip-delete" onClick={() => onDelete("subDepartments", item)} aria-label={`Delete ${item.name}`}><Trash2 size={12} /></button></span>)}</div>
+        {value.subDepartments.map((row, index) => <div className="organization-standard-row sub-department" key={row.draftId}>
+          <SingleSelect label="Department" value={row.departmentId} placeholder="Select department" options={departments.map((department) => ({ value: department.id, label: department.name }))} onChange={(departmentId) => update("subDepartments", row.draftId, { departmentId })} />
+          <input value={row.name} onChange={(event) => update("subDepartments", row.draftId, { name: event.target.value })} placeholder={`New sub-department ${index + 1}`} />
+          <button type="button" className="icon-button danger" onClick={() => remove("subDepartments", row.draftId, () => ({ draftId: nextManageDraftId("sub-department"), departmentId: "", name: "" }))}><Trash2 size={14} /></button>
+        </div>)}
+        <Button icon={Plus} onClick={() => add("subDepartments", { draftId: nextManageDraftId("sub-department"), departmentId: "", name: "" })}>Add another sub-department</Button>
+      </div>
+    </details>
+    <div className="button-row organization-standards-save"><Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save new organization standards"}</Button></div>
+  </div>;
 }
 
 function PocControlCentre({ rows, levels, onChange, onSave, saving }) {
@@ -1209,6 +1240,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const [showAllInternal, setShowAllInternal] = useState(true);
   const [internalForm, setInternalForm] = useState(null);
   const [internalBatch, setInternalBatch] = useState(null);
+  const [organizationDrafts, setOrganizationDrafts] = useState(initialOrganizationDrafts);
   const [clientBatch, setClientBatch] = useState(null);
   const [pocBatch, setPocBatch] = useState(null);
   const [serviceBatch, setServiceBatch] = useState(null);
@@ -1222,6 +1254,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const [setupForm, setSetupForm] = useState(null);
   const [setupCopySource, setSetupCopySource] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [downloadingImportTemplate, setDownloadingImportTemplate] = useState(false);
   const [importErrors, setImportErrors] = useState([]);
   const [cleanupProjectId, setCleanupProjectId] = useState("");
   const [cleanupWorkspace, setCleanupWorkspace] = useState(null);
@@ -1370,6 +1403,20 @@ export default function Manage({ onReload, currentUser = null }) {
     }
   }
 
+  async function deleteAppUser(user) {
+    if (!window.confirm(`Permanently delete ${user.email}? This is allowed only when the user has no Project Performance history.`)) return;
+    setSaving(true);
+    try {
+      await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {}, "DELETE");
+      setAppUsers((current) => current.filter((item) => item.id !== user.id));
+      showToast(`${user.email} was permanently deleted.`);
+    } catch (deleteError) {
+      showToast(deleteError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function updateStandardDraft(category, draftId, patch) {
     setStandardDrafts((current) => ({
       ...current,
@@ -1451,23 +1498,17 @@ export default function Manage({ onReload, currentUser = null }) {
       showToast(`Select one or more ${PERFORMANCE_STANDARD_LABELS[category]} values to remove.`);
       return;
     }
-    if (!window.confirm(`Remove ${selected.length} selected value${selected.length === 1 ? "" : "s"}? Values already used by projects will be archived, not erased.`)) return;
+    if (!window.confirm(`Permanently delete ${selected.length} selected value${selected.length === 1 ? "" : "s"} from this standard catalogue? Existing project records keep their already-saved values.`)) return;
     setSaving(true);
     let deleted = 0;
-    let archived = 0;
     try {
       for (const item of selected) {
-        const result = await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {}, "DELETE");
-        if (result.action === "archived") {
-          archived += 1;
-          setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, active: false } : value));
-        } else {
-          deleted += 1;
-          setPerformanceStandards((current) => current.filter((value) => value.id !== item.id));
-        }
+        await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {}, "DELETE");
+        deleted += 1;
+        setPerformanceStandards((current) => current.filter((value) => value.id !== item.id));
         setSelectedStandardIds((current) => current.filter((id) => id !== item.id));
       }
-      showToast(`${deleted} deleted and ${archived} safely archived because they are already in use.`);
+      showToast(`${deleted} standard value${deleted === 1 ? "" : "s"} permanently deleted. Existing project records were not changed.`);
     } catch (saveError) {
       showToast(saveError.message);
     } finally {
@@ -1909,14 +1950,94 @@ export default function Manage({ onReload, currentUser = null }) {
     setSaving(true);
     try {
       for (const row of rows) {
-        await apiWrite(`/api/admin/internal-pocs/${encodeURIComponent(row.id)}`, row, "PATCH");
+        if (row.id) await apiWrite(`/api/admin/internal-pocs/${encodeURIComponent(row.id)}`, row, "PATCH");
+        else await apiWrite("/api/admin/internal-pocs", row, "POST");
       }
       setInternalBatch(null);
       await loadAll(clientId);
       onReload();
-      showToast(`${rows.length} internal POC${rows.length === 1 ? "" : "s"} saved together.`);
+      showToast(`${rows.length} internal POC${rows.length === 1 ? "" : "s"} saved together without leaving the section.`);
     } catch (saveError) {
       showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveOrganizationMasterValues() {
+    const payload = {
+      clusters: organizationDrafts.clusters.map((row) => row.name.trim()).filter(Boolean),
+      departments: organizationDrafts.departments.map((row) => row.name.trim()).filter(Boolean),
+      subDepartments: organizationDrafts.subDepartments
+        .filter((row) => row.name.trim() || row.departmentId)
+        .map((row) => ({ departmentId: row.departmentId, name: row.name.trim() }))
+    };
+    if (payload.subDepartments.some((row) => !row.departmentId || !row.name)) {
+      showToast("Every new sub-department needs both a Department and a name.");
+      return;
+    }
+    const total = payload.clusters.length + payload.departments.length + payload.subDepartments.length;
+    if (!total) {
+      showToast("Enter at least one new Cluster, Department or Sub-department.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await apiWrite("/api/admin/organization-standards/bulk", payload, "POST");
+      setOrganizationDrafts(initialOrganizationDrafts());
+      await loadAll(clientId);
+      onReload();
+      showToast(`${total} organization standard${total === 1 ? "" : "s"} added.`);
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteOrganizationStandard(kind, item) {
+    const routeByKind = {
+      clusters: "clusters",
+      departments: "departments",
+      subDepartments: "sub-departments"
+    };
+    const warning = kind === "clusters"
+      ? "Clients and Internal POCs using it will become unassigned."
+      : kind === "departments"
+        ? "Its Sub-departments will also be deleted and affected Internal POCs will become unassigned."
+        : "Affected Internal POCs will keep their Department but their Sub-department will become unassigned.";
+    if (!window.confirm(`Permanently delete ${item.name}? ${warning}`)) return;
+    setSaving(true);
+    try {
+      const result = await apiWrite(`/api/admin/${routeByKind[kind]}/${encodeURIComponent(item.id)}`, {}, "DELETE");
+      await loadAll(clientId);
+      onReload();
+      const affected = Number(result.clientsUnassigned || 0)
+        + Number(result.internalPocsUnassigned || 0)
+        + Number(result.subDepartmentsDeleted || 0);
+      showToast(`${item.name} deleted${affected ? ` · ${affected} related assignment${affected === 1 ? "" : "s"} cleared` : ""}.`);
+    } catch (deleteError) {
+      showToast(deleteError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteInternalPoc(person) {
+    if (!window.confirm(`Permanently delete ${person.name}? Service ownership, reporting lines, project-team roles and linked Project User access will be cleared.`)) return;
+    setSaving(true);
+    try {
+      const result = await apiWrite(`/api/admin/internal-pocs/${encodeURIComponent(person.id)}`, {}, "DELETE");
+      setInternalForm((current) => current?.id === person.id ? null : current);
+      await loadAll(clientId);
+      onReload();
+      const affected = Number(result.servicesUnassigned || 0)
+        + Number(result.directReportsUnassigned || 0)
+        + Number(result.appUsersUnlinked || 0)
+        + Number(result.projectTeamAssignmentsCleared || 0);
+      showToast(`${person.name} deleted${affected ? ` · ${affected} related assignment${affected === 1 ? "" : "s"} cleared` : ""}.`);
+    } catch (deleteError) {
+      showToast(deleteError.message);
     } finally {
       setSaving(false);
     }
@@ -2047,13 +2168,25 @@ export default function Manage({ onReload, currentUser = null }) {
     }
   }
 
-  function downloadWorkbookTemplate() {
-    const link = document.createElement("a");
-    link.href = "/templates/csat-multi-client-import.xlsx";
-    link.download = "csat-multi-client-import.xlsx";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+  async function downloadWorkbookTemplate() {
+    setDownloadingImportTemplate(true);
+    try {
+      const result = await apiGet("/api/admin/import-workbook-template");
+      const bytes = Uint8Array.from(window.atob(result.base64), (character) => character.charCodeAt(0));
+      const blob = new Blob([bytes], { type: result.contentType });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = result.filename || "SRV_CSAT_Client_Project_Import.xlsx";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (downloadError) {
+      showToast(downloadError.message);
+    } finally {
+      setDownloadingImportTemplate(false);
+    }
   }
 
   async function importWorkbook(event) {
@@ -2171,6 +2304,18 @@ export default function Manage({ onReload, currentUser = null }) {
       person.active ? "active" : "inactive"
     ].some((value) => String(value || "").toLowerCase().includes(internalPocNeedle));
   });
+  const internalPocDepartmentGroups = [
+    ...departments.map((department) => ({
+      id: department.id,
+      name: department.name,
+      people: displayedPeople.filter((person) => person.departmentId === department.id)
+    })).filter((group) => group.people.length),
+    {
+      id: "unassigned",
+      name: "Department not assigned",
+      people: displayedPeople.filter((person) => !departments.some((department) => department.id === person.departmentId))
+    }
+  ].filter((group) => group.people.length);
   const manageAccessClasses = [
     !canManageRecords && "deny-manage-records",
     !canManagePocs && "deny-manage-pocs",
@@ -2219,6 +2364,7 @@ export default function Manage({ onReload, currentUser = null }) {
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
         {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Project Services</button> : null}
+        {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
         {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
         {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
@@ -2231,7 +2377,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <span><strong>Application Users</strong><small>Google access · {appUsers.filter((user) => user.active).length} active</small></span>
           </summary>
           <div className="admin-collapsible-body">
-            <p className="form-note">Super Admin always has full access. Super Admin can configure Admins and Project Users. Admins with this permission can manage Project Users only and can never change an Admin or Super Admin account.</p>
+            <p className="form-note">Super Admin always has full access. Super Admin can configure Admins and Project Users. Admins with this permission can manage Project Users only and can never change an Admin or Super Admin account. A user without Project Performance history can be permanently deleted; otherwise deactivate the account to preserve audit attribution.</p>
             <div className="bulk-editor-block">
               <div className="bulk-editor-heading">
                 <span><strong>Add multiple users</strong><small>For a Project User, select the Internal POC and their saved name and email are used automatically. Enter details manually only for Admin or Super Admin.</small></span>
@@ -2271,6 +2417,11 @@ export default function Manage({ onReload, currentUser = null }) {
                     </div>
                     <div className="app-permission-grid">
                       {permissionsForRole(user.role).map((permission) => <label key={permission}><input type="checkbox" checked={user.role === "super_admin" || user.permissions?.[permission] === true} disabled={user.role === "super_admin"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, permissions: { ...item.permissions, [permission]: event.target.checked } } : item))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
+                    </div>
+                    <div className="button-row">
+                      <Button variant="danger" icon={Trash2} onClick={() => deleteAppUser(user)} disabled={saving || user.role === "super_admin" || currentUser?.appUserId === user.id}>Delete user</Button>
+                      {user.role === "super_admin" ? <small className="form-note">Super Admin accounts are protected from deletion.</small> : null}
+                      {currentUser?.appUserId === user.id ? <small className="form-note">You cannot delete your own account.</small> : null}
                     </div>
                   </div>
                 </details>
@@ -2315,7 +2466,7 @@ export default function Manage({ onReload, currentUser = null }) {
                       ))}
                       <div className="button-row standard-bulk-actions">
                         <Button icon={Plus} onClick={() => addStandardDraft(category)} disabled={saving}>Add another value</Button>
-                        <Button variant="danger" onClick={() => removeSelectedPerformanceStandards(category)} disabled={saving || !selectedIds.length}>Remove selected ({selectedIds.length})</Button>
+                        <Button variant="danger" icon={Trash2} onClick={() => removeSelectedPerformanceStandards(category)} disabled={saving || !selectedIds.length}>Delete selected ({selectedIds.length})</Button>
                         <Button variant="primary" onClick={() => savePerformanceStandardCategory(category)} disabled={saving}>{saving ? "Saving…" : `Save all ${label}`}</Button>
                       </div>
                     </div>
@@ -2444,7 +2595,7 @@ export default function Manage({ onReload, currentUser = null }) {
         className="span-12"
         action={
           <div className="button-row">
-            <Button icon={Download} onClick={downloadWorkbookTemplate}>Excel template</Button>
+            <Button icon={Download} onClick={downloadWorkbookTemplate} disabled={downloadingImportTemplate}>{downloadingImportTemplate ? "Preparing…" : "Excel template"}</Button>
             <input
               ref={workbookInputRef}
               type="file"
@@ -2464,13 +2615,13 @@ export default function Manage({ onReload, currentUser = null }) {
       >
         <p className="form-note">
           The workbook can contain multiple clients, projects, client POCs, services, and internal POCs. It matches
-          clients by client ID, projects by project ID, client POCs by WhatsApp number, internal POCs by email, and
-          services by project ID + service key. Missing rows never delete existing records.
+          clients by client ID, projects by project ID, client POCs by WhatsApp number, and internal POCs by email.
+          Missing rows never delete existing records.
         </p>
         <p className="form-note">
-          For the simpler route, fill only <strong>Quick Project Upload</strong>: repeat the client/project columns and add
-          one POC and one service per row. Use Internal POCs only when an owner email is new. Alternatively, use the
-          detailed Clients, Projects, Client POCs and Services sheets. Do not fill both project-data methods in the same upload.
+          Fill <strong>Client and Projects</strong> with one project per row. Enter exact Standard Service names in the
+          services cell separated by <strong>|</strong>; the one internal owner email on that row is applied to all of them.
+          Client POCs and Internal POCs remain on their own sheets because they can contain multiple rows per project.
         </p>
         {importErrors.length ? (
           <div className="import-errors" role="alert">
@@ -2952,6 +3103,25 @@ export default function Manage({ onReload, currentUser = null }) {
         </div>
       </Panel>
 
+      {canManageInternalPocs ? <Panel
+        id="manage-organization-standards"
+        title="Organization Standards"
+        badge={`${clusters.length} clusters · ${departments.length} departments · ${subDepartments.length} sub-departments`}
+        className="span-12"
+      >
+        <p className="form-note">Add master values here first. Internal POCs can only select a saved Cluster, Department and Sub-department.</p>
+        <OrganizationStandardsEditor
+          value={organizationDrafts}
+          clusters={clusters}
+          departments={departments}
+          subDepartments={subDepartments}
+          onChange={setOrganizationDrafts}
+          onSave={saveOrganizationMasterValues}
+          onDelete={deleteOrganizationStandard}
+          saving={saving}
+        />
+      </Panel> : null}
+
       <Panel
         id="manage-internal-pocs"
         title="Internal POCs"
@@ -2969,8 +3139,8 @@ export default function Manage({ onReload, currentUser = null }) {
             >
               Edit displayed internal POCs
             </Button>
-            <Button icon={Plus} onClick={() => { closeForms(); setInternalForm({ ...EMPTY_INTERNAL, clusterId: clusterFilterId }); }}>
-              Add internal POC
+            <Button icon={Plus} onClick={() => { closeForms(); setInternalBatch([createInternalPocDraft(clusterFilterId)]); }}>
+              Add internal POCs
             </Button>
           </div>
         }
@@ -3010,49 +3180,33 @@ export default function Manage({ onReload, currentUser = null }) {
           {internalPocSearch ? <Button onClick={() => setInternalPocSearch("")}>Clear search</Button> : null}
         </div>
         <div className="manage-internal-pocs-scroll">
-        <div className="dtable manage-internal">
-          <div className="dtable-head">
-            <span>Name</span>
-            <span>Email</span>
-            <span>Department</span>
-            <span>Reports to</span>
-            <span>Active</span>
-            <span />
-          </div>
-          {displayedPeople.map((person) => {
-            const dept = departments.find((item) => item.id === person.departmentId);
-            const manager = peopleById.get(person.reportingManagerId);
-            return (
-              <div key={person.id} className="dtable-row">
-                <strong>{person.name}</strong>
-                <span className={person.email ? "" : "missing"}>{person.email || "not set"}</span>
-                <span>{dept ? dept.name : "--"}</span>
-                <span className={manager ? "" : "missing"}>{manager ? manager.name : "not set"}</span>
-                <span className={person.active ? "" : "missing"}>{person.active ? "Yes" : "No"}</span>
-                <button
-                  type="button"
-                  className="icon-button"
-                  aria-label={`Edit ${person.name}`}
-                  onClick={() => {
-                    closeForms();
-                    setInternalForm({
-                      id: person.id,
-                      name: person.name,
-                      email: person.email || "",
-                      phone: person.phone || "",
-                      clusterId: person.clusterId || "",
-                      departmentId: person.departmentId || "",
-                      subDepartmentId: person.subDepartmentId || "",
-                      reportingManagerId: person.reportingManagerId || "",
-                      active: person.active
-                    });
-                  }}
-                >
-                  <Pencil size={14} aria-hidden="true" />
-                </button>
+        <div className="internal-department-groups">
+          {internalPocDepartmentGroups.map((group) => (
+            <details className="internal-department-group" key={group.id} open>
+              <summary><span><strong>{group.name}</strong><small>{group.people.length} Internal POC{group.people.length === 1 ? "" : "s"}</small></span></summary>
+              <div className="dtable manage-internal">
+                <div className="dtable-head"><span>Name</span><span>Email</span><span>Sub-department</span><span>Reports to</span><span>Active</span><span>Actions</span></div>
+                {group.people.map((person) => {
+                  const subDepartment = subDepartments.find((item) => item.id === person.subDepartmentId);
+                  const manager = peopleById.get(person.reportingManagerId);
+                  return <div key={person.id} className="dtable-row">
+                    <strong>{person.name}</strong>
+                    <span className={person.email ? "" : "missing"}>{person.email || "not set"}</span>
+                    <span>{subDepartment?.name || "--"}</span>
+                    <span className={manager ? "" : "missing"}>{manager?.name || "not set"}</span>
+                    <span className={person.active ? "" : "missing"}>{person.active ? "Yes" : "No"}</span>
+                    <div className="row-actions">
+                      <button type="button" className="icon-button" aria-label={`Edit ${person.name}`} onClick={() => {
+                        closeForms();
+                        setInternalForm({ id: person.id, name: person.name, email: person.email || "", phone: person.phone || "", clusterId: person.clusterId || "", departmentId: person.departmentId || "", subDepartmentId: person.subDepartmentId || "", reportingManagerId: person.reportingManagerId || "", active: person.active });
+                      }}><Pencil size={14} aria-hidden="true" /></button>
+                      <button type="button" className="icon-button danger" aria-label={`Delete ${person.name}`} disabled={saving} onClick={() => deleteInternalPoc(person)}><Trash2 size={14} aria-hidden="true" /></button>
+                    </div>
+                  </div>;
+                })}
               </div>
-            );
-          })}
+            </details>
+          ))}
           {!displayedPeople.length ? (
             <EmptyState
               title={visiblePeople.length ? "No internal POCs match this search" : clusterFilterId ? "No internal POCs match this cluster" : showAllInternal ? "No internal POCs" : "Nobody assigned to this client"}
@@ -3062,7 +3216,7 @@ export default function Manage({ onReload, currentUser = null }) {
         </div>
         </div>
         <div className="button-row section-bottom-actions">
-          <Button icon={Plus} onClick={() => { closeForms(); setInternalForm({ ...EMPTY_INTERNAL, clusterId: clusterFilterId }); }}>
+          <Button icon={Plus} onClick={() => { closeForms(); setInternalBatch([createInternalPocDraft(clusterFilterId)]); }}>
             Add another internal POC
           </Button>
         </div>

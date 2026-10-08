@@ -5,7 +5,7 @@ const MIN_KPI_SLOTS = 5;
 const BASE_COLUMNS = [
   { key: "cluster_name", label: "Project Cluster (Reference Only)", width: 20, aliases: ["project_cluster", "cluster"] },
   { key: "client_group", label: "Client Group", width: 18 },
-  { key: "client_category", label: "Client Category", width: 18 },
+  { key: "client_criticality", label: "Client Criticality", width: 20 },
   { key: "client_name", label: "Client Name (Reference Only)", width: 30, aliases: ["client_name"] },
   { key: "project_id", label: "Project ID (Required Match Key)", width: 22, aliases: ["project_id"] },
   { key: "project_name", label: "Project Name (Reference Only)", width: 30, aliases: ["project_name"] },
@@ -18,18 +18,19 @@ const BASE_COLUMNS = [
   { key: "tl", label: "TL", width: 22 },
   { key: "ad", label: "AD", width: 22, aliases: ["account_director_ad"] },
   { key: "avp", label: "AVP", width: 22 },
-  { key: "start_date", label: "Start Date (Reference Only)", width: 16, aliases: ["start_date"] },
-  { key: "end_date", label: "End Date (Reference Only)", width: 16, aliases: ["end_date"] },
+  { key: "start_date", label: "Start Date (Reference Only, YYYY-MM-DD)", width: 22, aliases: ["start_date"] },
+  { key: "end_date", label: "End Date (Reference Only, YYYY-MM-DD)", width: 22, aliases: ["end_date"] },
   { key: "campaign_status", label: "Campaign Status", width: 18 },
   { key: "current_phase", label: "Current Phase", width: 20 },
   { key: "performance_status", label: "Project Performance Status", width: 22, aliases: ["project_status", "performance_status"] },
   { key: "currency", label: "Currency", width: 12 },
   { key: "fx_rate_to_inr", label: "FX Rate to INR", width: 16 },
-  { key: "po_amount_local", label: "PO Amount (Local)", width: 18, aliases: ["total_po_amount_ex_gst_local"] },
-  { key: "budget_allocated_local", label: "Budget Allocated (Local)", width: 22, aliases: ["total_budget_allocated_local"] },
-  { key: "budget_spent_local", label: "Budget Spent (Local)", width: 20, aliases: ["total_budget_spend_local"] },
-  { key: "revenue_generated_local", label: "Revenue Generated (Local)", width: 22 },
+  { key: "po_amount_local", label: "PO Amount (Local Currency)", width: 22, aliases: ["total_po_amount_ex_gst_local"] },
+  { key: "budget_allocated_local", label: "Budget Allocated (Local Currency)", width: 27, aliases: ["total_budget_allocated_local"] },
+  { key: "budget_spent_local", label: "Budget Spent (Local Currency)", width: 25, aliases: ["total_budget_spend_local"] },
+  { key: "revenue_generated_local", label: "Revenue Generated (Local Currency)", width: 27 },
   { key: "services", label: "Services (Reference Only)", width: 32 },
+  { key: "client_spocs", label: "Client SPOCs (Reference Only)", width: 46, aliases: ["client_pocs", "spoc_details"] },
   { key: "mandates", label: "Mandates, Targets and Service Details", width: 42, aliases: ["deliverables_target_mandate", "deliverables_target_and_mandate"] },
   { key: "deliverables_status", label: "Current Delivery Update", width: 38, aliases: ["deliverables_status", "current_status_of_deliverable_what_we_delivered"] }
 ];
@@ -37,9 +38,9 @@ const BASE_COLUMNS = [
 const TRAILING_COLUMNS = [
   { key: "relationship_strength", label: "Relationship Strength", width: 20, aliases: ["relationship_with_spoc"] },
   { key: "meeting_cadence", label: "Meeting Cadence", width: 18 },
-  { key: "last_meeting_date", label: "Last Meeting Date", width: 16 },
+  { key: "last_meeting_date", label: "Last Meeting Date (YYYY-MM-DD)", width: 22 },
   { key: "suggestion_frequency", label: "Suggestion Frequency", width: 20, aliases: ["frequency_of_suggestions"] },
-  { key: "last_suggestion_date", label: "Last Suggestion Date", width: 18 },
+  { key: "last_suggestion_date", label: "Last Suggestion Date (YYYY-MM-DD)", width: 23 },
   { key: "client_sentiment", label: "Client Sentiment", width: 18 },
   { key: "client_feedback", label: "Client Feedback", width: 42 },
   { key: "next_steps", label: "Next Steps", width: 42 },
@@ -47,14 +48,12 @@ const TRAILING_COLUMNS = [
   { key: "mom_link", label: "MoM Link", width: 32, aliases: ["most_recent_mom_doc_link"] },
   { key: "consolidated_sheet_link", label: "Consolidated Sheet Link", width: 32 },
   { key: "project_drive_folder_link", label: "Project Drive Folder Link", width: 32 },
-  { key: "project_data_sheet_link", label: "Project Data Sheet Link", width: 32 },
-  { key: "last_updated_by", label: "Last Updated By (Reference Only)", width: 26, aliases: ["updated_by"] },
-  { key: "last_updated_on", label: "Last Updated On (Reference Only)", width: 22, aliases: ["updated_on"] }
+  { key: "project_data_sheet_link", label: "Project Data Sheet Link", width: 32 }
 ];
 
 const FIELD_MAP = {
   client_group: ["clientProfile", "clientGroup"],
-  client_category: ["clientProfile", "clientCategory"],
+  client_criticality: ["clientProfile", "clientCriticality"],
   financial_year: ["profile", "financialYear"],
   project_type: ["profile", "projectType"],
   revenue_category: ["profile", "revenueCategory"],
@@ -91,7 +90,7 @@ const NUMBER_FIELDS = new Set([
 const DATE_FIELDS = new Set(["last_meeting_date", "last_suggestion_date"]);
 const REFERENCE_FIELDS = {
   client_group: "client_group",
-  client_category: "client_category",
+  client_criticality: "client_criticality",
   project_type: "project_type",
   revenue_category: "revenue_category",
   portfolio_type: "portfolio_type",
@@ -212,7 +211,7 @@ function projectPayload(project) {
     expectedVersion: Number(project.version) || 0,
     clientProfile: {
       clientGroup: project.clientGroup || "",
-      clientCategory: project.clientCategory || ""
+      clientCriticality: project.clientCriticality || ""
     },
     profile: {
       financialYear: project.financialYear || "",
@@ -299,7 +298,7 @@ function rowForProject(project, kpiCount) {
   const row = {
     cluster_name: project.clusterName || "",
     client_group: project.clientGroup || "",
-    client_category: project.clientCategory || "",
+    client_criticality: project.clientCriticality || "",
     client_name: project.clientName || "",
     project_id: project.key || "",
     project_name: project.name || "",
@@ -324,6 +323,12 @@ function rowForProject(project, kpiCount) {
     budget_spent_local: project.budgetSpentLocal ?? "",
     revenue_generated_local: project.revenueGeneratedLocal ?? "",
     services: (project.services || []).map((service) => service.name).filter(Boolean).join(", "),
+    client_spocs: (project.clientPocs || []).map((poc) => [
+      poc.name,
+      poc.designation,
+      poc.contactEmail,
+      poc.contactWhatsapp
+    ].filter(Boolean).join(" | ")).filter(Boolean).join("; "),
     mandates: project.mandates || "",
     deliverables_status: project.deliverablesStatus || "",
     relationship_strength: project.relationshipStrength || "",
@@ -338,9 +343,7 @@ function rowForProject(project, kpiCount) {
     mom_link: project.links?.mom || "",
     consolidated_sheet_link: project.links?.consolidatedSheet || "",
     project_drive_folder_link: project.links?.projectDriveFolder || "",
-    project_data_sheet_link: project.links?.projectDataSheet || "",
-    last_updated_by: project.updatedBy || "",
-    last_updated_on: project.performanceUpdatedAt ? new Date(project.performanceUpdatedAt) : ""
+    project_data_sheet_link: project.links?.projectDataSheet || ""
   };
   for (let index = 0; index < kpiCount; index += 1) {
     const kpi = project.kpis?.[index] || {};
@@ -356,15 +359,27 @@ function rowForProject(project, kpiCount) {
   return row;
 }
 
-function addListValidation(sheet, columnNumber, values, endRow) {
-  const list = values.map((value) => String(value).replace(/"/g, '""'));
-  const formula = `"${list.join(",")}"`;
-  if (!list.length || formula.length > 250) return;
+function normalizedValidationValues(values) {
+  return [...new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function writeValidationSource(sheet, columnNumber, label, values) {
+  const list = normalizedValidationValues(values);
+  if (!list.length) return "";
+  const column = sheet.getColumn(columnNumber);
+  column.hidden = true;
+  sheet.getCell(1, columnNumber).value = `Validation: ${label}`;
+  list.forEach((value, index) => { sheet.getCell(index + 2, columnNumber).value = value; });
+  return `$${column.letter}$2:$${column.letter}$${list.length + 1}`;
+}
+
+function addListValidation(sheet, columnNumber, sourceFormula, endRow) {
+  if (!columnNumber || !sourceFormula) return;
   for (let row = 2; row <= endRow; row += 1) {
     sheet.getCell(row, columnNumber).dataValidation = {
       type: "list",
       allowBlank: true,
-      formulae: [formula]
+      formulae: [sourceFormula]
     };
   }
 }
@@ -387,8 +402,8 @@ export async function buildProjectPerformanceWorkbook(data, suppliedExcelJs = nu
   const header = sheet.getRow(1);
   header.height = 32;
   header.eachCell((cell) => {
-    cell.font = { name: "Arial", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF17365D" } };
+    cell.font = { name: "Arial", size: 10, bold: true, color: { argb: "FF17365D" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDCEAF7" } };
     cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
     cell.border = { bottom: { style: "medium", color: { argb: "FF9FBAD0" } } };
   });
@@ -396,7 +411,7 @@ export async function buildProjectPerformanceWorkbook(data, suppliedExcelJs = nu
   sheet.views[0].showGridLines = false;
   sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: Math.max(projects.length + 1, 2), column: columns.length } };
 
-  const referenceKeys = new Set(["cluster_name", "client_name", "project_id", "project_name", "start_date", "end_date", "services", "last_updated_by", "last_updated_on"]);
+  const referenceKeys = new Set(["cluster_name", "client_name", "project_id", "project_name", "start_date", "end_date", "services", "client_spocs"]);
   for (let columnNumber = 1; columnNumber <= columns.length; columnNumber += 1) {
     const definition = columns[columnNumber - 1];
     const excelColumn = sheet.getColumn(columnNumber);
@@ -410,15 +425,23 @@ export async function buildProjectPerformanceWorkbook(data, suppliedExcelJs = nu
     if (definition.key.endsWith("_date") || definition.key === "start_date" || definition.key === "end_date") {
       excelColumn.numFmt = "yyyy-mm-dd";
     }
-    if (definition.key === "last_updated_on") excelColumn.numFmt = "yyyy-mm-dd hh:mm";
     if (NUMBER_FIELDS.has(definition.key) || /kpi_\d+_(?:target|actual|previous_year_actual)/.test(definition.key)) {
       excelColumn.numFmt = "#,##0.00####";
     }
   }
 
   const validationEndRow = Math.max(projects.length + 200, 250);
+  let validationSourceColumn = columns.length + 2;
+  const validationSources = new Map();
+  const validationSource = (key, label, values) => {
+    if (!validationSources.has(key)) {
+      validationSources.set(key, writeValidationSource(sheet, validationSourceColumn, label, values));
+      validationSourceColumn += 1;
+    }
+    return validationSources.get(key);
+  };
   const validationCategories = {
-    client_group: "client_group", client_category: "client_category", project_type: "project_type",
+    client_group: "client_group", client_criticality: "client_criticality", project_type: "project_type",
     revenue_category: "revenue_category", portfolio_type: "portfolio_type", campaign_status: "campaign_status",
     current_phase: "current_phase", performance_status: "performance_status", currency: "currency",
     relationship_strength: "relationship_strength", meeting_cadence: "meeting_cadence",
@@ -426,15 +449,33 @@ export async function buildProjectPerformanceWorkbook(data, suppliedExcelJs = nu
   };
   for (const [key, category] of Object.entries(validationCategories)) {
     const columnNumber = columns.findIndex((column) => column.key === key) + 1;
-    addListValidation(sheet, columnNumber, (data?.referenceValues?.[category] || []).map((item) => item.value), validationEndRow);
+    addListValidation(sheet, columnNumber, validationSource(
+      `reference:${category}`,
+      category,
+      (data?.referenceValues?.[category] || []).map((item) => item.value)
+    ), validationEndRow);
   }
   const financialYearColumn = columns.findIndex((column) => column.key === "financial_year") + 1;
-  addListValidation(sheet, financialYearColumn, data?.financialYears || [], validationEndRow);
+  addListValidation(sheet, financialYearColumn, validationSource("financial_year", "Financial Year", data?.financialYears || []), validationEndRow);
+
+  const internalPocValues = normalizedValidationValues([
+    ...(data?.internalPocs || []).map((item) => item.email || item.name),
+    ...projects.flatMap((project) => ["projectDirector", "am", "tl", "ad", "avp"].map((role) => teamValue(project, role)))
+  ]);
+  const internalPocSource = validationSource("internal_poc", "Internal POC", internalPocValues);
+  for (const key of ["project_director", "am", "tl", "ad", "avp"]) {
+    addListValidation(sheet, columns.findIndex((column) => column.key === key) + 1, internalPocSource, validationEndRow);
+  }
+
+  const kpiNameSource = validationSource("kpi_name", "KPI Name", (data?.referenceValues?.kpi_name || []).map((item) => item.value));
+  const kpiUnitSource = validationSource("kpi_unit", "KPI Unit", ["number", "percent", "currency", "ratio"]);
+  const kpiDirectionSource = validationSource("kpi_direction", "KPI Direction", ["Higher is better", "Lower is better"]);
+  const yesNoSource = validationSource("yes_no", "Yes / No", ["Yes", "No"]);
   for (let slot = 1; slot <= kpiCount; slot += 1) {
-    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_name`) + 1, (data?.referenceValues?.kpi_name || []).map((item) => item.value), validationEndRow);
-    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_unit`) + 1, ["number", "percent", "currency", "ratio"], validationEndRow);
-    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_direction`) + 1, ["Higher is better", "Lower is better"], validationEndRow);
-    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_primary`) + 1, ["Yes", "No"], validationEndRow);
+    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_name`) + 1, kpiNameSource, validationEndRow);
+    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_unit`) + 1, kpiUnitSource, validationEndRow);
+    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_direction`) + 1, kpiDirectionSource, validationEndRow);
+    addListValidation(sheet, columns.findIndex((column) => column.key === `kpi_${slot}_primary`) + 1, yesNoSource, validationEndRow);
   }
   return workbook;
 }
@@ -688,7 +729,7 @@ export async function parseProjectPerformanceBuffer(arrayBuffer, data, fileName 
     const signature = JSON.stringify(row.payload.clientProfile);
     const existing = clientProfiles.get(project.clientId);
     if (existing && existing.signature !== signature) {
-      const message = `Client Group and Client Category must be the same for every ${project.clientName} project row`;
+      const message = `Client Group and Client Criticality must be the same for every ${project.clientName} project row`;
       row.errors.push(message);
       row.eligible = false;
       existing.row.errors.push(message);

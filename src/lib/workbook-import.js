@@ -1,4 +1,12 @@
 const SHEETS = {
+  clientProjects: {
+    name: "Client and Projects",
+    headers: [
+      "client_id", "client_name", "cluster", "client_status",
+      "project_id", "project_name", "project_status", "start_date", "end_date", "feedback_interval_days",
+      "services", "internal_owner_email"
+    ]
+  },
   quickProjects: {
     name: "Quick Project Upload",
     headers: [
@@ -105,6 +113,57 @@ function rowsFromSheetOptional(workbook, definition) {
   return workbook.getWorksheet(definition.name) ? rowsFromSheet(workbook, definition) : [];
 }
 
+function clientProjectRowsToSheets(rows) {
+  const clients = new Map();
+  const projects = new Map();
+  const services = new Map();
+
+  for (const row of rows) {
+    const clientKey = String(row.client_id || "").trim().toLowerCase();
+    const projectKey = String(row.project_id || "").trim();
+    if (clientKey && !clients.has(clientKey)) {
+      clients.set(clientKey, {
+        row: row.__row,
+        key: clientKey,
+        name: String(row.client_name || "").trim(),
+        clusterName: String(row.cluster || "").trim(),
+        activeStatus: String(row.client_status || "").trim().toLowerCase()
+      });
+    }
+    if (projectKey && !projects.has(projectKey.toLowerCase())) {
+      projects.set(projectKey.toLowerCase(), {
+        row: row.__row,
+        clientKey,
+        key: projectKey,
+        name: String(row.project_name || "").trim(),
+        activeStatus: String(row.project_status || "").trim().toLowerCase(),
+        startDate: isoDate(row.start_date, "Client and Projects", row.__row, "start_date"),
+        endDate: isoDate(row.end_date, "Client and Projects", row.__row, "end_date"),
+        feedbackIntervalDays: row.feedback_interval_days === "" ? "" : Number(row.feedback_interval_days)
+      });
+    }
+
+    const ownerEmail = String(row.internal_owner_email || "").trim().toLowerCase();
+    const serviceNames = String(row.services || "")
+      .split("|")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    for (const name of serviceNames) {
+      const key = `${projectKey.toLowerCase()}|${headerName(name) || `row-${row.__row}`}`;
+      if (!services.has(key)) services.set(key, {
+        row: row.__row,
+        projectKey,
+        serviceKey: "",
+        name,
+        internalOwnerEmail: ownerEmail,
+        kpis: ""
+      });
+    }
+  }
+
+  return { clients: [...clients.values()], projects: [...projects.values()], services: [...services.values()] };
+}
+
 function quickRowsToSheets(rows) {
   const clients = new Map();
   const projects = new Map();
@@ -191,24 +250,7 @@ export async function parseCsatWorkbook(file) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(await file.arrayBuffer());
 
-  let clients = rowsFromSheet(workbook, SHEETS.clients).map((row) => ({
-    row: row.__row,
-    key: String(row.client_id || "").trim().toLowerCase(),
-    name: String(row.client_name || "").trim(),
-    clusterName: String(row.cluster || "").trim(),
-    activeStatus: String(row.status || "").trim().toLowerCase()
-  }));
-  let projects = rowsFromSheet(workbook, SHEETS.projects).map((row) => ({
-    row: row.__row,
-    clientKey: String(row.client_id || "").trim().toLowerCase(),
-    key: String(row.project_id || "").trim(),
-    name: String(row.project_name || "").trim(),
-    activeStatus: String(row.status || "").trim().toLowerCase(),
-    startDate: isoDate(row.start_date, "Projects", row.__row, "start_date"),
-    endDate: isoDate(row.end_date, "Projects", row.__row, "end_date"),
-    feedbackIntervalDays: row.feedback_interval_days === "" ? "" : Number(row.feedback_interval_days)
-  }));
-  let clientPocs = rowsFromSheet(workbook, SHEETS.clientPocs).map((row) => ({
+  const clientPocs = rowsFromSheet(workbook, SHEETS.clientPocs).map((row) => ({
     row: row.__row,
     projectKey: String(row.project_id || "").trim(),
     name: String(row.poc_name || "").trim(),
@@ -222,14 +264,6 @@ export async function parseCsatWorkbook(file) {
     weightPercentage: row.weight_percent === "" ? "" : Number(row.weight_percent),
     active: String(row.active || "").trim().toLowerCase()
   }));
-  let services = rowsFromSheet(workbook, SHEETS.services).map((row) => ({
-    row: row.__row,
-    projectKey: String(row.project_id || "").trim(),
-    serviceKey: "",
-    name: String(row.service_name || "").trim(),
-    internalOwnerEmail: String(row.internal_owner_email || "").trim().toLowerCase(),
-    kpis: String(row.kpis || "").trim()
-  }));
   const internalPocs = rowsFromSheet(workbook, SHEETS.internalPocs).map((row) => ({
     row: row.__row,
     name: String(row.name || "").trim(),
@@ -242,12 +276,52 @@ export async function parseCsatWorkbook(file) {
     active: String(row.active || "").trim().toLowerCase()
   }));
 
-  const quickRows = rowsFromSheetOptional(workbook, SHEETS.quickProjects);
-  if (quickRows.length) {
-    if (clients.length || projects.length || clientPocs.length || services.length) {
-      throw new Error("Use either Quick Project Upload or the four detailed Clients/Projects/Client POCs/Services sheets in one upload, not both. Internal POCs may be used with either method.");
+  let clients = [];
+  let projects = [];
+  let services = [];
+  const combinedRows = rowsFromSheetOptional(workbook, SHEETS.clientProjects);
+  if (combinedRows.length || workbook.getWorksheet(SHEETS.clientProjects.name)) {
+    ({ clients, projects, services } = clientProjectRowsToSheets(combinedRows));
+  } else {
+    clients = rowsFromSheet(workbook, SHEETS.clients).map((row) => ({
+      row: row.__row,
+      key: String(row.client_id || "").trim().toLowerCase(),
+      name: String(row.client_name || "").trim(),
+      clusterName: String(row.cluster || "").trim(),
+      activeStatus: String(row.status || "").trim().toLowerCase()
+    }));
+    projects = rowsFromSheet(workbook, SHEETS.projects).map((row) => ({
+      row: row.__row,
+      clientKey: String(row.client_id || "").trim().toLowerCase(),
+      key: String(row.project_id || "").trim(),
+      name: String(row.project_name || "").trim(),
+      activeStatus: String(row.status || "").trim().toLowerCase(),
+      startDate: isoDate(row.start_date, "Projects", row.__row, "start_date"),
+      endDate: isoDate(row.end_date, "Projects", row.__row, "end_date"),
+      feedbackIntervalDays: row.feedback_interval_days === "" ? "" : Number(row.feedback_interval_days)
+    }));
+    services = rowsFromSheet(workbook, SHEETS.services).map((row) => ({
+      row: row.__row,
+      projectKey: String(row.project_id || "").trim(),
+      serviceKey: "",
+      name: String(row.service_name || "").trim(),
+      internalOwnerEmail: String(row.internal_owner_email || "").trim().toLowerCase(),
+      kpis: String(row.kpis || "").trim()
+    }));
+
+    const quickRows = rowsFromSheetOptional(workbook, SHEETS.quickProjects);
+    if (quickRows.length) {
+      if (clients.length || projects.length || services.length) {
+        throw new Error("Use either Quick Project Upload or the detailed Clients/Projects/Services sheets in one upload, not both. Client POCs and Internal POCs may be used with either method.");
+      }
+      const quick = quickRowsToSheets(quickRows);
+      clients = quick.clients;
+      projects = quick.projects;
+      services = quick.services;
+      if (quick.clientPocs.length) {
+        throw new Error("This older Quick Project Upload contains client POC rows. Move them to the Client POCs sheet before uploading the new format.");
+      }
     }
-    ({ clients, projects, clientPocs, services } = quickRowsToSheets(quickRows));
   }
 
   const total = clients.length + projects.length + clientPocs.length + services.length + internalPocs.length;

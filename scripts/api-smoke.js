@@ -281,7 +281,7 @@ const store = {
     clients: [{ id: "cl_1", key: "test", name: "Test Client", activeStatus: "active" }],
     internalPocs: [{ id: "ip_1", name: "Internal Owner", active: true }],
     referenceValues: {
-      client_category: [{ value: "Symbi" }, { value: "Non-Symbi" }],
+      client_criticality: [{ value: "Critical" }, { value: "High" }],
       client_group: [],
       project_type: [{ value: "Performance Only" }],
       revenue_category: [{ value: "Below 25 L" }],
@@ -301,6 +301,15 @@ const store = {
   getAppUserByEmail: async (email) => String(email).toLowerCase() === "employee@srvmedia.com" && store._appUserActive
     ? { id: "app_user_1", email: "employee@srvmedia.com", name: "SRV Employee", role: store._appUserRole, internalPocId: "ip_1", active: true }
     : null,
+  listAppUsers: async () => store._applicationUsers.map((user) => ({ ...user })),
+  activeSuperAdminCount: async () => store._applicationUsers.filter((user) => user.role === "super_admin" && user.active).length,
+  deleteAppUserIfNoHistory: async (id) => {
+    const user = store._applicationUsers.find((item) => item.id === id);
+    if (!user) return null;
+    if (user.hasHistory) return { action: "blocked", reason: "history", hasAuditHistory: true, hasCurrentProjectUpdates: false };
+    store._applicationUsers = store._applicationUsers.filter((item) => item.id !== id);
+    return { action: "deleted", deleted: 1, user };
+  },
   saveProjectPerformance: async (projectId, input) => {
     calls.performanceSaves.push({ projectId, input });
     return { saved: true, projectId, version: 1, changes: { "project.performance_status": { before: null, after: "On Track" } } };
@@ -365,6 +374,17 @@ const store = {
   createCluster: async (input) => ({ id: "clu_new", ...input }),
   createInternalPoc: async (input) => ({ id: "ip_new", ...input }),
   updateInternalPoc: async (id, input) => (id === "ip_1" ? { id, ...input } : null),
+  deleteInternalPoc: async (id) => id === "ip_1"
+    ? { internalPocsDeleted: 1, servicesUnassigned: 2, directReportsUnassigned: 1, appUsersUnlinked: 1, projectTeamAssignmentsCleared: 2 }
+    : { internalPocsDeleted: 0, servicesUnassigned: 0, directReportsUnassigned: 0, appUsersUnlinked: 0, projectTeamAssignmentsCleared: 0 },
+  createDepartment: async (input) => ({ id: "dep_new", ...input }),
+  createSubDepartment: async (input) => ({ id: "sub_new", ...input }),
+  deleteDepartment: async (id) => id === "dep_1"
+    ? { departmentsDeleted: 1, subDepartmentsDeleted: 2, internalPocsUnassigned: 1 }
+    : { departmentsDeleted: 0, subDepartmentsDeleted: 0, internalPocsUnassigned: 0 },
+  deleteSubDepartment: async (id) => id === "sub_1"
+    ? { subDepartmentsDeleted: 1, internalPocsUnassigned: 1 }
+    : { subDepartmentsDeleted: 0, internalPocsUnassigned: 0 },
   managerChainWouldLoop: async (id, managerId) => managerId === "ip_loop",
   subDepartmentBelongsTo: async (subId, deptId) => !(subId === "sub_other" && deptId === "dep_1"),
   createProjectService: async (input) => {
@@ -415,6 +435,12 @@ const store = {
   _messagingStatus: { enabled: true, updatedAt: null, updatedBy: null },
   _appUserRole: "super_admin",
   _appUserActive: true,
+  _applicationUsers: [
+    { id: "app_user_1", email: "employee@srvmedia.com", name: "SRV Employee", role: "super_admin", active: true, permissions: {} },
+    { id: "app_user_clean", email: "clean@srvmedia.com", name: "Clean User", role: "project_user", active: true, permissions: {}, internalPocId: "ip_1" },
+    { id: "app_user_history", email: "history@srvmedia.com", name: "History User", role: "project_user", active: true, permissions: {}, internalPocId: "ip_1", hasHistory: true },
+    { id: "app_user_admin", email: "admin@srvmedia.com", name: "Admin User", role: "admin", active: true, permissions: {} }
+  ],
   _injectRapidRatingMessages: false,
   _rapidRatingMessagesInjected: false
 };
@@ -662,7 +688,7 @@ async function scenario(name, fn) {
     const res = await req("PUT", "/api/project-performance/prj_1", {
       updatedBy: "Test Editor",
       expectedVersion: 0,
-      clientProfile: { clientGroup: "", clientCategory: "Symbi" },
+      clientProfile: { clientGroup: "", clientCriticality: "Critical" },
       profile: {
         financialYear: "2026-2027",
         projectType: "Performance Only",
@@ -745,7 +771,7 @@ async function scenario(name, fn) {
     const saved = await provider.saveProjectPerformance(project.id, {
       updatedBy: "Ashish",
       expectedVersion: 0,
-      clientProfile: { clientCategory: "Symbi" },
+      clientProfile: { clientCriticality: "Critical" },
       profile: {
         financialYear: "2026-2027",
         performanceStatus: "On Track",
@@ -757,10 +783,56 @@ async function scenario(name, fn) {
     });
     assert.strictEqual(saved.version, 1);
     assert.strictEqual(profiles[0].performance_status, "On Track");
+    assert.strictEqual(clientProfiles[0].client_criticality, "Critical");
     assert.strictEqual(Object.hasOwn(profiles[0], "active_status"), false);
     assert.strictEqual(audits.length, 1);
     assert.strictEqual(audits[0].updated_by, "Ashish");
     assert.strictEqual(kpiRows.length, 1);
+  });
+
+  await scenario("Application User deletion is allowed only without Project Performance history", async () => {
+    const provider = Object.create(SupabaseStore.prototype);
+    let hasHistory = true;
+    let deleted = false;
+    provider.request = async (table, options = {}) => {
+      const method = options.method || "GET";
+      if (table === "app_users" && method === "GET") {
+        return [{ id: "app_delete_test", email: "delete.test@srvmedia.com", name: "Delete Test", role: "project_user" }];
+      }
+      if (table === "project_performance_audit") return hasHistory ? [{ id: "audit_1" }] : [];
+      if (table === "project_performance_profiles") return [];
+      if (table === "app_users" && method === "DELETE") {
+        deleted = true;
+        return [{ id: "app_delete_test" }];
+      }
+      throw new Error(`Unexpected Application User deletion request ${method} ${table}`);
+    };
+
+    const blocked = await provider.deleteAppUserIfNoHistory("app_delete_test");
+    assert.strictEqual(blocked.action, "blocked");
+    assert.strictEqual(deleted, false);
+    hasHistory = false;
+    const removed = await provider.deleteAppUserIfNoHistory("app_delete_test");
+    assert.strictEqual(removed.action, "deleted");
+    assert.strictEqual(deleted, true);
+  });
+
+  await scenario("Project Performance Standards delete without changing saved project values", async () => {
+    const provider = Object.create(SupabaseStore.prototype);
+    const requests = [];
+    provider.request = async (table, options = {}) => {
+      requests.push({ table, options });
+      const method = options.method || "GET";
+      if (table === "performance_reference_values" && method === "GET") {
+        return [{ id: "ref_1", category: "performance_status", value: "On Track", active: true }];
+      }
+      if (table === "performance_reference_values" && method === "DELETE") return [{ id: "ref_1" }];
+      throw new Error(`Unexpected standard deletion request ${method} ${table}`);
+    };
+    const result = await provider.deletePerformanceReferenceValue("ref_1");
+    assert.strictEqual(result.action, "deleted");
+    assert.strictEqual(result.value, "On Track");
+    assert.strictEqual(requests.some(({ table }) => table === "project_performance_profiles"), false);
   });
 
   await scenario("GET /api/projects/:key/workspace", async () => {
@@ -3245,6 +3317,29 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 403);
   });
 
+  await scenario("Application User without history can be permanently deleted", async () => {
+    const res = await req("DELETE", "/api/admin/app-users/app_user_clean", {}, PIN);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(JSON.parse(res.body).action, "deleted");
+    assert.ok(!store._applicationUsers.some((user) => user.id === "app_user_clean"));
+  });
+
+  await scenario("Application User with history must be deactivated instead of deleted", async () => {
+    const res = await req("DELETE", "/api/admin/app-users/app_user_history", {}, PIN);
+    assert.strictEqual(res.statusCode, 409);
+    assert.match(JSON.parse(res.body).error, /history/i);
+    assert.ok(store._applicationUsers.some((user) => user.id === "app_user_history"));
+  });
+
+  await scenario("self-deletion and Super Admin deletion are protected", async () => {
+    const own = await rawReq("DELETE", "/api/admin/app-users/app_user_1", {}, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(own.statusCode, 409);
+    assert.match(JSON.parse(own.body).error, /own/i);
+    const protectedAccount = await req("DELETE", "/api/admin/app-users/app_user_1", {}, PIN);
+    assert.strictEqual(protectedAccount.statusCode, 409);
+    assert.match(JSON.parse(protectedAccount.body).error, /Super Admin accounts cannot be deleted/i);
+  });
+
   await scenario("WhatsApp master control needs the PIN and leaves email events available", async () => {
     const priorMessages = [...calls.messages];
     const priorSession = store._session;
@@ -4088,6 +4183,34 @@ async function scenario(name, fn) {
   await scenario("sub-department from another department is refused", async () => {
     const res = await req("POST", "/api/admin/internal-pocs", { name: "X", departmentId: "dep_1", subDepartmentId: "sub_other" }, PIN);
     assert.strictEqual(res.statusCode, 400);
+  });
+
+  await scenario("organization standards can be added in one save", async () => {
+    const res = await req("POST", "/api/admin/organization-standards/bulk", {
+      clusters: ["West"], departments: ["Strategy"], subDepartments: []
+    }, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 201);
+    assert.strictEqual(payload.created.clusters.length, 1);
+    assert.strictEqual(payload.created.departments.length, 1);
+  });
+
+  await scenario("admin can permanently delete an Internal POC and clear references", async () => {
+    const res = await req("DELETE", "/api/admin/internal-pocs/ip_1", {}, PIN);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(payload.internalPocsDeleted, 1);
+    assert.strictEqual(payload.servicesUnassigned, 2);
+    assert.strictEqual(payload.appUsersUnlinked, 1);
+  });
+
+  await scenario("admin can delete Department and Sub-department standards", async () => {
+    const department = await req("DELETE", "/api/admin/departments/dep_1", {}, PIN);
+    const subDepartment = await req("DELETE", "/api/admin/sub-departments/sub_1", {}, PIN);
+    assert.strictEqual(department.statusCode, 200);
+    assert.strictEqual(JSON.parse(department.body).subDepartmentsDeleted, 2);
+    assert.strictEqual(subDepartment.statusCode, 200);
+    assert.strictEqual(JSON.parse(subDepartment.body).internalPocsUnassigned, 1);
   });
 
   await scenario("create service works", async () => {

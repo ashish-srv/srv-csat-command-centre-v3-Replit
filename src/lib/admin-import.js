@@ -113,6 +113,7 @@ function validateWorkbook(snapshot, raw) {
   const knownProjectKeys = new Set(existingProjectByKey.keys());
   const knownInternalEmails = new Set(existingInternalByEmail.keys());
   const levelByName = mapBy(directory.pocLevels, (item) => lower(item.name));
+  const serviceCatalogByName = mapBy((directory.serviceCatalog || []).filter((item) => item.active !== false), (item) => lower(item.name));
   const seenClientKeys = new Set();
   const seenProjectKeys = new Set();
   const seenInternalEmails = new Set();
@@ -229,13 +230,17 @@ function validateWorkbook(snapshot, raw) {
   for (const row of data.services) {
     row.projectKey = String(row.projectKey || "").trim();
     row.name = String(row.name || "").trim();
-    row.serviceKey = lower(row.serviceKey) || serviceIdentifier(row.name);
+    const catalogItem = serviceCatalogByName.get(lower(row.name));
+    row.serviceCatalogId = catalogItem?.id || null;
+    row.name = catalogItem?.name || row.name;
+    row.serviceKey = catalogItem?.serviceKey || lower(row.serviceKey) || serviceIdentifier(row.name);
     row.internalOwnerEmail = lower(row.internalOwnerEmail);
     row.kpis = String(row.kpis || "").trim();
     const combined = `${lower(row.projectKey)}|${row.serviceKey}`;
     if (!row.projectKey) rowError(errors, "Services", row.row, "project_id is required");
     else if (!knownProjectKeys.has(lower(row.projectKey))) rowError(errors, "Services", row.row, `project_id ${row.projectKey} is neither existing nor listed on Projects`);
     if (!row.name) rowError(errors, "Services", row.row, "service_name is required");
+    else if (!catalogItem) rowError(errors, "Services", row.row, `${row.name} is not an active Standard Service`);
     if (!row.serviceKey || !/^[a-z0-9_]+$/.test(row.serviceKey)) rowError(errors, "Services", row.row, "service_key must use lowercase letters, numbers and underscores");
     if (seenServiceKeys.has(combined)) rowError(errors, "Services", row.row, "service_key appears more than once for this project");
     if (!row.internalOwnerEmail) rowError(errors, "Services", row.row, "internal_owner_email is required");
@@ -456,7 +461,8 @@ async function applyWorkbook(store, validated) {
       serviceKey: row.serviceKey,
       name: row.name,
       kpis: row.kpis,
-      internalPocId: internalByEmail.get(row.internalOwnerEmail).id
+      internalPocId: internalByEmail.get(row.internalOwnerEmail).id,
+      serviceCatalogId: row.serviceCatalogId
     };
     const existing = serviceByProjectAndKey.get(mapKey);
     const saved = existing
