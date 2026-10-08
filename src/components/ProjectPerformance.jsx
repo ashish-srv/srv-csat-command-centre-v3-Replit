@@ -225,6 +225,7 @@ export default function ProjectPerformance({ currentUser = null }) {
   const [summarySearch, setSummarySearch] = useState("");
   const [detailsSearch, setDetailsSearch] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [viewingProjectId, setViewingProjectId] = useState("");
   const [form, setForm] = useState(formFromProject(null, editorIdentity));
   const [kpis, setKpis] = useState([]);
   const [downloadingWorkbook, setDownloadingWorkbook] = useState(false);
@@ -246,7 +247,9 @@ export default function ProjectPerformance({ currentUser = null }) {
     try {
       const next = await apiGet("/api/project-performance");
       setData(next);
-      const found = next.projects.find((item) => item.id === preferredProjectId) || next.projects[0] || null;
+      const found = preferredProjectId
+        ? next.projects.find((item) => item.id === preferredProjectId) || null
+        : null;
       setSelectedProjectId(found?.id || "");
       setForm(formFromProject(found, editorIdentity));
       setKpis((found?.kpis || []).map((item) => ({ ...item })));
@@ -339,10 +342,23 @@ export default function ProjectPerformance({ currentUser = null }) {
     if (move) scrollToSection("performance-project-details");
   }
 
+  function viewProject(projectId, move = false) {
+    setViewingProjectId(projectId || "");
+    if (move) scrollToSection("performance-project-details");
+  }
+
   useEffect(() => {
-    if (searchedProjects.some((item) => item.id === selectedProjectId)) return;
-    chooseProject(searchedProjects[0]?.id || "");
+    if (!selectedProjectId || searchedProjects.some((item) => item.id === selectedProjectId)) return;
+    setSelectedProjectId("");
+    setForm(formFromProject(null, editorIdentity));
+    setKpis([]);
+    setNotice("");
   }, [searchedProjects, selectedProjectId]);
+
+  useEffect(() => {
+    if (!viewingProjectId || detailProjects.some((item) => item.id === viewingProjectId)) return;
+    setViewingProjectId("");
+  }, [detailProjects, viewingProjectId]);
 
   function updateField(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -522,7 +538,7 @@ export default function ProjectPerformance({ currentUser = null }) {
     try {
       const result = await apiDelete(`/api/project-performance/projects/${encodeURIComponent(project.id)}/services/${encodeURIComponent(service.id)}`);
       setNotice(result.message);
-      await load(project.id);
+      await load(selectedProjectId);
     } catch (removeError) {
       setError(removeError);
     } finally {
@@ -536,7 +552,7 @@ export default function ProjectPerformance({ currentUser = null }) {
     try {
       const result = await apiPost(`/api/project-performance/projects/${encodeURIComponent(project.id)}/services`, { serviceCatalogId });
       setNotice(result.message);
-      await load(project.id);
+      await load(selectedProjectId);
       return true;
     } catch (addError) {
       setError(addError);
@@ -567,16 +583,19 @@ export default function ProjectPerformance({ currentUser = null }) {
       </header>
 
       <nav className="performance-section-nav" aria-label="Project performance sections">
+        {canAddProjects ? <button type="button" onClick={() => {
+          setShowCreateProject(true);
+          window.requestAnimationFrame(() => scrollToSection("performance-add-project"));
+        }}>Add Project</button> : null}
         <button type="button" onClick={() => scrollToSection("performance-portfolio")}>Portfolio Overview</button>
         <button type="button" onClick={() => scrollToSection("performance-project-details")}>Project Details</button>
         {canEditPerformance ? <button type="button" onClick={() => scrollToSection("performance-update")}>Update Project</button> : null}
         {canEditPerformance ? <button type="button" onClick={() => scrollToSection("performance-excel-upload")}>Excel Upload</button> : null}
         <button type="button" onClick={() => scrollToSection("performance-audit")}>Audit History</button>
-        {canAddProjects ? <button type="button" onClick={() => setShowCreateProject((value) => !value)}>Add Project</button> : null}
       </nav>
 
       {canAddProjects && showCreateProject ? (
-        <section className="performance-section-anchor">
+        <section id="performance-add-project" className="performance-section-anchor">
           <Panel title="Add Project" badge="Created paused for safe setup">
             <p className="form-note">Choose an existing client. Standard services and client POCs are added only by a Super Admin in Manage; until then this project remains paused and cannot send CSAT messages.</p>
             <div className="performance-form-grid">
@@ -632,7 +651,7 @@ export default function ProjectPerformance({ currentUser = null }) {
               <thead><tr><th>Client / Project</th><th>Cluster</th><th>Performance</th><th>Current Delivery Phase</th><th>Sentiment</th><th>Account Manager</th><th>Updated</th></tr></thead>
               <tbody>
                 {summaryProjects.map((project) => (
-                  <tr key={project.id} className={selectedProjectId === project.id ? "selected-row" : ""} onClick={() => chooseProject(project.id, true)}>
+                  <tr key={project.id} className={viewingProjectId === project.id ? "selected-row" : ""} onClick={() => viewProject(project.id, true)}>
                     <td><strong>{project.name}</strong><small>{project.clientName}</small></td>
                     <td>{project.clusterName || "—"}</td>
                     <td><StatusPill value={project.performanceStatus || "Not set"} /></td>
@@ -657,7 +676,15 @@ export default function ProjectPerformance({ currentUser = null }) {
         </div>
         <div className="performance-project-accordions">
           {detailProjects.map((project) => (
-            <details className={`performance-project-accordion ${selectedProjectId === project.id ? "selected-project" : ""}`} key={project.id} onToggle={(event) => { if (event.currentTarget.open) chooseProject(project.id); }}>
+            <details
+              className={`performance-project-accordion ${viewingProjectId === project.id ? "selected-project" : ""}`}
+              key={project.id}
+              open={viewingProjectId === project.id}
+              onToggle={(event) => {
+                const isOpen = event.currentTarget.open;
+                setViewingProjectId((current) => isOpen ? project.id : current === project.id ? "" : current);
+              }}
+            >
               <summary>
                 <span><strong>{project.name}</strong><small>{project.clientName} · {project.key}</small></span>
                 <span><StatusPill value={project.performanceStatus || "Not set"} /><small>Updated {formatDateTime(project.performanceUpdatedAt)}</small></span>
@@ -778,6 +805,19 @@ export default function ProjectPerformance({ currentUser = null }) {
 
       {canEditPerformance ? <section id="performance-update" className="performance-section-anchor">
         <div className="section-heading-inline"><div><p className="eyebrow">Update Project</p><h3>Maintain current project performance</h3></div></div>
+        <div className="performance-update-project-picker">
+          <SingleSelect
+            label="Project to Update"
+            options={searchedProjects.map((project) => ({
+              value: project.id,
+              label: `${project.name} · ${project.clientName} · ${project.key}`
+            }))}
+            value={selectedProjectId}
+            onChange={chooseProject}
+            placeholder="Search and select a project"
+          />
+          {selectedProjectId ? <Button onClick={() => chooseProject("")}>Clear Selection</Button> : null}
+        </div>
         {!selectedProject ? <EmptyState title="Select a project before updating" /> : (
           <Panel title={<>Update <span className="performance-update-client">{selectedProject.clientName}</span> · {selectedProject.name}</>} badge={`Version ${selectedProject.version || 0}`}>
             <div className="performance-form-scroll">

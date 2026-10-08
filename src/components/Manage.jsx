@@ -1308,7 +1308,8 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function loadAll(keepClient = clientId) {
-    setLoading(true);
+    const isInitialLoad = !directory;
+    if (isInitialLoad) setLoading(true);
     try {
       const [data, userData, standardData, projectTeamData] = await Promise.all([
         apiGet("/api/admin/directory"),
@@ -1343,7 +1344,7 @@ export default function Manage({ onReload, currentUser = null }) {
     } catch (loadError) {
       showToast(loadError.message);
     } finally {
-      setLoading(false);
+      if (isInitialLoad) setLoading(false);
     }
   }
 
@@ -2452,18 +2453,22 @@ export default function Manage({ onReload, currentUser = null }) {
       </FilterBar>
 
       <nav className="manage-section-nav" aria-label="Manage sections">
+        {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
+        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
+        {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
+        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-workbook")?.scrollIntoView({ behavior: "smooth" })}>Excel Onboarding</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-clients")?.scrollIntoView({ behavior: "smooth" })}>Clients &amp; Clusters</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-project-status")?.scrollIntoView({ behavior: "smooth" })}>Project Status</button> : null}
         {canManageProjectTeams ? <button type="button" onClick={() => document.getElementById("manage-project-teams")?.scrollIntoView({ behavior: "smooth" })}>Project Teams</button> : null}
-        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
-        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Project Services</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
-        {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
-        {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
-        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-cleanup")?.scrollIntoView({ behavior: "smooth" })}>Data Cleanup</button> : null}
       </nav>
 
       {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel">

@@ -4484,7 +4484,17 @@ button.metric-card {
 }
 
 .performance-heading h2 { font-size: 30px; }
-.performance-update-client { color: var(--blue); font-weight: 900; }
+.performance-update-project-picker {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid #cbd8ea;
+  border-radius: 14px;
+  background: #f7faff;
+}
+.performance-update-project-picker > .filter-field { flex: 1 1 520px; max-width: 760px; }
 .performance-update-client { color: var(--blue); font-weight: 900; }
 .performance-heading > div > p:last-child { margin: 8px 0 0; color: var(--muted-strong); font-size: 13px; }
 .performance-heading-actions,
