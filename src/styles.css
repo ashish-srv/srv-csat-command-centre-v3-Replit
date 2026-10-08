@@ -2648,8 +2648,45 @@ button.metric-card {
 
 .dtable.manage-projects .dtable-head,
 .dtable.manage-projects .dtable-row {
-  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.15fr) minmax(0, 1.4fr) 84px 96px 96px 88px 44px;
+  grid-template-columns: 34px minmax(0, 1.8fr) minmax(0, 1.15fr) minmax(0, 1.4fr) 84px 96px 96px 88px 44px;
 }
+
+.dtable.manage-projects input[type="checkbox"] { width: 17px; height: 17px; margin: 0; accent-color: var(--blue); }
+
+.bulk-project-status-control {
+  display: grid;
+  gap: 11px;
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid #b9c9dd;
+  border-radius: 11px;
+  background: #f7faff;
+  scroll-margin-top: 72px;
+}
+.bulk-project-status-heading,
+.bulk-project-status-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.bulk-project-status-heading > span:first-child,
+.bulk-project-status-preview-head > span { display: flex; flex-direction: column; gap: 4px; }
+.bulk-project-status-heading strong,
+.bulk-project-status-preview-head strong { color: #10213a; font-size: 14px; }
+.bulk-project-status-heading small,
+.bulk-project-status-preview-head small { color: var(--muted-strong); font-size: 11px; line-height: 1.45; }
+.status-selection-count { flex: 0 0 auto; border-radius: 999px; background: #e4edfb; color: #1e5db7; padding: 5px 9px; font-size: 11px; font-weight: 800; }
+.bulk-project-status-actions { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px; }
+.bulk-project-status-actions .form-field { flex: 1 1 300px; max-width: 480px; }
+.bulk-project-status-preview { display: grid; gap: 10px; padding: 12px; border: 1px solid #e1b85d; border-radius: 9px; background: #fffaf0; }
+.bulk-project-status-preview-list { display: grid; max-height: 260px; overflow-y: auto; border: 1px solid #ead6a7; border-radius: 8px; background: #fff; }
+.bulk-project-status-preview-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border-bottom: 1px solid var(--soft-line); }
+.bulk-project-status-preview-list > div:last-child { border-bottom: 0; }
+.bulk-project-status-preview-list > div > span:first-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.bulk-project-status-preview-list strong { color: var(--ink); }
+.bulk-project-status-preview-list small { color: var(--muted-strong); font-size: 11px; }
+.bulk-project-status-preview-list > div > span:last-child { flex: 0 0 auto; color: var(--muted-strong); font-size: 12px; text-transform: capitalize; }
 
 .dtable.manage-pocs .dtable-head,
 .dtable.manage-pocs .dtable-row {

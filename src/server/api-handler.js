@@ -6196,6 +6196,36 @@ async function handleApiRequest(request) {
     return json(201, { project });
   }
 
+  if (method === "PUT" && pathname === "/api/admin/projects/bulk-status") {
+    const projectIds = [...new Set((Array.isArray(body.projectIds) ? body.projectIds : []).map((value) => String(value || "").trim()).filter(Boolean))];
+    const activeStatus = String(body.activeStatus || "").trim().toLowerCase();
+    if (!projectIds.length || projectIds.length > 500) return error(400, "Select between 1 and 500 projects");
+    if (!["active", "paused", "closed"].includes(activeStatus)) return error(400, "Project status must be active, paused or closed");
+    const directory = await store.getDirectory();
+    const projectsById = new Map((directory.projects || []).map((project) => [project.id, project]));
+    const missingIds = projectIds.filter((projectId) => !projectsById.has(projectId));
+    if (missingIds.length) return error(404, "One or more selected projects were not found");
+    const changedProjects = projectIds
+      .map((projectId) => projectsById.get(projectId))
+      .filter((project) => project.activeStatus !== activeStatus);
+    const updated = [];
+    for (const project of changedProjects) {
+      const saved = await store.updateProject(project.id, { activeStatus });
+      if (!saved) return error(404, `Project not found: ${project.name}`);
+      if (activeStatus === "active" && typeof store.ensureProjectSchedule === "function") {
+        await store.ensureProjectSchedule(project.id);
+      }
+      updated.push(saved);
+    }
+    return json(200, {
+      projects: updated,
+      updated: updated.length,
+      unchanged: projectIds.length - updated.length,
+      activeStatus,
+      message: `${updated.length} project${updated.length === 1 ? "" : "s"} changed to ${activeStatus}${projectIds.length - updated.length ? `; ${projectIds.length - updated.length} already had that status` : ""}.`
+    });
+  }
+
   const projectUpdateMatch = pathname.match(/^\/api\/admin\/projects\/([^/]+)$/);
   if (method === "PATCH" && projectUpdateMatch) {
     const projectId = decodeURIComponent(projectUpdateMatch[1]);

@@ -1275,6 +1275,9 @@ export default function Manage({ onReload, currentUser = null }) {
   const [standardDrafts, setStandardDrafts] = useState(initialStandardDrafts);
   const [selectedStandardIds, setSelectedStandardIds] = useState([]);
   const [projectSearch, setProjectSearch] = useState("");
+  const [selectedProjectStatusIds, setSelectedProjectStatusIds] = useState([]);
+  const [bulkProjectStatus, setBulkProjectStatus] = useState("paused");
+  const [projectStatusPreview, setProjectStatusPreview] = useState(null);
   const [serviceCatalogSearch, setServiceCatalogSearch] = useState("");
   const [internalPocSearch, setInternalPocSearch] = useState("");
   const [projectTeamRows, setProjectTeamRows] = useState([]);
@@ -1953,6 +1956,41 @@ export default function Manage({ onReload, currentUser = null }) {
     }
   }
 
+  function previewProjectStatusChanges() {
+    const selected = (directory?.projects || []).filter((project) => selectedProjectStatusIds.includes(project.id));
+    const changes = selected.filter((project) => project.activeStatus !== bulkProjectStatus);
+    if (!selected.length) {
+      showToast("Select at least one project.");
+      return;
+    }
+    if (!changes.length) {
+      showToast(`Every selected project is already ${bulkProjectStatus}.`);
+      return;
+    }
+    setProjectStatusPreview({ targetStatus: bulkProjectStatus, projects: changes });
+  }
+
+  async function applyProjectStatusChanges() {
+    const preview = projectStatusPreview;
+    if (!preview?.projects?.length) return;
+    setSaving(true);
+    try {
+      const result = await apiWrite("/api/admin/projects/bulk-status", {
+        projectIds: preview.projects.map((project) => project.id),
+        activeStatus: preview.targetStatus
+      }, "PUT");
+      showToast(result.message);
+      setSelectedProjectStatusIds([]);
+      setProjectStatusPreview(null);
+      await loadAll(clientId);
+      onReload();
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function selectCluster(id) {
     setClusterFilterId(id);
     const allClients = directory?.clients || [];
@@ -2415,6 +2453,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <nav className="manage-section-nav" aria-label="Manage sections">
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-project-status")?.scrollIntoView({ behavior: "smooth" })}>Project Status</button> : null}
         {canManageProjectTeams ? <button type="button" onClick={() => document.getElementById("manage-project-teams")?.scrollIntoView({ behavior: "smooth" })}>Project Teams</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
@@ -2943,6 +2982,30 @@ export default function Manage({ onReload, currentUser = null }) {
             />
           </div>
         ) : null}
+        <div id="manage-project-status" className="bulk-project-status-control">
+          <div className="bulk-project-status-heading">
+            <span><strong>Bulk Project Status</strong><small>“Paused” is the safe deactivated state: it blocks new scheduled cycles while preserving the project and its history.</small></span>
+            <span className="status-selection-count">{selectedProjectStatusIds.length} selected</span>
+          </div>
+          <div className="bulk-project-status-actions">
+            <Field label="Set selected projects to">
+              <select value={bulkProjectStatus} onChange={(event) => { setBulkProjectStatus(event.target.value); setProjectStatusPreview(null); }}>
+                <option value="active">Active — scheduler can start cycles</option>
+                <option value="paused">Paused — deactivate new scheduling</option>
+                <option value="closed">Closed — project finished</option>
+              </select>
+            </Field>
+            <Button onClick={() => { setSelectedProjectStatusIds(displayedProjects.map((project) => project.id)); setProjectStatusPreview(null); }} disabled={!displayedProjects.length}>Select all filtered</Button>
+            <Button onClick={() => { setSelectedProjectStatusIds([]); setProjectStatusPreview(null); }} disabled={!selectedProjectStatusIds.length}>Clear selection</Button>
+            <Button variant="primary" onClick={previewProjectStatusChanges} disabled={!selectedProjectStatusIds.length}>Preview status changes</Button>
+          </div>
+          {projectStatusPreview ? <div className="bulk-project-status-preview">
+            <div className="bulk-project-status-preview-head"><span><strong>Confirm {projectStatusPreview.projects.length} project change{projectStatusPreview.projects.length === 1 ? "" : "s"}</strong><small>No project, POC, feedback, chat or performance record will be deleted.</small></span><button type="button" className="icon-button" onClick={() => setProjectStatusPreview(null)} aria-label="Close status preview"><X size={15} /></button></div>
+            <div className="bulk-project-status-preview-list">{projectStatusPreview.projects.map((project) => <div key={project.id}><span><strong>{project.name}</strong><small>{clientsById.get(project.clientId)?.name || "Client not found"} · {project.key}</small></span><span>{project.activeStatus} → <b>{projectStatusPreview.targetStatus}</b></span></div>)}</div>
+            <p className="form-note warning-note">Paused or closed projects will not start new scheduled 30-day cycles or quick check-ins. Existing feedback sessions and their reminder/closure flow are preserved.</p>
+            <div className="button-row"><Button onClick={() => setProjectStatusPreview(null)} disabled={saving}>Cancel</Button><Button variant="primary" onClick={applyProjectStatusChanges} disabled={saving}>{saving ? "Applying changes…" : "Confirm bulk status update"}</Button></div>
+          </div> : null}
+        </div>
         <div className="manage-section-search">
           <Field label="Search projects"><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Project, ID, client, status or date" /></Field>
           {projectSearch ? <Button onClick={() => setProjectSearch("")}>Clear search</Button> : null}
@@ -2950,6 +3013,7 @@ export default function Manage({ onReload, currentUser = null }) {
         <div className="manage-projects-scroll">
         <div className="dtable manage-projects">
           <div className="dtable-head">
+            <span><input type="checkbox" checked={Boolean(displayedProjects.length) && displayedProjects.every((project) => selectedProjectStatusIds.includes(project.id))} onChange={(event) => { const visibleIds = displayedProjects.map((project) => project.id); setSelectedProjectStatusIds((current) => event.target.checked ? [...new Set([...current, ...visibleIds])] : current.filter((id) => !visibleIds.includes(id))); setProjectStatusPreview(null); }} aria-label="Select all filtered projects" /></span>
             <span>Project</span>
             <span>Project ID</span>
             <span>Client</span>
@@ -2961,6 +3025,7 @@ export default function Manage({ onReload, currentUser = null }) {
           </div>
           {displayedProjects.map((project) => (
             <div key={project.id} className="dtable-row">
+              <span><input type="checkbox" checked={selectedProjectStatusIds.includes(project.id)} onChange={(event) => { setSelectedProjectStatusIds((current) => event.target.checked ? [...current, project.id] : current.filter((id) => id !== project.id)); setProjectStatusPreview(null); }} aria-label={`Select ${project.name} for bulk status update`} /></span>
               <strong>{project.name}</strong>
               <span className="mono">{project.key}</span>
               <span>{clientsById.get(project.clientId)?.name || "Client not found"}</span>

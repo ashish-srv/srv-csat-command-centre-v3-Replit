@@ -34,6 +34,7 @@ const calls = {
   deletedClientPocs: [],
   deletedProjects: [],
   deletedClients: [],
+  updatedProjects: [],
   deletedClusters: [],
   reminderOptions: [],
   inactiveCompletionClaims: [],
@@ -413,7 +414,11 @@ const store = {
   createClient: async (input) => ({ id: "cl_new", ...input }),
   updateClient: async (id, input) => (id === "cl_1" ? { id, ...input } : null),
   clientKeyExists: async (key, exceptId) => key === "taken-client" && exceptId !== "cl_1",
-  updateProject: async (id, input) => (id === "nope" ? null : { id, ...input }),
+  updateProject: async (id, input) => {
+    if (id === "nope") return null;
+    calls.updatedProjects.push({ id, input });
+    return { id, ...input };
+  },
   createClientPoc: async (input) => {
     const created = { id: `poc_new_${calls.createdPocs.length + 1}`, ...input };
     calls.createdPocs.push(created);
@@ -3437,6 +3442,24 @@ async function scenario(name, fn) {
     assert.strictEqual(calls.performanceSaves.length, before + 1);
     assert.strictEqual(calls.performanceSaves.at(-1).input.profile.team.projectDirectorId, "ip_1");
     assert.strictEqual(calls.performanceSaves.at(-1).input.profile.team.tlId, null);
+  });
+
+  await scenario("Admin can preview and apply a PIN-protected bulk project status change", async () => {
+    const before = calls.updatedProjects.length;
+    const res = await req("PUT", "/api/admin/projects/bulk-status", {
+      projectIds: ["prj_1"],
+      activeStatus: "paused"
+    }, PIN);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(JSON.parse(res.body).updated, 1);
+    assert.strictEqual(calls.updatedProjects.length, before + 1);
+    assert.deepStrictEqual(calls.updatedProjects.at(-1), { id: "prj_1", input: { activeStatus: "paused" } });
+
+    const invalid = await req("PUT", "/api/admin/projects/bulk-status", {
+      projectIds: ["prj_1"],
+      activeStatus: "inactive"
+    }, PIN);
+    assert.strictEqual(invalid.statusCode, 400);
   });
 
   await scenario("client detail returns projects, pocs and services", async () => {
