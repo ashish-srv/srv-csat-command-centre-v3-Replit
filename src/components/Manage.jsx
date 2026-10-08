@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, Lock, Pencil, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { Download, Lock, Pencil, Plus, RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
 import { apiAdminGet, apiGet, apiWrite, apiWriteWithAdminPin, hasAdminPin, setAdminPin } from "../api";
 import { formatCycleType, formatDate, formatPocWeightShare } from "../format";
 import { parseCsatWorkbook } from "../lib/workbook-import";
@@ -35,7 +35,7 @@ const PERFORMANCE_STANDARD_LABELS = {
   portfolio_type: "Portfolio Type",
   currency: "Currency",
   performance_status: "Performance Status",
-  current_phase: "Current Phase",
+  current_phase: "Current Delivery Phase",
   campaign_status: "Campaign Status",
   client_sentiment: "Client Sentiment",
   relationship_strength: "Relationship Strength",
@@ -1226,6 +1226,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const canBulkSend = hasPermission(currentUser, "bulk_sends");
   const canManageUsers = hasPermission(currentUser, "manage_project_users");
   const isSuperAdmin = currentUser?.role === "super_admin";
+  const canManageProjectTeams = canManageRecords && ["admin", "super_admin"].includes(currentUser?.role);
   const [unlocked, setUnlocked] = useState(hasAdminPin());
   const [directory, setDirectory] = useState(null);
   const [clusterFilterId, setClusterFilterId] = useState("");
@@ -1276,6 +1277,9 @@ export default function Manage({ onReload, currentUser = null }) {
   const [projectSearch, setProjectSearch] = useState("");
   const [serviceCatalogSearch, setServiceCatalogSearch] = useState("");
   const [internalPocSearch, setInternalPocSearch] = useState("");
+  const [projectTeamRows, setProjectTeamRows] = useState([]);
+  const [dirtyProjectTeamIds, setDirtyProjectTeamIds] = useState([]);
+  const [projectTeamSearch, setProjectTeamSearch] = useState("");
   const formRef = useRef(null);
   const workbookInputRef = useRef(null);
 
@@ -1303,14 +1307,26 @@ export default function Manage({ onReload, currentUser = null }) {
   async function loadAll(keepClient = clientId) {
     setLoading(true);
     try {
-      const [data, userData, standardData] = await Promise.all([
+      const [data, userData, standardData, projectTeamData] = await Promise.all([
         apiGet("/api/admin/directory"),
         canManageUsers ? apiAdminGet("/api/admin/app-users") : Promise.resolve({ users: [] }),
-        canManageCatalogues ? apiAdminGet("/api/admin/performance-standards") : Promise.resolve({ values: [] })
+        canManageCatalogues ? apiAdminGet("/api/admin/performance-standards") : Promise.resolve({ values: [] }),
+        canManageProjectTeams ? apiAdminGet("/api/admin/project-teams") : Promise.resolve({ projects: [] })
       ]);
       setDirectory(data);
       setAppUsers(userData.users || []);
       setPerformanceStandards(standardData.values || []);
+      setProjectTeamRows((projectTeamData.projects || []).map((project) => ({
+        ...project,
+        team: {
+          projectDirectorId: project.team?.projectDirectorId || "",
+          amId: project.team?.amId || "",
+          tlId: project.team?.tlId || "",
+          adId: project.team?.adId || "",
+          avpId: project.team?.avpId || ""
+        }
+      })));
+      setDirtyProjectTeamIds([]);
       setPocControlRows((data.clientPocs || []).map((poc) => ({ ...poc })));
       const target = keepClient || "";
       setClientId(target);
@@ -1325,6 +1341,34 @@ export default function Manage({ onReload, currentUser = null }) {
       showToast(loadError.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  function updateProjectTeam(projectId, field, value) {
+    setProjectTeamRows((current) => current.map((project) => project.id === projectId
+      ? { ...project, team: { ...project.team, [field]: value } }
+      : project));
+    setDirtyProjectTeamIds((current) => current.includes(projectId) ? current : [...current, projectId]);
+  }
+
+  async function saveProjectTeams() {
+    const rows = projectTeamRows.filter((project) => dirtyProjectTeamIds.includes(project.id));
+    if (!rows.length) {
+      showToast("No project team changes to save.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await apiWrite("/api/admin/project-teams", {
+        rows: rows.map((project) => ({ projectId: project.id, team: project.team }))
+      }, "PUT");
+      showToast(result.message);
+      await loadAll(clientId);
+      onReload();
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -2283,6 +2327,17 @@ export default function Manage({ onReload, currentUser = null }) {
     project.startDate,
     project.endDate
   ].some((value) => String(value || "").toLowerCase().includes(projectNeedle)));
+  const projectTeamNeedle = projectTeamSearch.trim().toLowerCase();
+  const displayedProjectTeamRows = projectTeamRows
+    .filter((project) => !clientId || project.clientId === clientId)
+    .filter((project) => !clusterFilterId || clientsById.get(project.clientId)?.clusterId === clusterFilterId)
+    .filter((project) => !projectTeamNeedle || [
+      project.name,
+      project.key,
+      project.clientName,
+      project.clusterName,
+      ...Object.values(project.team || {}).map((personId) => peopleById.get(personId)?.name)
+    ].some((value) => String(value || "").toLowerCase().includes(projectTeamNeedle)));
   const serviceCatalogNeedle = serviceCatalogSearch.trim().toLowerCase();
   const displayedServiceCatalog = serviceCatalog.filter((item) => !serviceCatalogNeedle || [
     item.name,
@@ -2360,6 +2415,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <nav className="manage-section-nav" aria-label="Manage sections">
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button> : null}
+        {canManageProjectTeams ? <button type="button" onClick={() => document.getElementById("manage-project-teams")?.scrollIntoView({ behavior: "smooth" })}>Project Teams</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
         {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button> : null}
@@ -2943,6 +2999,39 @@ export default function Manage({ onReload, currentUser = null }) {
         </div>
         </div>
       </Panel>
+
+      {canManageProjectTeams ? <Panel
+        id="manage-project-teams"
+        title="Project Teams"
+        badge={`${displayedProjectTeamRows.length} displayed · ${dirtyProjectTeamIds.length} changed`}
+        className="span-12"
+        action={<Button variant="primary" icon={Save} onClick={saveProjectTeams} disabled={saving || !dirtyProjectTeamIds.length}>{saving ? "Saving…" : `Save ${dirtyProjectTeamIds.length || ""} team change${dirtyProjectTeamIds.length === 1 ? "" : "s"}`.trim()}</Button>}
+      >
+        <p className="form-note">Assign the Project Director, AM, TL, AD and AVP from the Internal POC master. Edit one or several projects in this scrollable section, then save all changes together. Selecting “Not set” clears that role.</p>
+        <div className="manage-section-search">
+          <Field label="Search project teams"><input value={projectTeamSearch} onChange={(event) => setProjectTeamSearch(event.target.value)} placeholder="Project, ID, client, cluster or team member" /></Field>
+          {projectTeamSearch ? <Button onClick={() => setProjectTeamSearch("")}>Clear search</Button> : null}
+        </div>
+        <div className="manage-project-team-scroll">
+          <div className="project-team-bulk-grid project-team-bulk-head">
+            <span>Project</span><span>Project Director</span><span>AM</span><span>TL</span><span>AD</span><span>AVP</span>
+          </div>
+          {displayedProjectTeamRows.map((project) => (
+            <div className={`project-team-bulk-grid ${dirtyProjectTeamIds.includes(project.id) ? "changed" : ""}`} key={project.id}>
+              <span className="project-team-project"><strong>{project.name}</strong><small>{project.clientName} · {project.key}</small></span>
+              {[
+                ["projectDirectorId", "Project Director"],
+                ["amId", "AM"],
+                ["tlId", "TL"],
+                ["adId", "AD"],
+                ["avpId", "AVP"]
+              ].map(([field, label]) => <select key={field} value={project.team?.[field] || ""} onChange={(event) => updateProjectTeam(project.id, field, event.target.value)} aria-label={`${label} for ${project.name}`}><option value="">Not set</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active === false ? " (Inactive)" : ""}</option>)}</select>)}
+            </div>
+          ))}
+          {!displayedProjectTeamRows.length ? <EmptyState title="No project teams match these filters" text="Clear the client, cluster or project-team search to see more projects." /> : null}
+        </div>
+        <div className="button-row section-bottom-actions"><Button variant="primary" icon={Save} onClick={saveProjectTeams} disabled={saving || !dirtyProjectTeamIds.length}>{saving ? "Saving project teams…" : "Save all project team changes"}</Button></div>
+      </Panel> : null}
 
       <Panel
         id="manage-client-pocs"

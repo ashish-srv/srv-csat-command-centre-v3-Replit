@@ -174,7 +174,7 @@ function ProjectDetailCards({ project, serviceCatalog, canManageServices, removi
         <div><dt>Currency</dt><dd>{project.currency || "INR"}</dd></div><div><dt>FX Rate to INR</dt><dd>{valueOrDash(project.fxRateToInr)}</dd></div><div><dt>PO Amount</dt><dd>{money(project.poAmountLocal, project.currency)}</dd></div><div><dt>Budget Allocated</dt><dd>{money(project.budgetAllocatedLocal, project.currency)}</dd></div><div><dt>Budget Spent</dt><dd>{money(project.budgetSpentLocal, project.currency)}</dd></div><div><dt>Budget Left</dt><dd className={budget.left !== null && budget.left < 0 ? "performance-negative-value" : ""}>{money(budget.left, project.currency)}</dd></div><div><dt>Budget Left %</dt><dd className={budget.percent !== null && budget.percent < 0 ? "performance-negative-value" : ""}>{budget.percent === null ? "Not set" : `${budget.percent.toFixed(1)}%`}</dd></div><div><dt>Revenue Generated</dt><dd>{money(project.revenueGeneratedLocal, project.currency)}</dd></div>
       </dl></Panel>
       <Panel title="Current Performance" className="performance-card tone-green"><dl className="detail-list">
-        <div><dt>Performance Status</dt><dd><StatusPill value={project.performanceStatus || "Not set"} /></dd></div><div><dt>Current Phase</dt><dd>{project.currentPhase || "Not set"}</dd></div><div><dt>Campaign Status</dt><dd>{project.campaignStatus || "Not set"}</dd></div>
+        <div><dt>Performance Status</dt><dd><StatusPill value={project.performanceStatus || "Not set"} /></dd></div><div><dt>Current Delivery Phase</dt><dd>{project.currentPhase || "Not set"}</dd></div><div><dt>Campaign Status</dt><dd>{project.campaignStatus || "Not set"}</dd></div>
       </dl></Panel>
       <Panel title="Current KPI Performance" className="performance-wide-panel performance-card tone-green">
         <div className="performance-table-scroll compact"><table className="data-table performance-table"><thead><tr><th>KPI</th><th>Target</th><th>Actual</th><th>Achievement</th><th>Previous Year</th><th>Vs Previous Year</th><th>Direction</th></tr></thead><tbody>{project.kpis.map((kpi) => { const achievement = kpiAchievement(kpi); const variance = previousYearVariance(kpi); return <tr key={kpi.id || kpi.kpiName}><td><strong>{kpi.kpiName}</strong>{kpi.isPrimary ? <small>Primary</small> : null}</td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="target" /></td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="actual" /></td><td>{achievement === null ? "—" : `${achievement.toFixed(1)}%`}</td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="previousYearActual" /></td><td>{variance === null ? "—" : `${variance >= 0 ? "+" : ""}${variance.toFixed(1)}%`}</td><td>{kpi.direction === "lower_better" ? "Lower is better" : "Higher is better"}</td></tr>; })}</tbody></table>{!project.kpis.length ? <EmptyState title="No KPIs added" /> : null}</div>
@@ -222,6 +222,8 @@ export default function ProjectPerformance({ currentUser = null }) {
   const [yearFilter, setYearFilter] = useState("");
   const [phaseFilter, setPhaseFilter] = useState("");
   const [projectSearch, setProjectSearch] = useState("");
+  const [summarySearch, setSummarySearch] = useState("");
+  const [detailsSearch, setDetailsSearch] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [form, setForm] = useState(formFromProject(null, editorIdentity));
   const [kpis, setKpis] = useState([]);
@@ -302,6 +304,28 @@ export default function ProjectPerformance({ currentUser = null }) {
       item.primaryKpi?.kpiName
     ].some((value) => String(value || "").toLowerCase().includes(needle)));
   }, [filteredProjects, projectSearch]);
+
+  const searchProjects = (items, value) => {
+    const needle = value.trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter((item) => [
+      item.name,
+      item.key,
+      item.clientName,
+      item.clusterName,
+      item.performanceStatus,
+      item.currentPhase,
+      item.campaignStatus,
+      item.clientSentiment,
+      item.team?.projectDirector?.name,
+      item.team?.am?.name,
+      item.team?.tl?.name,
+      item.team?.ad?.name,
+      item.team?.avp?.name
+    ].some((candidate) => String(candidate || "").toLowerCase().includes(needle)));
+  };
+  const summaryProjects = useMemo(() => searchProjects(searchedProjects, summarySearch), [searchedProjects, summarySearch]);
+  const detailProjects = useMemo(() => searchProjects(searchedProjects, detailsSearch), [searchedProjects, detailsSearch]);
 
   const selectedProject = searchedProjects.find((item) => item.id === selectedProjectId) || null;
   const concernedCount = searchedProjects.filter((item) => ["Concerned", "Escalated"].includes(item.clientSentiment)).length;
@@ -570,81 +594,13 @@ export default function ProjectPerformance({ currentUser = null }) {
         </section>
       ) : null}
 
-      {canEditPerformance ? <section id="performance-excel-upload" className="performance-section-anchor">
-        <div className="section-heading-inline">
-          <div><p className="eyebrow">Excel Upload</p><h3>Update multiple projects from one worksheet</h3></div>
-        </div>
-        <Panel title="Single-sheet Project Performance Upload" badge={workbookPreview ? workbookPreview.fileName : "One project per row"}>
-          <div className="performance-excel-intro">
-            <p>Download the current template, edit the performance columns, then upload it here. Project ID is the match key; Cluster, Client, Project Name, dates, services and CSAT Active Status are never overwritten.</p>
-            <div>
-              <Button icon={Download} onClick={downloadWorkbook} disabled={downloadingWorkbook}>{downloadingWorkbook ? "Preparing…" : "Download current data"}</Button>
-              <label className={`button primary ${readingWorkbook ? "disabled" : ""}`}>
-                <Upload size={16} />{readingWorkbook ? "Reading workbook…" : "Choose .xlsx file"}
-                <input type="file" accept=".xlsx" onChange={readWorkbook} disabled={readingWorkbook} hidden />
-              </label>
-            </div>
-          </div>
-          {workbookMessage ? <p className="success-message performance-workbook-message">{workbookMessage}</p> : null}
-          {workbookPreview ? (
-            <div className="performance-workbook-preview">
-              {workbookPreview.ignoredSheets.length ? <p className="performance-upload-warning">Only “{workbookPreview.sheetName}” was read. Other worksheets were ignored: {workbookPreview.ignoredSheets.join(", ")}.</p> : null}
-              {!editorIdentity ? (
-                <Field label="Updated By" help="Required because this session is not using a verified Google Workspace login.">
-                  <input value={bulkUpdatedBy} onChange={(event) => setBulkUpdatedBy(event.target.value)} placeholder="Your full name" />
-                </Field>
-              ) : <p className="field-caption">Audit owner: {editorIdentity}</p>}
-              <div className="bulk-preview-summary">
-                <strong>{selectedWorkbookRows.length} selected</strong>
-                <span>{workbookPreview.rows.filter((row) => row.eligible).length} changed and valid</span>
-                <span>{workbookPreview.rows.filter((row) => !row.errors.length && !row.changed).length} unchanged</span>
-                <span>{workbookPreview.rows.filter((row) => row.errors.length).length} with errors</span>
-              </div>
-              <div className="performance-workbook-table-scroll">
-                <div className="performance-workbook-row head"><span></span><span>Excel Row</span><span>Project</span><span>Client</span><span>Result</span></div>
-                {workbookPreview.rows.map((row) => {
-                  const checked = selectedWorkbookRows.includes(row.rowNumber);
-                  return (
-                    <div className={`performance-workbook-row ${row.errors.length ? "blocked" : row.changed ? "" : "unchanged"}`} key={row.rowNumber}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={!row.eligible || applyingWorkbook}
-                        onChange={() => setSelectedWorkbookRows(checked
-                          ? selectedWorkbookRows.filter((rowNumber) => rowNumber !== row.rowNumber)
-                          : [...selectedWorkbookRows, row.rowNumber])}
-                        aria-label={`Select Excel row ${row.rowNumber}`}
-                      />
-                      <span>{row.rowNumber}</span>
-                      <span><strong>{row.projectName || row.projectKey || "Unknown project"}</strong><small>{row.projectKey || "No Project ID"}</small></span>
-                      <span>{row.clientName || "—"}</span>
-                      <span>
-                        {row.errors.length ? <strong className="error-message">{row.errors.join("; ")}</strong> : row.changed ? <strong>Ready to update</strong> : <strong>No changes detected</strong>}
-                        {row.warnings.length ? <small>{row.warnings.join("; ")}</small> : null}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="performance-workbook-actions">
-                <Button onClick={() => setSelectedWorkbookRows(workbookPreview.rows.filter((row) => row.eligible).map((row) => row.rowNumber))} disabled={applyingWorkbook}>Select all changed rows</Button>
-                <Button onClick={() => { setWorkbookPreview(null); setSelectedWorkbookRows([]); setWorkbookMessage(""); }} disabled={applyingWorkbook}>Cancel upload</Button>
-                <Button variant="primary" icon={Save} onClick={applyWorkbook} disabled={applyingWorkbook || !selectedWorkbookRows.length || (!editorIdentity && !bulkUpdatedBy.trim())}>
-                  {applyingWorkbook ? "Applying…" : `Apply ${selectedWorkbookRows.length} selected row${selectedWorkbookRows.length === 1 ? "" : "s"}`}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </Panel>
-      </section> : null}
-
       <section id="performance-portfolio" className="performance-section-anchor">
         <div className="section-heading-inline">
           <div><p className="eyebrow">Portfolio Overview</p><h3>Current performance position</h3></div>
         </div>
         <FilterBar
           showReset={!allFiltersClear}
-          onReset={() => { setCluster(""); setClient(""); setProjectFilter(""); setStatus(""); setSentiment(""); setAmFilter(""); setAvpFilter(""); setYearFilter(""); setPhaseFilter(""); setProjectSearch(""); }}
+          onReset={() => { setCluster(""); setClient(""); setProjectFilter(""); setStatus(""); setSentiment(""); setAmFilter(""); setAvpFilter(""); setYearFilter(""); setPhaseFilter(""); setProjectSearch(""); setSummarySearch(""); setDetailsSearch(""); }}
         >
           <label className="performance-filter-search"><span>Search Projects</span><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Project, ID, client, team or status" /></label>
           <SingleSelect label="Cluster" options={clusterNames.map((value) => ({ value, label: value }))} value={cluster} onChange={(value) => { setCluster(value); setClient(""); setProjectFilter(""); }} placeholder="All clusters" />
@@ -655,7 +611,7 @@ export default function ProjectPerformance({ currentUser = null }) {
           <SingleSelect label="AM" options={amOptions} value={amFilter} onChange={setAmFilter} placeholder="All AMs" />
           <SingleSelect label="AVP" options={avpOptions} value={avpFilter} onChange={setAvpFilter} placeholder="All AVPs" />
           <SingleSelect label="Financial Year" options={yearOptions} value={yearFilter} onChange={setYearFilter} placeholder="All years" />
-          <SingleSelect label="Current Phase" options={phaseOptions} value={phaseFilter} onChange={setPhaseFilter} placeholder="All phases" />
+          <SingleSelect label="Current Delivery Phase" options={phaseOptions} value={phaseFilter} onChange={setPhaseFilter} placeholder="All delivery phases" />
         </FilterBar>
 
         <div className="performance-metrics">
@@ -667,11 +623,15 @@ export default function ProjectPerformance({ currentUser = null }) {
         </div>
 
         <Panel title="Project Summary" badge={`${searchedProjects.length} shown`} className="performance-portfolio-panel">
+          <div className="performance-section-search">
+            <label><span>Search Project Summary</span><input value={summarySearch} onChange={(event) => setSummarySearch(event.target.value)} placeholder="Search project, client, ID, status or project team" /></label>
+            {summarySearch ? <Button onClick={() => setSummarySearch("")}>Clear</Button> : null}
+          </div>
           <div className="performance-table-scroll">
             <table className="data-table performance-table">
-              <thead><tr><th>Client / Project</th><th>Cluster</th><th>Performance</th><th>Phase</th><th>Sentiment</th><th>Account Manager</th><th>Primary KPI</th><th>Updated</th></tr></thead>
+              <thead><tr><th>Client / Project</th><th>Cluster</th><th>Performance</th><th>Current Delivery Phase</th><th>Sentiment</th><th>Account Manager</th><th>Updated</th></tr></thead>
               <tbody>
-                {searchedProjects.map((project) => (
+                {summaryProjects.map((project) => (
                   <tr key={project.id} className={selectedProjectId === project.id ? "selected-row" : ""} onClick={() => chooseProject(project.id, true)}>
                     <td><strong>{project.name}</strong><small>{project.clientName}</small></td>
                     <td>{project.clusterName || "—"}</td>
@@ -679,24 +639,25 @@ export default function ProjectPerformance({ currentUser = null }) {
                     <td>{project.currentPhase || "—"}</td>
                     <td><StatusPill value={project.clientSentiment || "Not set"} /></td>
                     <td>{project.team?.am?.name || "—"}</td>
-                    <td>{project.primaryKpi ? `${project.primaryKpi.kpiName}: ${valueOrDash(project.primaryKpi.actual)}` : "—"}</td>
                     <td>{formatDateTime(project.performanceUpdatedAt)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            {!searchedProjects.length ? <EmptyState title="No projects match these filters or search" text="Clear or change the search and filters to see portfolio data." /> : null}
+            {!summaryProjects.length ? <EmptyState title="No projects match this summary search" text="Clear or change the section search and filters to see portfolio data." /> : null}
           </div>
         </Panel>
       </section>
 
       <section id="performance-project-details" className="performance-section-anchor">
-        <div className="section-heading-inline">
-          <div><p className="eyebrow">Project Details</p><h3>All projects matching the filters</h3></div>
+        <div className="section-heading-inline section-heading-with-search">
+          <div><p className="eyebrow">Project Details</p><h3>All Projects Matching the Filters</h3></div>
+          <label className="performance-inline-search"><span>Search Project Details</span><input value={detailsSearch} onChange={(event) => setDetailsSearch(event.target.value)} placeholder="Search project, client, ID or project team" /></label>
+          {detailsSearch ? <Button onClick={() => setDetailsSearch("")}>Clear</Button> : null}
         </div>
         <div className="performance-project-accordions">
-          {searchedProjects.map((project) => (
-            <details className="performance-project-accordion" key={project.id} onToggle={(event) => { if (event.currentTarget.open) chooseProject(project.id); }}>
+          {detailProjects.map((project) => (
+            <details className={`performance-project-accordion ${selectedProjectId === project.id ? "selected-project" : ""}`} key={project.id} onToggle={(event) => { if (event.currentTarget.open) chooseProject(project.id); }}>
               <summary>
                 <span><strong>{project.name}</strong><small>{project.clientName} · {project.key}</small></span>
                 <span><StatusPill value={project.performanceStatus || "Not set"} /><small>Updated {formatDateTime(project.performanceUpdatedAt)}</small></span>
@@ -712,7 +673,7 @@ export default function ProjectPerformance({ currentUser = null }) {
               />
             </details>
           ))}
-          {!searchedProjects.length ? <EmptyState title="No projects match these filters or search" text="Clear or change the search and filters to see project details." /> : null}
+          {!detailProjects.length ? <EmptyState title="No projects match this detail search" text="Clear or change the section search and filters to see project details." /> : null}
         </div>
         {!selectedProject ? <EmptyState title="No project selected" /> : (
           <div className="performance-details-scroll legacy-selected-details" aria-hidden="true">
@@ -760,7 +721,7 @@ export default function ProjectPerformance({ currentUser = null }) {
               <Panel title="Current Performance">
                 <dl className="detail-list">
                   <div><dt>Performance Status</dt><dd><StatusPill value={selectedProject.performanceStatus || "Not set"} /></dd></div>
-                  <div><dt>Current Phase</dt><dd>{selectedProject.currentPhase || "Not set"}</dd></div>
+                  <div><dt>Current Delivery Phase</dt><dd>{selectedProject.currentPhase || "Not set"}</dd></div>
                   <div><dt>Campaign Status</dt><dd>{selectedProject.campaignStatus || "Not set"}</dd></div>
                   <div><dt>Client Sentiment</dt><dd><StatusPill value={selectedProject.clientSentiment || "Not set"} /></dd></div>
                   <div><dt>Relationship</dt><dd>{selectedProject.relationshipStrength || "Not set"}</dd></div>
@@ -866,7 +827,7 @@ export default function ProjectPerformance({ currentUser = null }) {
                 <h4>Current Performance</h4>
                 <div className="performance-form-grid">
                   <Field label="Performance Status" help="This does not change the CSAT project's Active/Inactive status."><NativeSelect value={form.performanceStatus} onChange={(value) => updateField("performanceStatus", value)} items={referenceOptions(data, "performance_status")} /></Field>
-                  <Field label="Current Phase"><NativeSelect value={form.currentPhase} onChange={(value) => updateField("currentPhase", value)} items={referenceOptions(data, "current_phase")} /></Field>
+                  <Field label="Current Delivery Phase" help="The operational stage of this project, such as Planning, Live, Optimization or Nearing Completion."><NativeSelect value={form.currentPhase} onChange={(value) => updateField("currentPhase", value)} items={referenceOptions(data, "current_phase")} /></Field>
                   <Field label="Campaign Status"><NativeSelect value={form.campaignStatus} onChange={(value) => updateField("campaignStatus", value)} items={referenceOptions(data, "campaign_status")} /></Field>
                 </div>
               </div>
@@ -930,6 +891,61 @@ export default function ProjectPerformance({ currentUser = null }) {
             </div>
           </Panel>
         )}
+      </section> : null}
+
+      {canEditPerformance ? <section id="performance-excel-upload" className="performance-section-anchor">
+        <div className="section-heading-inline">
+          <div><p className="eyebrow">Excel Upload</p><h3>Update Multiple Projects From One Worksheet</h3></div>
+        </div>
+        <Panel title="Single-Sheet Project Performance Upload" badge={workbookPreview ? workbookPreview.fileName : "One project per row"}>
+          <div className="performance-excel-intro">
+            <p>Download the current template, edit the performance columns, then upload it here. Project ID is the match key; Cluster, Client, Project Name, dates, services and CSAT Active Status are never overwritten.</p>
+            <div>
+              <Button icon={Download} onClick={downloadWorkbook} disabled={downloadingWorkbook}>{downloadingWorkbook ? "Preparing…" : "Download current data"}</Button>
+              <label className={`button primary ${readingWorkbook ? "disabled" : ""}`}>
+                <Upload size={16} />{readingWorkbook ? "Reading workbook…" : "Choose .xlsx file"}
+                <input type="file" accept=".xlsx" onChange={readWorkbook} disabled={readingWorkbook} hidden />
+              </label>
+            </div>
+          </div>
+          {workbookMessage ? <p className="success-message performance-workbook-message">{workbookMessage}</p> : null}
+          {workbookPreview ? (
+            <div className="performance-workbook-preview">
+              {workbookPreview.ignoredSheets.length ? <p className="performance-upload-warning">Only “{workbookPreview.sheetName}” was read. Other worksheets were ignored: {workbookPreview.ignoredSheets.join(", ")}.</p> : null}
+              {!editorIdentity ? (
+                <Field label="Updated By" help="Required because this session is not using a verified Google Workspace login.">
+                  <input value={bulkUpdatedBy} onChange={(event) => setBulkUpdatedBy(event.target.value)} placeholder="Your full name" />
+                </Field>
+              ) : <p className="field-caption">Audit owner: {editorIdentity}</p>}
+              <div className="bulk-preview-summary">
+                <strong>{selectedWorkbookRows.length} selected</strong>
+                <span>{workbookPreview.rows.filter((row) => row.eligible).length} changed and valid</span>
+                <span>{workbookPreview.rows.filter((row) => !row.errors.length && !row.changed).length} unchanged</span>
+                <span>{workbookPreview.rows.filter((row) => row.errors.length).length} with errors</span>
+              </div>
+              <div className="performance-workbook-table-scroll">
+                <div className="performance-workbook-row head"><span></span><span>Excel Row</span><span>Project</span><span>Client</span><span>Result</span></div>
+                {workbookPreview.rows.map((row) => {
+                  const checked = selectedWorkbookRows.includes(row.rowNumber);
+                  return (
+                    <div className={`performance-workbook-row ${row.errors.length ? "blocked" : row.changed ? "" : "unchanged"}`} key={row.rowNumber}>
+                      <input type="checkbox" checked={checked} disabled={!row.eligible || applyingWorkbook} onChange={() => setSelectedWorkbookRows(checked ? selectedWorkbookRows.filter((rowNumber) => rowNumber !== row.rowNumber) : [...selectedWorkbookRows, row.rowNumber])} aria-label={`Select Excel row ${row.rowNumber}`} />
+                      <span>{row.rowNumber}</span>
+                      <span><strong>{row.projectName || row.projectKey || "Unknown project"}</strong><small>{row.projectKey || "No Project ID"}</small></span>
+                      <span>{row.clientName || "—"}</span>
+                      <span>{row.errors.length ? <strong className="error-message">{row.errors.join("; ")}</strong> : row.changed ? <strong>Ready to update</strong> : <strong>No changes detected</strong>}{row.warnings.length ? <small>{row.warnings.join("; ")}</small> : null}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="performance-workbook-actions">
+                <Button onClick={() => setSelectedWorkbookRows(workbookPreview.rows.filter((row) => row.eligible).map((row) => row.rowNumber))} disabled={applyingWorkbook}>Select all changed rows</Button>
+                <Button onClick={() => { setWorkbookPreview(null); setSelectedWorkbookRows([]); setWorkbookMessage(""); }} disabled={applyingWorkbook}>Cancel upload</Button>
+                <Button variant="primary" icon={Save} onClick={applyWorkbook} disabled={applyingWorkbook || !selectedWorkbookRows.length || (!editorIdentity && !bulkUpdatedBy.trim())}>{applyingWorkbook ? "Applying…" : `Apply ${selectedWorkbookRows.length} selected row${selectedWorkbookRows.length === 1 ? "" : "s"}`}</Button>
+              </div>
+            </div>
+          ) : null}
+        </Panel>
       </section> : null}
 
       <section id="performance-audit" className="performance-section-anchor">

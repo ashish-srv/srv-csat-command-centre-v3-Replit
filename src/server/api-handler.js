@@ -1756,6 +1756,51 @@ function projectVisibleToAppAccess(project, appAccess) {
     .some((key) => project?.team?.[key] === appAccess.internalPocId);
 }
 
+function projectPerformanceInputWithTeam(project, team, updatedBy) {
+  return {
+    updatedBy,
+    expectedVersion: project.version || 0,
+    clientProfile: {
+      clientGroup: project.clientGroup || "",
+      clientCriticality: project.clientCriticality || ""
+    },
+    profile: {
+      financialYear: project.financialYear || "",
+      projectType: project.projectType || "",
+      revenueCategory: project.revenueCategory || "",
+      portfolioType: project.portfolioType || "",
+      team,
+      currency: project.currency || "INR",
+      fxRateToInr: project.fxRateToInr,
+      poAmountLocal: project.poAmountLocal,
+      budgetAllocatedLocal: project.budgetAllocatedLocal,
+      budgetSpentLocal: project.budgetSpentLocal,
+      revenueGeneratedLocal: project.revenueGeneratedLocal,
+      performanceStatus: project.performanceStatus || "",
+      currentPhase: project.currentPhase || "",
+      campaignStatus: project.campaignStatus || "",
+      clientSentiment: project.clientSentiment || "",
+      mandates: project.mandates || "",
+      deliverablesStatus: project.deliverablesStatus || "",
+      relationshipStrength: project.relationshipStrength || "",
+      meetingCadence: project.meetingCadence || "",
+      lastMeetingDate: project.lastMeetingDate || "",
+      suggestionFrequency: project.suggestionFrequency || "",
+      lastSuggestionDate: project.lastSuggestionDate || "",
+      clientFeedback: project.clientFeedback || "",
+      nextSteps: project.nextSteps || "",
+      comments: project.comments || "",
+      links: {
+        mom: project.links?.mom || "",
+        consolidatedSheet: project.links?.consolidatedSheet || "",
+        projectDriveFolder: project.links?.projectDriveFolder || "",
+        projectDataSheet: project.links?.projectDataSheet || ""
+      }
+    },
+    kpis: project.kpis || []
+  };
+}
+
 async function projectIdVisibleToAppAccess(store, projectId, appAccess) {
   if (appAccess?.role !== "project_user") return true;
   const performanceData = await store.getProjectPerformanceData();
@@ -5117,6 +5162,22 @@ async function handleApiRequest(request) {
     return json(200, directory);
   }
 
+  if (method === "GET" && pathname === "/api/admin/project-teams") {
+    const performanceData = await store.getProjectPerformanceData();
+    return json(200, {
+      projects: performanceData.projects.map((project) => ({
+        id: project.id,
+        key: project.key,
+        name: project.name,
+        clientId: project.clientId,
+        clientName: project.clientName,
+        clusterName: project.clusterName,
+        version: project.version || 0,
+        team: project.team || {}
+      }))
+    });
+  }
+
   const clientDetailMatch = pathname.match(/^\/api\/admin\/clients\/([^/]+)$/);
   if (method === "GET" && clientDetailMatch) {
     const detail = await store.getClientDetail(decodeURIComponent(clientDetailMatch[1]));
@@ -5132,6 +5193,43 @@ async function handleApiRequest(request) {
     if (!isAdminAuthorized(request.headers)) {
       return error(403, "Incorrect PIN");
     }
+  }
+
+  if (method === "PUT" && pathname === "/api/admin/project-teams") {
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    if (!rows.length || rows.length > 500) return error(400, "Select between 1 and 500 changed projects");
+    const performanceData = await store.getProjectPerformanceData();
+    const projectsById = new Map(performanceData.projects.map((project) => [project.id, project]));
+    const validInternalPocIds = new Set((performanceData.internalPocs || []).map((person) => person.id));
+    const teamFields = ["projectDirectorId", "amId", "tlId", "adId", "avpId"];
+    const updatedBy = appAccess.email || appAccess.name || "Admin";
+    const saved = [];
+    for (const row of rows) {
+      const project = projectsById.get(String(row.projectId || ""));
+      if (!project) return error(404, "One of the selected projects was not found");
+      const team = {};
+      for (const field of teamFields) {
+        const value = String(row.team?.[field] || "").trim();
+        if (value && !validInternalPocIds.has(value)) return error(400, `${field} must be selected from Internal POCs`);
+        team[field] = value || null;
+      }
+      try {
+        const result = await store.saveProjectPerformance(
+          project.id,
+          projectPerformanceInputWithTeam(project, team, updatedBy)
+        );
+        saved.push({ projectId: project.id, version: result.version });
+        project.version = result.version;
+        project.team = team;
+      } catch (saveError) {
+        if (saveError.code === "PERFORMANCE_VERSION_CONFLICT") return error(409, saveError.message);
+        return error(400, `Could not update the project team for ${project.name}`, saveError.message);
+      }
+    }
+    return json(200, {
+      saved,
+      message: `${saved.length} project team${saved.length === 1 ? "" : "s"} updated and added to audit history.`
+    });
   }
 
   if (method === "GET" && pathname === "/api/admin/app-users") {

@@ -21,7 +21,7 @@ const BASE_COLUMNS = [
   { key: "start_date", label: "Start Date (Reference Only, YYYY-MM-DD)", width: 22, aliases: ["start_date"] },
   { key: "end_date", label: "End Date (Reference Only, YYYY-MM-DD)", width: 22, aliases: ["end_date"] },
   { key: "campaign_status", label: "Campaign Status", width: 18 },
-  { key: "current_phase", label: "Current Phase", width: 20 },
+  { key: "current_phase", label: "Current Delivery Phase", width: 24 },
   { key: "performance_status", label: "Project Performance Status", width: 22, aliases: ["project_status", "performance_status"] },
   { key: "currency", label: "Currency", width: 12 },
   { key: "fx_rate_to_inr", label: "FX Rate to INR", width: 16 },

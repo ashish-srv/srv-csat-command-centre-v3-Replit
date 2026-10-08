@@ -3422,6 +3422,23 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 200);
   });
 
+  await scenario("Admin can bulk update project teams from Internal POCs", async () => {
+    const listing = await req("GET", "/api/admin/project-teams");
+    assert.strictEqual(listing.statusCode, 200);
+    assert.strictEqual(JSON.parse(listing.body).projects.length, 1);
+    const before = calls.performanceSaves.length;
+    const res = await req("PUT", "/api/admin/project-teams", {
+      rows: [{
+        projectId: "prj_1",
+        team: { projectDirectorId: "ip_1", amId: "ip_1", tlId: "", adId: "", avpId: "" }
+      }]
+    }, PIN);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(calls.performanceSaves.length, before + 1);
+    assert.strictEqual(calls.performanceSaves.at(-1).input.profile.team.projectDirectorId, "ip_1");
+    assert.strictEqual(calls.performanceSaves.at(-1).input.profile.team.tlId, null);
+  });
+
   await scenario("client detail returns projects, pocs and services", async () => {
     const res = await req("GET", "/api/admin/clients/cl_1");
     const payload = JSON.parse(res.body);
