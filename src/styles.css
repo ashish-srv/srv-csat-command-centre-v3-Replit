@@ -2301,6 +2301,20 @@ button.metric-card {
 }
 .app-permission-grid label, .performance-self-roles label { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
 .app-permission-grid input, .performance-self-roles input { width: 16px; height: 16px; margin-top: 1px; accent-color: var(--blue); }
+.app-user-project-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #b9d8c8;
+  border-radius: 9px;
+  color: #174e38;
+  background: #f0faf5;
+  font-size: 13px;
+}
+.app-user-project-scope.no-projects { border-color: #e7c574; color: #72510b; background: #fff8e7; }
+.app-user-project-scope span { line-height: 1.45; }
 .new-user-permissions { margin-bottom: 12px; }
 .performance-service-attach { display: flex; align-items: center; gap: 9px; margin-top: 10px; }
 .performance-service-attach select { min-width: min(320px, 100%); min-height: 38px; border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; background: white; }

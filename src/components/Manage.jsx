@@ -1351,6 +1351,8 @@ export default function Manage({ onReload, currentUser = null }) {
   const [cleanupPinError, setCleanupPinError] = useState("");
   const [cleaning, setCleaning] = useState("");
   const [appUsers, setAppUsers] = useState([]);
+  const [appUsersPanelOpen, setAppUsersPanelOpen] = useState(false);
+  const [openAppUserRoles, setOpenAppUserRoles] = useState({ project_user: true });
   const [performanceStandards, setPerformanceStandards] = useState([]);
   const [serviceChangeRequests, setServiceChangeRequests] = useState([]);
   const [serviceChangeReviewNotes, setServiceChangeReviewNotes] = useState({});
@@ -1497,6 +1499,16 @@ export default function Manage({ onReload, currentUser = null }) {
     )));
   }
 
+  function changeExistingAppUserRole(userId, role) {
+    setOpenAppUserRoles((current) => ({ ...current, [role]: true }));
+    setAppUsers((current) => current.map((item) => item.id === userId ? {
+      ...item,
+      role,
+      internalPocId: role === "project_user" ? item.internalPocId : null,
+      permissions: defaultPermissions(role)
+    } : item));
+  }
+
   async function addAppUsers() {
     const pending = newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc);
     if (!pending.length) {
@@ -1520,6 +1532,8 @@ export default function Manage({ onReload, currentUser = null }) {
     }
     setSaving(true);
     let added = 0;
+    const addedRoles = new Set();
+    const addedEmails = [];
     try {
       for (const row of pending) {
         const result = await apiWrite("/api/admin/app-users", {
@@ -1532,12 +1546,28 @@ export default function Manage({ onReload, currentUser = null }) {
           permissions: row.permissions
         }, "POST");
         added += 1;
+        addedRoles.add(result.user.role);
+        addedEmails.push(String(result.user.email || row.email).trim().toLowerCase());
         setAppUsers((current) => [...current, result.user].sort((left, right) => left.email.localeCompare(right.email)));
         setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId));
       }
       setNewAppUsers((current) => current.length ? current : [createAppUserDraft()]);
+      // Refresh this list independently. A failure in another Manage dataset
+      // must not hide a successfully created Application User.
+      const refreshedUsers = await apiAdminGet("/api/admin/app-users");
+      const returnedUsers = refreshedUsers.users || [];
+      const returnedEmails = new Set(returnedUsers.map((user) => String(user.email || "").trim().toLowerCase()));
+      const missingEmails = addedEmails.filter((email) => !returnedEmails.has(email));
+      if (missingEmails.length) throw new Error(`Saved, but the user list did not return: ${missingEmails.join(", ")}`);
+      setAppUsers(returnedUsers);
+      setAppUsersPanelOpen(true);
+      setOpenAppUserRoles((current) => {
+        const next = { ...current };
+        for (const role of addedRoles) next[role] = true;
+        return next;
+      });
       await loadAll(clientId);
-      showToast(`${added} application user${added === 1 ? "" : "s"} added. They can now sign in with Google.`);
+      showToast(`${added} application user${added === 1 ? "" : "s"} added. They can now sign in with Google; Project Users see only projects where their linked Internal POC is assigned to the Project Team.`);
     } catch (saveError) {
       showToast(`${added ? `${added} added. ` : ""}${saveError.message}`);
     } finally {
@@ -2615,7 +2645,7 @@ export default function Manage({ onReload, currentUser = null }) {
       </nav>
 
       {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel manage-secondary-section">
-        <details>
+        <details open={appUsersPanelOpen} onToggle={(event) => setAppUsersPanelOpen(event.currentTarget.open)}>
           <summary>
             <span><strong>Application Users</strong><small>Google access · {appUsers.filter((user) => user.active).length} active</small></span>
           </summary>
@@ -2649,22 +2679,39 @@ export default function Manage({ onReload, currentUser = null }) {
             </div>
             <div className="admin-control-scroll app-user-role-groups">
               {appUserRoleGroups.map((group) => (
-                <details className={`app-user-role-group role-group-${group.role}`} key={group.role} defaultOpen={group.role === "project_user"}>
+                <details
+                  className={`app-user-role-group role-group-${group.role}`}
+                  key={group.role}
+                  open={openAppUserRoles[group.role] === true}
+                  onToggle={(event) => setOpenAppUserRoles((current) => ({ ...current, [group.role]: event.currentTarget.open }))}
+                >
                   <summary><span><strong>{group.label}</strong><small>{group.description}</small></span><span className={`role-badge role-${group.role}`}>{group.users.length} user{group.users.length === 1 ? "" : "s"}</span></summary>
                   <div className="app-user-role-group-body">
-                    {group.users.map((user) => (
+                    {group.users.map((user) => {
+                      const assignedProjects = user.role === "project_user" && user.internalPocId
+                        ? projectTeamRows.filter((project) => Object.values(project.team || {}).includes(user.internalPocId))
+                        : [];
+                      return (
                       <details className="app-user-card" key={user.id}>
-                        <summary><span><strong>{user.name || "Name not set"}</strong><small>{user.email}</small></span><span className={`user-status-badge ${user.active ? "active" : "inactive"}`}>{user.active ? "Active" : "Inactive"}</span></summary>
+                        <summary><span><strong>{user.name || "Name not set"}</strong><small>{user.email}{user.role === "project_user" ? ` · ${assignedProjects.length} assigned project${assignedProjects.length === 1 ? "" : "s"}` : ""}</small></span><span className={`user-status-badge ${user.active ? "active" : "inactive"}`}>{user.active ? "Active" : "Inactive"}</span></summary>
                         <div className="app-user-card-body">
                           <div className="app-user-row">
                             <input value={user.name || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item))} aria-label={`Name for ${user.email}`} />
-                            <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => { const role = event.target.value; setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, role, internalPocId: role === "project_user" ? item.internalPocId : null, permissions: defaultPermissions(role) } : item)); }} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
+                            <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => changeExistingAppUserRole(user.id, event.target.value)} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
                             {user.role === "project_user" ? <select value={user.internalPocId || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: event.target.value } : item))} aria-label={`Internal POC for ${user.email}`}><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">No Internal POC link required</span>}
                             <select value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></select>
                           </div>
                           <div className="app-permission-grid">
                             {permissionsForRole(user.role).map((permission) => <label key={permission}><input type="checkbox" checked={user.role === "super_admin" || user.permissions?.[permission] === true} disabled={user.role === "super_admin"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, permissions: { ...item.permissions, [permission]: event.target.checked } } : item))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
                           </div>
+                          {user.role === "project_user" ? (
+                            <div className={`app-user-project-scope ${assignedProjects.length ? "has-projects" : "no-projects"}`}>
+                              <strong>{assignedProjects.length ? "Visible projects" : "No project access yet"}</strong>
+                              {assignedProjects.length
+                                ? <span>{assignedProjects.map((project) => project.name).join(", ")}</span>
+                                : <span>Assign this Internal POC as Project Director, AVP, AD, TL or AM under Manage → Project Teams.</span>}
+                            </div>
+                          ) : null}
                           <div className="button-row">
                             <Button variant="danger" icon={Trash2} onClick={() => deleteAppUser(user)} disabled={saving || user.role === "super_admin" || currentUser?.appUserId === user.id}>Delete user</Button>
                             {user.role === "super_admin" ? <small className="form-note">Super Admin accounts are protected from deletion.</small> : null}
@@ -2672,7 +2719,8 @@ export default function Manage({ onReload, currentUser = null }) {
                           </div>
                         </div>
                       </details>
-                    ))}
+                      );
+                    })}
                     {!group.users.length ? <p className="app-user-role-empty">No {group.label.toLowerCase()} configured.</p> : null}
                   </div>
                 </details>

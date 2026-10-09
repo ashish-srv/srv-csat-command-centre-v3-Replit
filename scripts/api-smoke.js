@@ -3448,6 +3448,9 @@ async function scenario(name, fn) {
     assert.strictEqual(calls.createdInternalPocs.length, beforeInternalPocs + 1);
     assert.strictEqual(payload.internalPoc.email, "new.project.user@srvmedia.com");
     assert.strictEqual(payload.user.internalPocId, payload.internalPoc.id);
+    const refreshed = await rawReq("GET", "/api/admin/app-users", {}, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(refreshed.statusCode, 200);
+    assert.ok(JSON.parse(refreshed.body).users.some((user) => user.email === "new.project.user@srvmedia.com"));
   });
 
   await scenario("Only Super Admin can approve a Project User service request", async () => {
