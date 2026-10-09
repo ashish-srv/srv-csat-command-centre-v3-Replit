@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Component, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ChevronLeft, ChevronRight, Clock, History, LogOut, TrendingDown } from "lucide-react";
 import { apiGet } from "./api";
 import Dashboard from "./components/Dashboard.jsx";
@@ -22,6 +22,32 @@ function getRoute() {
 function navigate(path) {
   window.history.pushState({}, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+class WorkspaceErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("Workspace render failed", error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="error-block workspace-render-error" role="alert">
+        <strong>This page could not be displayed</strong>
+        <p>{this.state.error.message || "An unexpected browser error occurred."}</p>
+        <button type="button" className="button primary" onClick={() => window.location.reload()}><span>Reload page</span></button>
+      </div>
+    );
+  }
 }
 
 /**
@@ -261,7 +287,9 @@ export default function App({ onLogout, currentUser = null }) {
         ) : activeRoute === "directory" ? (
           <Directory onOpenProject={openProject} />
         ) : activeRoute === "manage" ? (
-          <Manage onReload={loadDashboard} currentUser={currentUser} />
+          <WorkspaceErrorBoundary key={`manage-${locationTick}`}>
+            <Manage onReload={loadDashboard} currentUser={currentUser} />
+          </WorkspaceErrorBoundary>
         ) : activeRoute === "performance" ? (
           <ProjectPerformance currentUser={currentUser} />
         ) : activeRoute === "project" ? (

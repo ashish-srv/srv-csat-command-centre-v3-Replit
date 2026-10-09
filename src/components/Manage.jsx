@@ -4,7 +4,7 @@ import { apiAdminGet, apiGet, apiWrite, apiWriteWithAdminPin, hasAdminPin, setAd
 import { formatCycleType, formatDate, formatDateTime, formatPocWeightShare } from "../format";
 import { parseCsatWorkbook } from "../lib/workbook-import";
 import { FilterBar, SingleSelect } from "./Filters.jsx";
-import { Button, EmptyState, LoadingBlock, Panel } from "./Ui.jsx";
+import { Button, EmptyState, ErrorBlock, LoadingBlock, Panel } from "./Ui.jsx";
 import {
   APP_PERMISSION_LABELS, defaultPermissions, hasPermission, permissionsForRole
 } from "../permissions";
@@ -1314,6 +1314,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const [clientId, setClientId] = useState("");
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [toast, setToast] = useState("");
   const [saving, setSaving] = useState(false);
   const [projectForm, setProjectForm] = useState(null);
@@ -1351,8 +1352,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const [cleanupPinError, setCleanupPinError] = useState("");
   const [cleaning, setCleaning] = useState("");
   const [appUsers, setAppUsers] = useState([]);
-  const [appUsersPanelOpen, setAppUsersPanelOpen] = useState(false);
-  const [openAppUserRoles, setOpenAppUserRoles] = useState({ project_user: true });
+  const [appUserRoleOpenVersion, setAppUserRoleOpenVersion] = useState({});
   const [performanceStandards, setPerformanceStandards] = useState([]);
   const [serviceChangeRequests, setServiceChangeRequests] = useState([]);
   const [serviceChangeReviewNotes, setServiceChangeReviewNotes] = useState({});
@@ -1371,6 +1371,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const [projectTeamSearch, setProjectTeamSearch] = useState("");
   const formRef = useRef(null);
   const workbookInputRef = useRef(null);
+  const appUsersPanelRef = useRef(null);
 
   function closeForms() {
     setProjectForm(null);
@@ -1396,29 +1397,36 @@ export default function Manage({ onReload, currentUser = null }) {
   async function loadAll(keepClient = clientId) {
     const isInitialLoad = !directory;
     if (isInitialLoad) setLoading(true);
+    setLoadError(null);
     try {
-      const [data, userData, standardData, projectTeamData, serviceChangeData] = await Promise.all([
-        apiGet("/api/admin/directory"),
+      // The directory is the core Manage dataset. Optional panels load
+      // independently so one unavailable permission or endpoint cannot blank
+      // the entire Manage page after the PIN is accepted.
+      const data = await apiGet("/api/admin/directory");
+      const optionalResults = await Promise.allSettled([
         canManageUsers ? apiAdminGet("/api/admin/app-users") : Promise.resolve({ users: [] }),
         canManageCatalogues ? apiAdminGet("/api/admin/performance-standards") : Promise.resolve({ values: [] }),
         canManageProjectTeams ? apiAdminGet("/api/admin/project-teams") : Promise.resolve({ projects: [] }),
         isSuperAdmin ? apiAdminGet("/api/admin/service-change-requests") : Promise.resolve({ requests: [] })
       ]);
       setDirectory(data);
-      setAppUsers(userData.users || []);
-      setPerformanceStandards(standardData.values || []);
-      setServiceChangeRequests(serviceChangeData.requests || []);
-      setProjectTeamRows((projectTeamData.projects || []).map((project) => ({
-        ...project,
-        team: {
-          projectDirectorId: project.team?.projectDirectorId || "",
-          amId: project.team?.amId || "",
-          tlId: project.team?.tlId || "",
-          adId: project.team?.adId || "",
-          avpId: project.team?.avpId || ""
-        }
-      })));
-      setDirtyProjectTeamIds([]);
+      const [userResult, standardResult, projectTeamResult, serviceChangeResult] = optionalResults;
+      if (userResult.status === "fulfilled") setAppUsers((userResult.value.users || []).filter(Boolean));
+      if (standardResult.status === "fulfilled") setPerformanceStandards((standardResult.value.values || []).filter(Boolean));
+      if (serviceChangeResult.status === "fulfilled") setServiceChangeRequests((serviceChangeResult.value.requests || []).filter(Boolean));
+      if (projectTeamResult.status === "fulfilled") {
+        setProjectTeamRows((projectTeamResult.value.projects || []).filter(Boolean).map((project) => ({
+          ...project,
+          team: {
+            projectDirectorId: project.team?.projectDirectorId || "",
+            amId: project.team?.amId || "",
+            tlId: project.team?.tlId || "",
+            adId: project.team?.adId || "",
+            avpId: project.team?.avpId || ""
+          }
+        })));
+        setDirtyProjectTeamIds([]);
+      }
       setPocControlRows((data.clientPocs || []).map((poc) => ({ ...poc })));
       const target = keepClient || "";
       setClientId(target);
@@ -1429,7 +1437,10 @@ export default function Manage({ onReload, currentUser = null }) {
           ? current
           : (clientDetail?.projects?.[0]?.id || "")
       ));
+      const optionalFailure = optionalResults.find((result) => result.status === "rejected");
+      if (optionalFailure) showToast(`Manage loaded, but one optional section could not load: ${optionalFailure.reason?.message || "request failed"}`);
     } catch (loadError) {
+      setLoadError(loadError);
       showToast(loadError.message);
     } finally {
       if (isInitialLoad) setLoading(false);
@@ -1500,7 +1511,8 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   function changeExistingAppUserRole(userId, role) {
-    setOpenAppUserRoles((current) => ({ ...current, [role]: true }));
+    setAppUserRoleOpenVersion((current) => ({ ...current, [role]: (current[role] || 0) + 1 }));
+    window.requestAnimationFrame(() => { if (appUsersPanelRef.current) appUsersPanelRef.current.open = true; });
     setAppUsers((current) => current.map((item) => item.id === userId ? {
       ...item,
       role,
@@ -1560,12 +1572,12 @@ export default function Manage({ onReload, currentUser = null }) {
       const missingEmails = addedEmails.filter((email) => !returnedEmails.has(email));
       if (missingEmails.length) throw new Error(`Saved, but the user list did not return: ${missingEmails.join(", ")}`);
       setAppUsers(returnedUsers);
-      setAppUsersPanelOpen(true);
-      setOpenAppUserRoles((current) => {
+      setAppUserRoleOpenVersion((current) => {
         const next = { ...current };
-        for (const role of addedRoles) next[role] = true;
+        for (const role of addedRoles) next[role] = (next[role] || 0) + 1;
         return next;
       });
+      window.requestAnimationFrame(() => { if (appUsersPanelRef.current) appUsersPanelRef.current.open = true; });
       await loadAll(clientId);
       showToast(`${added} application user${added === 1 ? "" : "s"} added. They can now sign in with Google; Project Users see only projects where their linked Internal POC is assigned to the Project Team.`);
     } catch (saveError) {
@@ -2468,6 +2480,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
   if (!unlocked) return <PinGate onUnlock={() => setUnlocked(true)} />;
   if (loading) return <LoadingBlock label="Loading records" />;
+  if (loadError && !directory) return <ErrorBlock error={loadError} onRetry={() => loadAll("")} />;
 
   const clients = directory?.clients || [];
   const clusters = directory?.clusters || [];
@@ -2645,7 +2658,7 @@ export default function Manage({ onReload, currentUser = null }) {
       </nav>
 
       {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel manage-secondary-section">
-        <details open={appUsersPanelOpen} onToggle={(event) => setAppUsersPanelOpen(event.currentTarget.open)}>
+        <details ref={appUsersPanelRef}>
           <summary>
             <span><strong>Application Users</strong><small>Google access · {appUsers.filter((user) => user.active).length} active</small></span>
           </summary>
@@ -2681,9 +2694,8 @@ export default function Manage({ onReload, currentUser = null }) {
               {appUserRoleGroups.map((group) => (
                 <details
                   className={`app-user-role-group role-group-${group.role}`}
-                  key={group.role}
-                  open={openAppUserRoles[group.role] === true}
-                  onToggle={(event) => setOpenAppUserRoles((current) => ({ ...current, [group.role]: event.currentTarget.open }))}
+                  key={`${group.role}-${appUserRoleOpenVersion[group.role] || 0}`}
+                  defaultOpen={group.role === "project_user" || Boolean(appUserRoleOpenVersion[group.role])}
                 >
                   <summary><span><strong>{group.label}</strong><small>{group.description}</small></span><span className={`role-badge role-${group.role}`}>{group.users.length} user{group.users.length === 1 ? "" : "s"}</span></summary>
                   <div className="app-user-role-group-body">
