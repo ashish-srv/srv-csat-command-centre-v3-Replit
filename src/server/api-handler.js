@@ -148,6 +148,55 @@ async function notifySetupRecordCreated(store, { kind, client, project = null, a
   }
 }
 
+async function notifyServiceChangeRequested(store, { request, baseUrl }) {
+  if (!smtpConfigured()) return { status: "not_configured", error: "SMTP is not configured" };
+  try {
+    const users = typeof store.listAppUsers === "function" ? await store.listAppUsers() : [];
+    const recipients = recipientList([
+      ...users.filter((user) => user.active !== false && user.role === "super_admin").map((user) => user.email),
+      process.env.PROJECT_SERVICE_CHANGE_ALERT_EMAILS || ""
+    ].join(","));
+    if (!recipients.length) return { status: "no_recipients", error: "No active Super Admin email is configured" };
+
+    const actionLabel = request.requestType === "remove_existing"
+      ? "Remove project service"
+      : request.requestType === "add_new"
+        ? "Create and add new service"
+        : "Add project service";
+    const appUrl = String(baseUrl || process.env.PUBLIC_APP_URL || "").replace(/\/$/, "");
+    const reviewUrl = appUrl ? `${appUrl}/manage#manage-service-change-requests` : "";
+    const details = [
+      `Request: ${actionLabel}`,
+      `Client: ${request.clientName || "Not set"}`,
+      `Project: ${request.projectName || request.projectKey || "Not set"}`,
+      `Service: ${request.serviceName}`,
+      `Requested by: ${request.requestedByName || request.requestedByEmail || "Unknown user"}`,
+      `Reason: ${request.reason}`
+    ];
+    const result = await sendEmail({
+      to: recipients,
+      subject: `[CSAT Command Centre] Service change approval needed: ${request.projectName || request.projectKey || "Project"}`,
+      text: [...details, reviewUrl ? `Review request: ${reviewUrl}` : ""].filter(Boolean).join("\n"),
+      html: `<h2>Project service change approval needed</h2><ul>${details.map((line) => `<li>${escapeEmailHtml(line)}</li>`).join("")}</ul>${reviewUrl ? `<p><a href="${escapeEmailHtml(reviewUrl)}">Review in CSAT Command Centre</a></p>` : ""}`
+    });
+    const event = {
+      eventType: "project_service_change_requested",
+      dedupeKey: `project_service_change_email:${request.id}`,
+      payload: { requestId: request.id, projectId: request.projectId, requestType: request.requestType, serviceName: request.serviceName, recipients },
+      status: result.sent ? "sent" : "failed",
+      webhookUrlConfigured: false,
+      statusCode: result.sent ? 200 : null,
+      sentAt: new Date().toISOString(),
+      error: result.error || null
+    };
+    if (typeof store.recordAutomationEvent === "function") await store.recordAutomationEvent(event);
+    return event;
+  } catch (emailError) {
+    console.warn("[email] project service change alert failed:", emailError.message);
+    return { status: "failed", error: emailError.message };
+  }
+}
+
 function automaticFeedbackTargets(targets = []) {
   if (automaticProjectEndFeedbackEnabled()) return targets;
   return targets.filter((target) => target.cycleType !== "project_end");
@@ -1602,7 +1651,7 @@ const ROLE_PERMISSION_DEFAULTS = {
     manage_project_users: false,
     add_projects: true,
     edit_project_performance: true,
-    manage_project_services: true
+    manage_project_services: false
   }
 };
 
@@ -1812,8 +1861,8 @@ function projectUserRouteAllowed(access, method, pathname) {
   if (method === "GET" && pathname === "/api/project-performance") return hasAppPermission(access, "project_performance");
   if (method === "PUT" && /^\/api\/project-performance\/[^/]+$/.test(pathname)) return hasAppPermission(access, "edit_project_performance");
   if (method === "POST" && pathname === "/api/project-performance/projects") return hasAppPermission(access, "add_projects");
-  if (["POST", "DELETE"].includes(method) && /^\/api\/project-performance\/projects\/[^/]+\/services(?:\/[^/]+)?$/.test(pathname)) {
-    return hasAppPermission(access, "manage_project_services");
+  if (method === "POST" && /^\/api\/project-performance\/projects\/[^/]+\/service-change-requests$/.test(pathname)) {
+    return hasAppPermission(access, "project_performance");
   }
   return false;
 }
@@ -1821,6 +1870,7 @@ function projectUserRouteAllowed(access, method, pathname) {
 function adminRoutePermission(method, pathname) {
   if (pathname === "/api/dashboard") return "dashboard";
   if (method === "POST" && pathname === "/api/project-performance/projects") return "add_projects";
+  if (method === "POST" && /^\/api\/project-performance\/projects\/[^/]+\/service-change-requests$/.test(pathname)) return "project_performance";
   if (["POST", "DELETE"].includes(method) && /^\/api\/project-performance\/projects\/[^/]+\/services(?:\/[^/]+)?$/.test(pathname)) return "manage_project_services";
   if (method === "PUT" && /^\/api\/project-performance\/[^/]+$/.test(pathname)) return "edit_project_performance";
   if (pathname === "/api/project-performance" || /^\/api\/project-performance\//.test(pathname)) return "project_performance";
@@ -3827,8 +3877,14 @@ async function handleApiRequest(request) {
     const performanceData = await store.getProjectPerformanceData();
     if (appAccess.role !== "project_user") return json(200, performanceData);
     const projects = performanceData.projects.filter((project) => projectVisibleToAppAccess(project, appAccess));
+    const projectIds = new Set(projects.map((project) => project.id));
     const clientIds = new Set(projects.map((project) => project.clientId));
-    return json(200, { ...performanceData, projects, clients: performanceData.clients.filter((client) => clientIds.has(client.id)) });
+    return json(200, {
+      ...performanceData,
+      projects,
+      clients: performanceData.clients.filter((client) => clientIds.has(client.id)),
+      serviceChangeRequests: (performanceData.serviceChangeRequests || []).filter((request) => projectIds.has(request.projectId))
+    });
   }
 
   if (method === "POST" && pathname === "/api/project-performance/projects") {
@@ -3897,7 +3953,82 @@ async function handleApiRequest(request) {
 
   const performanceServiceDeleteMatch = pathname.match(/^\/api\/project-performance\/projects\/([^/]+)\/services\/([^/]+)$/);
   const performanceServiceAddMatch = pathname.match(/^\/api\/project-performance\/projects\/([^/]+)\/services$/);
+  const performanceServiceRequestMatch = pathname.match(/^\/api\/project-performance\/projects\/([^/]+)\/service-change-requests$/);
+  if (method === "POST" && performanceServiceRequestMatch) {
+    if (appAccess.role === "super_admin") {
+      return error(400, "Super Admins can change project services directly", "Use the Add or Remove service controls instead of creating an approval request.");
+    }
+    const projectId = decodeURIComponent(performanceServiceRequestMatch[1]);
+    if (!await projectIdVisibleToAppAccess(store, projectId, appAccess)) return error(403, "This project is not assigned to you");
+    const project = await store.getProjectById(projectId);
+    if (!project) return error(404, "Project not found");
+    const requestType = String(body.requestType || "").trim();
+    if (!["add_existing", "remove_existing", "add_new"].includes(requestType)) {
+      return error(400, "Choose whether to add, remove or request a new service");
+    }
+    const reason = String(body.reason || "").trim();
+    if (reason.length < 5) return error(400, "Please explain why this service change is needed");
+    if (reason.length > 1000) return error(400, "The service change reason must be 1,000 characters or fewer");
+
+    const requestInput = {
+      projectId,
+      requestType,
+      reason,
+      requestedByAppUserId: appAccess.appUserId || null,
+      requestedByEmail: appAccess.email || null,
+      requestedByName: appAccess.name || appAccess.email || "Application user"
+    };
+    const currentServices = await store.servicesForProject(projectId);
+    if (requestType === "add_existing") {
+      const catalog = await store.getServiceCatalogItem(String(body.serviceCatalogId || "").trim());
+      if (!catalog || !catalog.active) return error(400, "Select an active service from the standard catalogue");
+      if (currentServices.some((item) => item.serviceCatalogId === catalog.id || item.serviceKey === catalog.serviceKey)) {
+        return error(409, `${catalog.name} is already attached to this project`);
+      }
+      requestInput.serviceCatalogId = catalog.id;
+    } else if (requestType === "remove_existing") {
+      const service = currentServices.find((item) => item.id === String(body.projectServiceId || "").trim());
+      if (!service) return error(404, "Service does not belong to this project");
+      if (currentServices.length <= 1) return error(409, "A project must keep at least one service", "Request an additional service before requesting removal of the final service.");
+      requestInput.projectServiceId = service.id;
+    } else {
+      const requestedServiceName = String(body.requestedServiceName || "").trim();
+      if (requestedServiceName.length < 2 || requestedServiceName.length > 120) {
+        return error(400, "Enter a service name between 2 and 120 characters");
+      }
+      const serviceKey = serviceIdentifier(requestedServiceName);
+      if (await store.serviceCatalogConflict(requestedServiceName, serviceKey)) {
+        return error(409, "That service already exists in the standard catalogue", "Select it from the existing service list instead.");
+      }
+      requestInput.requestedServiceName = requestedServiceName;
+    }
+    const duplicate = await store.findPendingServiceChangeRequest(requestInput);
+    if (duplicate) return error(409, "This service change is already awaiting Super Admin review", duplicate.id);
+
+    let serviceRequest;
+    try {
+      serviceRequest = await store.createServiceChangeRequest(requestInput);
+    } catch (requestError) {
+      if (requestError.code === "23505") return error(409, "This service change is already awaiting Super Admin review");
+      throw requestError;
+    }
+    const notification = await notifyServiceChangeRequested(store, { request: serviceRequest, baseUrl });
+    serviceRequest = await store.updateServiceChangeRequestNotification(serviceRequest.id, {
+      status: notification.status,
+      error: notification.error || null,
+      notifiedAt: notification.status === "sent" ? notification.sentAt : null
+    }) || serviceRequest;
+    return json(201, {
+      request: serviceRequest,
+      notification: { status: notification.status, error: notification.error || null },
+      message: notification.status === "sent"
+        ? "Service change requested. Active Super Admins were notified by email. CSAT services have not changed."
+        : "Service change requested. CSAT services have not changed; review the email notification status with a Super Admin."
+    });
+  }
+
   if (method === "POST" && performanceServiceAddMatch) {
+    if (appAccess.role !== "super_admin") return error(403, "Only a Super Admin can directly add project services", "Submit a service change request for approval instead.");
     const projectId = decodeURIComponent(performanceServiceAddMatch[1]);
     if (!await projectIdVisibleToAppAccess(store, projectId, appAccess)) return error(403, "This project is not assigned to you");
     const project = await store.getProjectById(projectId);
@@ -3924,6 +4055,7 @@ async function handleApiRequest(request) {
   }
 
   if (method === "DELETE" && performanceServiceDeleteMatch) {
+    if (appAccess.role !== "super_admin") return error(403, "Only a Super Admin can directly remove project services", "Submit a service change request for approval instead.");
     const projectId = decodeURIComponent(performanceServiceDeleteMatch[1]);
     if (!await projectIdVisibleToAppAccess(store, projectId, appAccess)) return error(403, "This project is not assigned to you");
     const serviceId = decodeURIComponent(performanceServiceDeleteMatch[2]);
@@ -3941,6 +4073,99 @@ async function handleApiRequest(request) {
       removed: service,
       historicalFeedbackPreserved: true,
       message: "Service removed from future project feedback. Historical scores, issues and conversations were preserved."
+    });
+  }
+
+  if (method === "GET" && pathname === "/api/admin/service-change-requests") {
+    if (appAccess.role !== "super_admin") return error(403, "Only a Super Admin can review project service changes");
+    if (!process.env.ADMIN_PIN) return error(503, "Editing is disabled", "ADMIN_PIN is not set on the server");
+    if (!isAdminAuthorized(request.headers)) return error(403, "Incorrect PIN");
+    return json(200, { requests: await store.listServiceChangeRequests() });
+  }
+
+  const serviceChangeReviewMatch = pathname.match(/^\/api\/admin\/service-change-requests\/([^/]+)$/);
+  if (method === "PATCH" && serviceChangeReviewMatch) {
+    if (appAccess.role !== "super_admin") return error(403, "Only a Super Admin can approve or reject project service changes");
+    if (!process.env.ADMIN_PIN) return error(503, "Editing is disabled", "ADMIN_PIN is not set on the server");
+    if (!isAdminAuthorized(request.headers)) return error(403, "Incorrect PIN");
+    const requestId = decodeURIComponent(serviceChangeReviewMatch[1]);
+    const serviceRequest = await store.getServiceChangeRequest(requestId);
+    if (!serviceRequest) return error(404, "Service change request not found");
+    if (serviceRequest.status !== "pending") return error(409, `This request was already ${serviceRequest.status}`);
+    const decision = String(body.decision || "").trim().toLowerCase();
+    if (!["approved", "rejected"].includes(decision)) return error(400, "Decision must be approved or rejected");
+    const reviewNote = String(body.reviewNote || "").trim();
+    if (decision === "rejected" && reviewNote.length < 3) return error(400, "Enter a short reason for rejecting this request");
+    if (reviewNote.length > 1000) return error(400, "The review note must be 1,000 characters or fewer");
+
+    let appliedService = null;
+    let removedService = null;
+    if (decision === "approved") {
+      if (await store.hasOpenFeedbackCycle(serviceRequest.projectId)) {
+        return error(409, "This service change cannot be approved while a feedback cycle is open", "Close or complete the current cycle so its service scope cannot change mid-conversation.");
+      }
+      const currentServices = await store.servicesForProject(serviceRequest.projectId);
+      if (serviceRequest.requestType === "remove_existing") {
+        removedService = currentServices.find((item) => item.id === serviceRequest.projectServiceId) || null;
+        if (!removedService) return error(409, "The requested service is no longer assigned to this project");
+        if (currentServices.length <= 1) return error(409, "A project must keep at least one service");
+        await store.deleteProjectService(removedService.id);
+      } else {
+        let catalog;
+        if (serviceRequest.requestType === "add_existing") {
+          catalog = await store.getServiceCatalogItem(serviceRequest.serviceCatalogId);
+          if (!catalog || !catalog.active) return error(409, "The requested standard service is no longer active");
+        } else {
+          const name = String(serviceRequest.requestedServiceName || "").trim();
+          const serviceKey = serviceIdentifier(name);
+          if (await store.serviceCatalogConflict(name, serviceKey)) {
+            return error(409, "A service with this name or key now exists", "Reject this request and ask the requester to select the existing standard service.");
+          }
+          catalog = await store.createServiceCatalogItem({ name, serviceKey, active: true });
+        }
+        if (currentServices.some((item) => item.serviceCatalogId === catalog.id || item.serviceKey === catalog.serviceKey)) {
+          return error(409, `${catalog.name} is already attached to this project`);
+        }
+        appliedService = await store.createProjectService({
+          projectId: serviceRequest.projectId,
+          serviceCatalogId: catalog.id,
+          serviceKey: catalog.serviceKey,
+          name: catalog.name
+        });
+      }
+    }
+
+    const reviewed = await store.reviewServiceChangeRequest(requestId, {
+      status: decision,
+      reviewedByAppUserId: appAccess.appUserId || null,
+      reviewedByEmail: appAccess.email || "Password Super Admin",
+      reviewNote: reviewNote || null,
+      reviewedAt: new Date().toISOString()
+    });
+    if (!reviewed) return error(409, "This request was reviewed by someone else. Refresh the list.");
+    if (typeof store.recordAutomationEvent === "function") {
+      await store.recordAutomationEvent({
+        eventType: `project_service_change_${decision}`,
+        status: "recorded",
+        payload: {
+          requestId,
+          projectId: reviewed.projectId,
+          requestType: reviewed.requestType,
+          serviceName: reviewed.serviceName,
+          reviewedBy: reviewed.reviewedByEmail,
+          reviewNote: reviewed.reviewNote
+        },
+        sentAt: reviewed.reviewedAt
+      });
+    }
+    return json(200, {
+      request: reviewed,
+      service: appliedService,
+      removedService,
+      historicalFeedbackPreserved: true,
+      message: decision === "approved"
+        ? "Service change approved. It applies to future feedback cycles; historical feedback remains unchanged."
+        : "Service change request rejected. CSAT services were not changed."
     });
   }
 

@@ -41,6 +41,7 @@ const calls = {
   inactiveCompletionFinishes: [],
   inactiveCompletionFailures: [],
   performanceSaves: [],
+  serviceChangeRequests: [],
   automationClaims: new Map()
 };
 
@@ -281,6 +282,8 @@ const store = {
     projects: [{ ...project, team: { amId: "ip_1" }, version: 0, performanceStatus: null, clientSentiment: null, kpis: [], auditHistory: [] }],
     clients: [{ id: "cl_1", key: "test", name: "Test Client", activeStatus: "active" }],
     internalPocs: [{ id: "ip_1", name: "Internal Owner", active: true }],
+    serviceCatalog: [{ id: "cat_design", serviceKey: "design", name: "Design", active: true }],
+    serviceChangeRequests: store._serviceChangeRequests.map((request) => ({ ...request })),
     referenceValues: {
       client_criticality: [{ value: "Critical" }, { value: "High" }],
       client_group: [],
@@ -403,6 +406,69 @@ const store = {
   deleteProjectService: async (id) => { calls.deletedServices.push(id); return true; },
   servicesForProject: async (projectId) => project.services.filter((service) => service.projectId === projectId),
   hasOpenFeedbackCycle: async () => false,
+  listServiceChangeRequests: async ({ projectIds = null, status = null } = {}) => store._serviceChangeRequests
+    .filter((request) => !projectIds || projectIds.includes(request.projectId))
+    .filter((request) => !status || request.status === status)
+    .map((request) => ({ ...request })),
+  getServiceChangeRequest: async (id) => {
+    const request = store._serviceChangeRequests.find((item) => item.id === id);
+    return request ? { ...request } : null;
+  },
+  findPendingServiceChangeRequest: async (input) => store._serviceChangeRequests.find((request) => (
+    request.projectId === input.projectId
+    && request.status === "pending"
+    && request.requestType === input.requestType
+    && (!input.serviceCatalogId || request.serviceCatalogId === input.serviceCatalogId)
+    && (!input.projectServiceId || request.projectServiceId === input.projectServiceId)
+    && (!input.requestedServiceName || request.requestedServiceName?.toLowerCase() === input.requestedServiceName.toLowerCase())
+  )) || null,
+  createServiceChangeRequest: async (input) => {
+    const service = input.projectServiceId
+      ? project.services.find((item) => item.id === input.projectServiceId)
+      : null;
+    const catalog = input.serviceCatalogId === "cat_design" ? { name: "Design" } : null;
+    const request = {
+      id: `service_request_${store._serviceChangeRequests.length + 1}`,
+      ...input,
+      projectKey: project.key,
+      projectName: project.name,
+      clientId: project.clientId,
+      clientName: "Test Client",
+      serviceName: service?.name || catalog?.name || input.requestedServiceName,
+      status: "pending",
+      notificationStatus: "pending",
+      notificationError: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    store._serviceChangeRequests.push(request);
+    calls.serviceChangeRequests.push(request);
+    return { ...request };
+  },
+  updateServiceChangeRequestNotification: async (id, input) => {
+    const request = store._serviceChangeRequests.find((item) => item.id === id);
+    if (!request) return null;
+    Object.assign(request, {
+      notificationStatus: input.status,
+      notificationError: input.error || null,
+      notifiedAt: input.notifiedAt || null,
+      updatedAt: new Date().toISOString()
+    });
+    return { ...request };
+  },
+  reviewServiceChangeRequest: async (id, input) => {
+    const request = store._serviceChangeRequests.find((item) => item.id === id && item.status === "pending");
+    if (!request) return null;
+    Object.assign(request, {
+      status: input.status,
+      reviewedByAppUserId: input.reviewedByAppUserId,
+      reviewedByEmail: input.reviewedByEmail,
+      reviewNote: input.reviewNote,
+      reviewedAt: input.reviewedAt,
+      updatedAt: new Date().toISOString()
+    });
+    return { ...request };
+  },
   serviceKeyExists: async (projectId, key, exceptId) => key === "ppc" && exceptId !== "svc_1",
   updateCluster: async (id, input) => (id === "clu_1" ? { id, ...input } : null),
   deleteCluster: async (id) => {
@@ -439,6 +505,7 @@ const store = {
   _expiredInactiveFinalSweeps: [],
   _messagingStatus: { enabled: true, updatedAt: null, updatedBy: null },
   _appUserRole: "super_admin",
+  _serviceChangeRequests: [],
   _appUserActive: true,
   _applicationUsers: [
     { id: "app_user_1", email: "employee@srvmedia.com", name: "SRV Employee", role: "super_admin", active: true, permissions: {} },
@@ -581,7 +648,7 @@ async function scenario(name, fn) {
     }
   });
 
-  await scenario("Project User is restricted to Project Performance and creates only paused projects", async () => {
+  await scenario("Project User is restricted to Project Performance, creates paused projects, and requests service changes", async () => {
     store._appUserRole = "project_user";
     const portfolio = await rawReq("GET", "/api/project-performance", {}, { cookie: googleAppCookie });
     assert.strictEqual(portfolio.statusCode, 200);
@@ -599,8 +666,23 @@ async function scenario(name, fn) {
     assert.strictEqual(JSON.parse(created.body).project.activeStatus, "paused");
     const beforeDeletes = calls.deletedServices.length;
     const removed = await rawReq("DELETE", "/api/project-performance/projects/prj_1/services/svc_ppc", {}, { cookie: googleAppCookie });
-    assert.strictEqual(removed.statusCode, 200);
-    assert.strictEqual(calls.deletedServices.length, beforeDeletes + 1);
+    assert.strictEqual(removed.statusCode, 403);
+    assert.strictEqual(calls.deletedServices.length, beforeDeletes);
+    const requested = await rawReq("POST", "/api/project-performance/projects/prj_1/service-change-requests", {
+      requestType: "remove_existing",
+      projectServiceId: "svc_ppc",
+      reason: "The service is no longer part of the signed project scope."
+    }, { cookie: googleAppCookie });
+    assert.strictEqual(requested.statusCode, 201);
+    assert.strictEqual(JSON.parse(requested.body).request.status, "pending");
+    assert.strictEqual(JSON.parse(requested.body).request.serviceName, "PPC / Media");
+    assert.strictEqual(calls.deletedServices.length, beforeDeletes);
+    const duplicate = await rawReq("POST", "/api/project-performance/projects/prj_1/service-change-requests", {
+      requestType: "remove_existing",
+      projectServiceId: "svc_ppc",
+      reason: "Submitting the same request should be blocked."
+    }, { cookie: googleAppCookie });
+    assert.strictEqual(duplicate.statusCode, 409);
     store._appUserRole = "super_admin";
   });
 
@@ -3320,6 +3402,35 @@ async function scenario(name, fn) {
   await scenario("admin write with the wrong PIN is rejected", async () => {
     const res = await req("POST", "/api/admin/projects", { clientId: "cl_1", key: "new-one", name: "New" }, { "x-admin-pin": "9999" });
     assert.strictEqual(res.statusCode, 403);
+  });
+
+  await scenario("Only Super Admin can approve a Project User service request", async () => {
+    const request = store._serviceChangeRequests.find((item) => item.status === "pending");
+    assert.ok(request, "Expected the Project User service request created earlier");
+    store._appUserRole = "admin";
+    const adminAttempt = await rawReq("PATCH", `/api/admin/service-change-requests/${request.id}`, {
+      decision: "approved"
+    }, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(adminAttempt.statusCode, 403);
+
+    store._appUserRole = "super_admin";
+    const queue = await rawReq("GET", "/api/admin/service-change-requests", {}, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(queue.statusCode, 200);
+    assert.ok(JSON.parse(queue.body).requests.some((item) => item.id === request.id && item.status === "pending"));
+
+    const beforeDeletes = calls.deletedServices.length;
+    const approved = await rawReq("PATCH", `/api/admin/service-change-requests/${request.id}`, {
+      decision: "approved",
+      reviewNote: "Confirmed against the current scope."
+    }, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(approved.statusCode, 200);
+    assert.strictEqual(JSON.parse(approved.body).request.status, "approved");
+    assert.strictEqual(calls.deletedServices.length, beforeDeletes + 1);
+
+    const repeated = await rawReq("PATCH", `/api/admin/service-change-requests/${request.id}`, {
+      decision: "approved"
+    }, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(repeated.statusCode, 409);
   });
 
   await scenario("Application User without history can be permanently deleted", async () => {

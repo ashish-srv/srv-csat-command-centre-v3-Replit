@@ -147,16 +147,56 @@ function ProjectLink({ href, children }) {
     : <span>Not set</span>;
 }
 
-function ProjectDetailCards({ project, serviceCatalog, canManageServices, removingServiceId, addingServiceProjectId, onRemoveService, onAddService }) {
+function ProjectDetailCards({
+  project,
+  serviceCatalog,
+  canDirectlyManageServices,
+  canRequestServiceChanges,
+  serviceChangeRequests,
+  removingServiceId,
+  addingServiceProjectId,
+  requestingServiceProjectId,
+  onRemoveService,
+  onAddService,
+  onRequestServiceChange
+}) {
   const [serviceCatalogId, setServiceCatalogId] = useState("");
+  const [requestedServiceName, setRequestedServiceName] = useState("");
+  const [changeReason, setChangeReason] = useState("");
   const attachedKeys = new Set((project.services || []).flatMap((service) => [service.serviceCatalogId, service.serviceKey]).filter(Boolean));
   const availableServices = (serviceCatalog || []).filter((service) => service.active !== false && !attachedKeys.has(service.id) && !attachedKeys.has(service.serviceKey));
   const budget = budgetPosition(project);
 
   async function addService() {
     if (!serviceCatalogId) return;
-    const saved = await onAddService(project, serviceCatalogId);
-    if (saved) setServiceCatalogId("");
+    const saved = canDirectlyManageServices
+      ? await onAddService(project, serviceCatalogId)
+      : await onRequestServiceChange(project, { requestType: "add_existing", serviceCatalogId, reason: changeReason });
+    if (saved) {
+      setServiceCatalogId("");
+      if (canRequestServiceChanges) setChangeReason("");
+    }
+  }
+
+  async function requestNewService() {
+    const saved = await onRequestServiceChange(project, {
+      requestType: "add_new",
+      requestedServiceName,
+      reason: changeReason
+    });
+    if (saved) {
+      setRequestedServiceName("");
+      setChangeReason("");
+    }
+  }
+
+  async function requestRemoval(service) {
+    const saved = await onRequestServiceChange(project, {
+      requestType: "remove_existing",
+      projectServiceId: service.id,
+      reason: changeReason
+    });
+    if (saved) setChangeReason("");
   }
 
   return (
@@ -180,14 +220,29 @@ function ProjectDetailCards({ project, serviceCatalog, canManageServices, removi
         <div className="performance-table-scroll compact"><table className="data-table performance-table"><thead><tr><th>KPI</th><th>Target</th><th>Actual</th><th>Achievement</th><th>Previous Year</th><th>Vs Previous Year</th><th>Direction</th></tr></thead><tbody>{project.kpis.map((kpi) => { const achievement = kpiAchievement(kpi); const variance = previousYearVariance(kpi); return <tr key={kpi.id || kpi.kpiName}><td><strong>{kpi.kpiName}</strong>{kpi.isPrimary ? <small>Primary</small> : null}</td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="target" /></td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="actual" /></td><td>{achievement === null ? "—" : `${achievement.toFixed(1)}%`}</td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="previousYearActual" /></td><td>{variance === null ? "—" : `${variance >= 0 ? "+" : ""}${variance.toFixed(1)}%`}</td><td>{kpi.direction === "lower_better" ? "Lower is better" : "Higher is better"}</td></tr>; })}</tbody></table>{!project.kpis.length ? <EmptyState title="No KPIs added" /> : null}</div>
       </Panel>
       <Panel title="Services, Mandates and Delivery" className="performance-wide-panel performance-card tone-indigo">
-        <p className="field-caption">Existing project services</p>
-        <div className={`service-chip-list ${canManageServices ? "editable" : ""}`}>{project.services.length ? project.services.map((service) => <span key={service.id}>{service.name}{canManageServices ? <button type="button" onClick={() => onRemoveService(project, service)} disabled={removingServiceId === service.id} aria-label={`Remove ${service.name}`}><Trash2 size={13} /></button> : null}</span>) : <em>No services configured</em>}</div>
-        {canManageServices ? <div className="performance-service-attach">
+        <p className="field-caption">CSAT project services</p>
+        <p className="form-note">These services control future CSAT questions. Historical and currently open feedback cycles keep their existing service scope.</p>
+        <div className={`service-chip-list ${canDirectlyManageServices || canRequestServiceChanges ? "editable" : ""}`}>{project.services.length ? project.services.map((service) => <span key={service.id}>{service.name}{canDirectlyManageServices ? <button type="button" onClick={() => onRemoveService(project, service)} disabled={removingServiceId === service.id} aria-label={`Remove ${service.name}`}><Trash2 size={13} /></button> : canRequestServiceChanges ? <button type="button" className="service-request-remove" onClick={() => requestRemoval(service)} disabled={!changeReason.trim() || requestingServiceProjectId === project.id} aria-label={`Request removal of ${service.name}`}>Request removal</button> : null}</span>) : <em>No services configured</em>}</div>
+        {canDirectlyManageServices || canRequestServiceChanges ? <div className="performance-service-change-controls">
+          {canRequestServiceChanges ? <label><span>Reason for the requested change</span><textarea rows="3" value={changeReason} onChange={(event) => setChangeReason(event.target.value)} placeholder="Explain why this project service should be added or removed" maxLength="1000" /></label> : null}
+          <div className="performance-service-attach">
           <select value={serviceCatalogId} onChange={(event) => setServiceCatalogId(event.target.value)} aria-label={`Add service to ${project.name}`}>
             <option value="">Select standard service</option>
             {availableServices.map((service) => <option key={service.id} value={service.id}>{service.name}</option>)}
           </select>
-          <Button icon={Plus} onClick={addService} disabled={!serviceCatalogId || addingServiceProjectId === project.id}>{addingServiceProjectId === project.id ? "Adding…" : "Add to project"}</Button>
+          <Button icon={Plus} onClick={addService} disabled={!serviceCatalogId || (canRequestServiceChanges && !changeReason.trim()) || addingServiceProjectId === project.id || requestingServiceProjectId === project.id}>{addingServiceProjectId === project.id || requestingServiceProjectId === project.id ? "Saving…" : canDirectlyManageServices ? "Add to project" : "Request addition"}</Button>
+          </div>
+          {canRequestServiceChanges ? <div className="performance-service-attach request-new-service">
+            <input value={requestedServiceName} onChange={(event) => setRequestedServiceName(event.target.value)} placeholder="New service not in the catalogue" maxLength="120" />
+            <Button icon={Plus} onClick={requestNewService} disabled={!requestedServiceName.trim() || !changeReason.trim() || requestingServiceProjectId === project.id}>{requestingServiceProjectId === project.id ? "Submitting…" : "Request new service"}</Button>
+          </div> : null}
+        </div> : null}
+        {serviceChangeRequests.length ? <div className="service-change-request-list">
+          <strong>Service change requests</strong>
+          {serviceChangeRequests.map((request) => <div className={`service-change-request-row ${request.status}`} key={request.id}>
+            <span><b>{request.requestType === "remove_existing" ? "Remove" : request.requestType === "add_new" ? "Create and add" : "Add"} {request.serviceName}</b><small>{request.reason}</small></span>
+            <span><StatusPill value={request.status} /><small>{formatDateTime(request.createdAt)}</small></span>
+          </div>)}
         </div> : null}
         <div className="performance-delivery-copy"><div><strong>Mandates and targets</strong><p className="performance-long-text">{project.mandates || "No mandate or target detail recorded yet."}</p></div><div><strong>Current Delivery Update</strong><p className="performance-long-text">{project.deliverablesStatus || "No current delivery update recorded yet."}</p></div></div>
       </Panel>
@@ -206,7 +261,8 @@ export default function ProjectPerformance({ currentUser = null }) {
   const editorIdentity = currentUser?.email || currentUser?.name || "";
   const canAddProjects = hasPermission(currentUser, "add_projects");
   const canEditPerformance = hasPermission(currentUser, "edit_project_performance");
-  const canManageServices = hasPermission(currentUser, "manage_project_services");
+  const canDirectlyManageServices = currentUser?.role === "super_admin";
+  const canRequestServiceChanges = currentUser?.role !== "super_admin";
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -240,6 +296,7 @@ export default function ProjectPerformance({ currentUser = null }) {
   const [newProject, setNewProject] = useState({ clientId: "", key: "", name: "", startDate: "", endDate: "", feedbackIntervalDays: 30, goal: "", selfTeamRoles: ["am"] });
   const [removingServiceId, setRemovingServiceId] = useState("");
   const [addingServiceProjectId, setAddingServiceProjectId] = useState("");
+  const [requestingServiceProjectId, setRequestingServiceProjectId] = useState("");
 
   async function load(preferredProjectId = selectedProjectId) {
     setLoading(true);
@@ -562,6 +619,26 @@ export default function ProjectPerformance({ currentUser = null }) {
     }
   }
 
+  async function requestServiceChange(project, payload) {
+    setRequestingServiceProjectId(project.id);
+    setError(null);
+    setNotice("");
+    try {
+      const result = await apiPost(
+        `/api/project-performance/projects/${encodeURIComponent(project.id)}/service-change-requests`,
+        payload
+      );
+      setNotice(result.message || "Service change request submitted for Super Admin review.");
+      await load(selectedProjectId);
+      return true;
+    } catch (requestError) {
+      setError(requestError);
+      return false;
+    } finally {
+      setRequestingServiceProjectId("");
+    }
+  }
+
   if (loading && !data) return <LoadingBlock label="Loading project performance" />;
   if (error && !data) return <ErrorBlock error={error} onRetry={() => load("")} />;
 
@@ -692,11 +769,15 @@ export default function ProjectPerformance({ currentUser = null }) {
               <ProjectDetailCards
                 project={project}
                 serviceCatalog={data?.serviceCatalog || []}
-                canManageServices={canManageServices}
+                canDirectlyManageServices={canDirectlyManageServices}
+                canRequestServiceChanges={canRequestServiceChanges}
+                serviceChangeRequests={(data?.serviceChangeRequests || []).filter((request) => request.projectId === project.id)}
                 removingServiceId={removingServiceId}
                 addingServiceProjectId={addingServiceProjectId}
+                requestingServiceProjectId={requestingServiceProjectId}
                 onRemoveService={removeProjectService}
                 onAddService={addProjectService}
+                onRequestServiceChange={requestServiceChange}
               />
             </details>
           ))}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, Lock, Pencil, Plus, RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
 import { apiAdminGet, apiGet, apiWrite, apiWriteWithAdminPin, hasAdminPin, setAdminPin } from "../api";
-import { formatCycleType, formatDate, formatPocWeightShare } from "../format";
+import { formatCycleType, formatDate, formatDateTime, formatPocWeightShare } from "../format";
 import { parseCsatWorkbook } from "../lib/workbook-import";
 import { FilterBar, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, LoadingBlock, Panel } from "./Ui.jsx";
@@ -1271,6 +1271,9 @@ export default function Manage({ onReload, currentUser = null }) {
   const [cleaning, setCleaning] = useState("");
   const [appUsers, setAppUsers] = useState([]);
   const [performanceStandards, setPerformanceStandards] = useState([]);
+  const [serviceChangeRequests, setServiceChangeRequests] = useState([]);
+  const [serviceChangeReviewNotes, setServiceChangeReviewNotes] = useState({});
+  const [reviewingServiceChangeId, setReviewingServiceChangeId] = useState("");
   const [newAppUsers, setNewAppUsers] = useState(() => [createAppUserDraft()]);
   const [standardDrafts, setStandardDrafts] = useState(initialStandardDrafts);
   const [selectedStandardIds, setSelectedStandardIds] = useState([]);
@@ -1311,15 +1314,17 @@ export default function Manage({ onReload, currentUser = null }) {
     const isInitialLoad = !directory;
     if (isInitialLoad) setLoading(true);
     try {
-      const [data, userData, standardData, projectTeamData] = await Promise.all([
+      const [data, userData, standardData, projectTeamData, serviceChangeData] = await Promise.all([
         apiGet("/api/admin/directory"),
         canManageUsers ? apiAdminGet("/api/admin/app-users") : Promise.resolve({ users: [] }),
         canManageCatalogues ? apiAdminGet("/api/admin/performance-standards") : Promise.resolve({ values: [] }),
-        canManageProjectTeams ? apiAdminGet("/api/admin/project-teams") : Promise.resolve({ projects: [] })
+        canManageProjectTeams ? apiAdminGet("/api/admin/project-teams") : Promise.resolve({ projects: [] }),
+        isSuperAdmin ? apiAdminGet("/api/admin/service-change-requests") : Promise.resolve({ requests: [] })
       ]);
       setDirectory(data);
       setAppUsers(userData.users || []);
       setPerformanceStandards(standardData.values || []);
+      setServiceChangeRequests(serviceChangeData.requests || []);
       setProjectTeamRows((projectTeamData.projects || []).map((project) => ({
         ...project,
         team: {
@@ -1373,6 +1378,35 @@ export default function Manage({ onReload, currentUser = null }) {
       showToast(saveError.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function reviewServiceChangeRequest(request, decision) {
+    const reviewNote = String(serviceChangeReviewNotes[request.id] || "").trim();
+    if (decision === "rejected" && reviewNote.length < 3) {
+      showToast("Enter a short reason before rejecting this request.");
+      return;
+    }
+    const action = decision === "approved" ? "approve" : "reject";
+    if (!window.confirm(`${action[0].toUpperCase()}${action.slice(1)} the ${request.serviceName} request for ${request.projectName || request.projectKey}?`)) return;
+    setReviewingServiceChangeId(request.id);
+    try {
+      const result = await apiWrite(`/api/admin/service-change-requests/${encodeURIComponent(request.id)}`, {
+        decision,
+        reviewNote
+      }, "PATCH");
+      showToast(result.message);
+      setServiceChangeReviewNotes((current) => {
+        const next = { ...current };
+        delete next[request.id];
+        return next;
+      });
+      await loadAll(clientId);
+      onReload();
+    } catch (reviewError) {
+      showToast(reviewError.message);
+    } finally {
+      setReviewingServiceChangeId("");
     }
   }
 
@@ -2455,6 +2489,7 @@ export default function Manage({ onReload, currentUser = null }) {
       <nav className="manage-section-nav" aria-label="Manage sections">
         {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
         {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-service-change-requests")?.scrollIntoView({ behavior: "smooth" })}>Service Requests ({serviceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
         {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
@@ -2573,6 +2608,56 @@ export default function Manage({ onReload, currentUser = null }) {
                   </details>
                 );
               })}
+            </div>
+          </div>
+        </details>
+      </section> : null}
+
+      {isSuperAdmin ? <section id="manage-service-change-requests" className="admin-collapsible-panel">
+        <details open={serviceChangeRequests.some((request) => request.status === "pending")}>
+          <summary>
+            <span><strong>Project Service Change Requests</strong><small>Super Admin approval · {serviceChangeRequests.filter((request) => request.status === "pending").length} pending</small></span>
+          </summary>
+          <div className="admin-collapsible-body">
+            <p className="form-note">Project Users can request additions or removals, but these requests do not change CSAT. Approving a request changes future feedback cycles only; historical feedback remains intact. Changes cannot be approved while that project has an open feedback cycle.</p>
+            <div className="admin-control-scroll service-change-review-list">
+              {[...serviceChangeRequests].sort((left, right) => {
+                if (left.status === "pending" && right.status !== "pending") return -1;
+                if (left.status !== "pending" && right.status === "pending") return 1;
+                return new Date(right.createdAt || 0) - new Date(left.createdAt || 0);
+              }).map((request) => (
+                <article className={`service-change-review-card ${request.status}`} key={request.id}>
+                  <div className="service-change-review-heading">
+                    <span>
+                      <strong>{request.requestType === "remove_existing" ? "Remove" : request.requestType === "add_new" ? "Create and add" : "Add"} · {request.serviceName}</strong>
+                      <small>{request.clientName || "Client not set"} · {request.projectName || request.projectKey || "Project not set"}</small>
+                    </span>
+                    <span className={`service-request-status ${request.status}`}>{request.status}</span>
+                  </div>
+                  <dl className="service-change-review-meta">
+                    <div><dt>Requested by</dt><dd>{request.requestedByName || request.requestedByEmail || "Unknown user"}</dd></div>
+                    <div><dt>Requested</dt><dd>{formatDateTime(request.createdAt)}</dd></div>
+                    <div><dt>Email alert</dt><dd>{request.notificationStatus || "pending"}{request.notificationError ? ` · ${request.notificationError}` : ""}</dd></div>
+                    {request.reviewedAt ? <div><dt>Reviewed</dt><dd>{formatDateTime(request.reviewedAt)} by {request.reviewedByEmail || "Super Admin"}</dd></div> : null}
+                  </dl>
+                  <p className="service-change-reason"><strong>Reason:</strong> {request.reason}</p>
+                  {request.status === "pending" ? <div className="service-change-review-actions">
+                    <textarea
+                      rows="2"
+                      value={serviceChangeReviewNotes[request.id] || ""}
+                      onChange={(event) => setServiceChangeReviewNotes((current) => ({ ...current, [request.id]: event.target.value }))}
+                      placeholder="Optional approval note; required when rejecting"
+                      maxLength="1000"
+                      aria-label={`Review note for ${request.serviceName}`}
+                    />
+                    <div className="button-row">
+                      <Button variant="primary" onClick={() => reviewServiceChangeRequest(request, "approved")} disabled={reviewingServiceChangeId === request.id}>{reviewingServiceChangeId === request.id ? "Reviewing…" : "Approve"}</Button>
+                      <Button variant="danger" onClick={() => reviewServiceChangeRequest(request, "rejected")} disabled={reviewingServiceChangeId === request.id}>Reject</Button>
+                    </div>
+                  </div> : <p className="service-change-review-note"><strong>Review note:</strong> {request.reviewNote || "No note added"}</p>}
+                </article>
+              ))}
+              {!serviceChangeRequests.length ? <EmptyState title="No project service requests" text="Requests from Project Users will appear here and can be approved or rejected by a Super Admin." /> : null}
             </div>
           </div>
         </details>

@@ -20,8 +20,7 @@ export const ADMIN_PERMISSION_KEYS = Object.keys(APP_PERMISSION_LABELS);
 export const PROJECT_USER_PERMISSION_KEYS = [
   "project_performance",
   "add_projects",
-  "edit_project_performance",
-  "manage_project_services"
+  "edit_project_performance"
 ];
 
 export function defaultPermissions(role) {

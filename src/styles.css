@@ -5042,6 +5042,35 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
   text-transform: uppercase;
 }
 .standard-bulk-actions { justify-content: flex-end; margin-top: 5px; padding-top: 10px; border-top: 1px solid var(--soft-line); }
+.service-change-review-list { display: grid; gap: 10px; padding: 10px; }
+.service-change-review-card {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid #d8e0eb;
+  border-left: 5px solid #8390a3;
+  border-radius: 9px;
+  background: #fff;
+}
+.service-change-review-card.pending { border-left-color: #d89214; background: #fffcf5; }
+.service-change-review-card.approved { border-left-color: #18865b; }
+.service-change-review-card.rejected { border-left-color: #b53d32; }
+.service-change-review-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.service-change-review-heading > span:first-child { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.service-change-review-heading strong { color: #111b2d; font-size: 15px; }
+.service-change-review-heading small { color: var(--muted-strong); font-size: 12px; }
+.service-request-status { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; background: #eef1f5; color: #445166; font-size: 10px; font-weight: 900; text-transform: uppercase; }
+.service-request-status.pending { background: #fff0cc; color: #865c00; }
+.service-request-status.approved { background: #dff6ea; color: #126a47; }
+.service-request-status.rejected { background: #fde8e5; color: #9e3129; }
+.service-change-review-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 12px; margin: 0; }
+.service-change-review-meta > div { min-width: 0; padding: 7px 9px; border-radius: 7px; background: rgba(238, 243, 249, 0.7); }
+.service-change-review-meta dt { color: #526077; font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.service-change-review-meta dd { margin: 3px 0 0; color: #172033; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.service-change-reason, .service-change-review-note { margin: 0; color: #26344a; line-height: 1.5; }
+.service-change-review-actions { display: grid; gap: 8px; }
+.service-change-review-actions textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font: inherit; resize: vertical; }
+.service-change-review-actions .button-row { justify-content: flex-end; }
 
 /* Project details: all filtered projects are expandable; page scrolling
    continues naturally when a fixed-height inner section reaches its end. */
@@ -5087,7 +5116,60 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
 .performance-card.tone-rose .panel-title { border-top-color: #d45f79; background: #fff4f6; }
 .performance-card.tone-slate .panel-title { border-top-color: #64748b; background: #f6f8fa; }
 .service-chip-list.editable span { display: inline-flex; align-items: center; gap: 5px; }
-.service-chip-list.editable button { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: rgba(181, 61, 50, 0.12); color: var(--red); cursor: pointer; }
+.service-chip-list.editable button:not(.service-request-remove) { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: rgba(181, 61, 50, 0.12); color: var(--red); cursor: pointer; }
+.service-request-remove {
+  border: 0;
+  border-left: 1px solid rgba(181, 61, 50, 0.22);
+  background: transparent;
+  color: #a8322a;
+  padding: 0 0 0 7px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.service-request-remove:disabled { cursor: not-allowed; opacity: 0.45; }
+.performance-service-change-controls {
+  display: grid;
+  gap: 10px;
+  margin-top: 11px;
+  padding: 12px;
+  border: 1px solid #d6dfed;
+  border-radius: 9px;
+  background: #f8faff;
+}
+.performance-service-change-controls > label { display: grid; gap: 6px; color: #34435a; font-size: 11px; font-weight: 800; }
+.performance-service-change-controls textarea,
+.performance-service-change-controls input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #b8c5d6;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 9px 10px;
+  font: 600 13px Verdana, Arial, sans-serif;
+}
+.performance-service-change-controls textarea { resize: vertical; line-height: 1.45; }
+.request-new-service { margin-top: 0; }
+.service-change-request-list { display: grid; gap: 7px; margin-top: 12px; }
+.service-change-request-list > strong { color: #27364d; font-size: 12px; }
+.service-change-request-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid #d8e0eb;
+  border-radius: 8px;
+  background: #fff;
+}
+.service-change-request-row.pending { border-left: 4px solid #d89214; background: #fffaf0; }
+.service-change-request-row.approved { border-left: 4px solid #18865b; background: #f2fbf7; }
+.service-change-request-row.rejected { border-left: 4px solid #b53d32; background: #fff5f3; }
+.service-change-request-row > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.service-change-request-row > span:last-child { align-items: flex-end; flex: 0 0 auto; }
+.service-change-request-row small { color: var(--muted-strong); overflow-wrap: anywhere; }
 .performance-delivery-copy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .performance-delivery-copy > div { padding: 13px; border: 1px solid #cad5e3; border-radius: 8px; background: #ffffff; }
 .performance-delivery-copy > div > strong { color: #0b1424; font-size: 16px; font-weight: 900; }
@@ -5176,4 +5258,8 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
   .performance-project-accordion > summary > span:last-child { align-items: flex-start; }
   .section-heading-with-search { align-items: stretch; flex-direction: column; }
   .performance-inline-search { max-width: none; }
+  .service-change-request-row,
+  .service-change-review-heading { align-items: flex-start; flex-direction: column; }
+  .service-change-request-row > span:last-child { align-items: flex-start; }
+  .service-change-review-meta { grid-template-columns: 1fr; }
 }

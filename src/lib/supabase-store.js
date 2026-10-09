@@ -185,6 +185,36 @@ function toService(row, owner = null) {
   };
 }
 
+function toServiceChangeRequest(row, extra = {}) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    projectKey: extra.project?.key || null,
+    projectName: extra.project?.name || null,
+    clientId: extra.project?.clientId || null,
+    clientName: extra.project?.clientName || null,
+    requestType: row.request_type,
+    serviceCatalogId: row.service_catalog_id || null,
+    projectServiceId: row.project_service_id || null,
+    serviceName: extra.catalog?.name || extra.projectService?.name || row.requested_service_name || "Unknown service",
+    requestedServiceName: row.requested_service_name || null,
+    reason: row.reason,
+    status: row.status,
+    requestedByAppUserId: row.requested_by_app_user_id || null,
+    requestedByEmail: row.requested_by_email || null,
+    requestedByName: row.requested_by_name || null,
+    reviewedByAppUserId: row.reviewed_by_app_user_id || null,
+    reviewedByEmail: row.reviewed_by_email || null,
+    reviewNote: row.review_note || null,
+    reviewedAt: row.reviewed_at || null,
+    notificationStatus: row.notification_status || "pending",
+    notificationError: row.notification_error || null,
+    notifiedAt: row.notified_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function toProject(row, extra = {}) {
   return {
     id: row.id,
@@ -3753,8 +3783,111 @@ class SupabaseStore {
     return rows.length > 0;
   }
 
+  async listServiceChangeRequests({ projectIds = null, status = null } = {}) {
+    const filters = [];
+    if (Array.isArray(projectIds)) {
+      if (!projectIds.length) return [];
+      filters.push(`project_id=in.(${projectIds.map((id) => encodeURIComponent(id)).join(",")})`);
+    }
+    if (status) filters.push(`status=eq.${encodeURIComponent(status)}`);
+    const rows = await this.request("project_service_change_requests", {
+      query: `${filters.length ? `${filters.join("&")}&` : ""}select=*&order=created_at.desc`
+    });
+    if (!rows.length) return [];
+
+    const projectIdList = [...new Set(rows.map((row) => row.project_id).filter(Boolean))];
+    const catalogIds = [...new Set(rows.map((row) => row.service_catalog_id).filter(Boolean))];
+    const projectServiceIds = [...new Set(rows.map((row) => row.project_service_id).filter(Boolean))];
+    const [projects, catalogs, projectServices] = await Promise.all([
+      Promise.all(projectIdList.map((id) => this.getProjectById(id))),
+      catalogIds.length ? this.request("service_catalog", {
+        query: `id=in.(${catalogIds.map((id) => encodeURIComponent(id)).join(",")})&select=id,name,service_key,active`
+      }) : [],
+      projectServiceIds.length ? this.request("project_services", {
+        query: `id=in.(${projectServiceIds.map((id) => encodeURIComponent(id)).join(",")})&select=id,name,service_key,service_catalog_id`
+      }) : []
+    ]);
+    const projectsById = new Map(projects.filter(Boolean).map((project) => [project.id, project]));
+    const catalogsById = new Map(catalogs.map((item) => [item.id, item]));
+    const servicesById = new Map(projectServices.map((item) => [item.id, item]));
+    return rows.map((row) => toServiceChangeRequest(row, {
+      project: projectsById.get(row.project_id) || null,
+      catalog: catalogsById.get(row.service_catalog_id) || null,
+      projectService: servicesById.get(row.project_service_id) || null
+    }));
+  }
+
+  async getServiceChangeRequest(requestId) {
+    const rows = await this.request("project_service_change_requests", {
+      query: `id=eq.${encodeURIComponent(requestId)}&select=*&limit=1`
+    });
+    if (!rows.length) return null;
+    const requests = await this.listServiceChangeRequests({ projectIds: [rows[0].project_id] });
+    return requests.find((item) => item.id === requestId) || null;
+  }
+
+  async findPendingServiceChangeRequest(input) {
+    const pending = await this.listServiceChangeRequests({ projectIds: [input.projectId], status: "pending" });
+    return pending.find((item) => {
+      if (item.requestType !== input.requestType) return false;
+      if (input.serviceCatalogId) return item.serviceCatalogId === input.serviceCatalogId;
+      if (input.projectServiceId) return item.projectServiceId === input.projectServiceId;
+      return String(item.requestedServiceName || "").trim().toLowerCase()
+        === String(input.requestedServiceName || "").trim().toLowerCase();
+    }) || null;
+  }
+
+  async createServiceChangeRequest(input) {
+    const rows = await this.request("project_service_change_requests", {
+      method: "POST",
+      body: [{
+        project_id: input.projectId,
+        request_type: input.requestType,
+        service_catalog_id: input.serviceCatalogId || null,
+        project_service_id: input.projectServiceId || null,
+        requested_service_name: input.requestedServiceName || null,
+        reason: String(input.reason || "").trim(),
+        requested_by_app_user_id: input.requestedByAppUserId || null,
+        requested_by_email: input.requestedByEmail || null,
+        requested_by_name: input.requestedByName || null,
+        notification_status: "pending"
+      }]
+    });
+    return this.getServiceChangeRequest(rows[0].id);
+  }
+
+  async updateServiceChangeRequestNotification(requestId, input) {
+    const rows = await this.request("project_service_change_requests", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(requestId)}`,
+      body: {
+        notification_status: input.status || "failed",
+        notification_error: input.error || null,
+        notified_at: input.notifiedAt || null,
+        updated_at: new Date().toISOString()
+      }
+    });
+    return rows.length ? this.getServiceChangeRequest(requestId) : null;
+  }
+
+  async reviewServiceChangeRequest(requestId, input) {
+    const rows = await this.request("project_service_change_requests", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(requestId)}&status=eq.pending`,
+      body: {
+        status: input.status,
+        reviewed_by_app_user_id: input.reviewedByAppUserId || null,
+        reviewed_by_email: input.reviewedByEmail || null,
+        review_note: input.reviewNote || null,
+        reviewed_at: input.reviewedAt || new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }
+    });
+    return rows.length ? this.getServiceChangeRequest(requestId) : null;
+  }
+
   async getProjectPerformanceData() {
-    const [projects, clients, clientProfiles, profiles, kpiRows, auditRows, internalRows, serviceRows, clientPocRows, catalogRows, referenceRows] = await Promise.all([
+    const [projects, clients, clientProfiles, profiles, kpiRows, auditRows, internalRows, serviceRows, clientPocRows, catalogRows, referenceRows, serviceChangeRequests] = await Promise.all([
       this.listProjects(),
       this.request("clients", { query: "select=id,client_key,name,cluster_id,active_status,clusters(id,name)&order=name.asc" }),
       this.request("client_performance_profiles", { query: "select=*" }),
@@ -3765,7 +3898,8 @@ class SupabaseStore {
       this.request("project_services", { query: "select=id,project_id,service_catalog_id,service_key,name&order=name.asc" }),
       this.request("client_pocs", { query: "select=id,project_id,name,designation,contact_email,contact_whatsapp,active&order=name.asc" }),
       this.request("service_catalog", { query: "active=is.true&select=id,service_key,name,active&order=name.asc" }),
-      this.request("performance_reference_values", { query: "select=*&order=category.asc,sort_order.asc,value.asc" })
+      this.request("performance_reference_values", { query: "select=*&order=category.asc,sort_order.asc,value.asc" }),
+      this.listServiceChangeRequests()
     ]);
 
     const clientProfilesById = new Map(clientProfiles.map((row) => [row.client_id, row]));
@@ -3905,6 +4039,7 @@ class SupabaseStore {
       })),
       internalPocs,
       serviceCatalog: catalogRows.map((row) => ({ id: row.id, serviceKey: row.service_key, name: row.name, active: row.active !== false })),
+      serviceChangeRequests,
       referenceValues,
       financialYears
     };

@@ -7,7 +7,8 @@ const TABLES = new Set([
   "issues", "messages", "observations", "poc_levels", "project_services",
   "project_key_aliases", "projects", "service_catalog", "service_feedback", "sub_departments",
   "performance_reference_values", "client_performance_profiles", "project_performance_profiles",
-  "project_performance_kpis", "project_performance_audit", "app_users"
+  "project_performance_kpis", "project_performance_audit", "app_users",
+  "project_service_change_requests"
 ]);
 
 const JSON_COLUMNS = {
