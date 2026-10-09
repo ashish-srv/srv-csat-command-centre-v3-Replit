@@ -113,7 +113,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
   );
 }
 
-export function SingleSelect({ label, options, value, onChange, placeholder = "Select", allowClear = true }) {
+export function SingleSelect({ label, options, value, onChange, placeholder = "Select", allowClear = true, compact = false }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -135,13 +135,14 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
   }
 
   return (
-    <div className="filter-field" ref={ref}>
+    <div className={`filter-field ${compact ? "filter-field-compact" : ""}`} ref={ref}>
       <span className="filter-label">{label}</span>
       <button
         type="button"
         className={`filter-trigger ${value ? "active" : ""}`}
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
+        aria-label={label}
       >
         <span>{selectedOption?.label || placeholder || "Select"}</span>
         <ChevronDown size={14} aria-hidden="true" />

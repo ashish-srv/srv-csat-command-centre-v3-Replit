@@ -3453,6 +3453,26 @@ async function scenario(name, fn) {
     assert.ok(JSON.parse(refreshed.body).users.some((user) => user.email === "new.project.user@srvmedia.com"));
   });
 
+  await scenario("one Internal POC cannot be linked to two Application Users", async () => {
+    const createDuplicate = await rawReq("POST", "/api/admin/app-users", {
+      email: "duplicate.owner@srvmedia.com",
+      name: "Duplicate Owner",
+      role: "project_user",
+      internalPocId: "ip_1",
+      active: true
+    }, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(createDuplicate.statusCode, 409);
+    assert.match(JSON.parse(createDuplicate.body).error, /already linked/i);
+
+    const updateDuplicate = await rawReq("PATCH", "/api/admin/app-users/app_user_admin", {
+      role: "project_user",
+      internalPocId: "ip_1",
+      active: true
+    }, { cookie: googleAppCookie, ...PIN });
+    assert.strictEqual(updateDuplicate.statusCode, 409);
+    assert.match(JSON.parse(updateDuplicate.body).error, /already linked/i);
+  });
+
   await scenario("Only Super Admin can approve a Project User service request", async () => {
     const request = store._serviceChangeRequests.find((item) => item.status === "pending");
     assert.ok(request, "Expected the Project User service request created earlier");

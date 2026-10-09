@@ -5381,7 +5381,12 @@ async function handleApiRequest(request) {
     if (userManagementOnly) {
       return json(200, {
         clusters: [], clients: [], projects: [], clientPocs: [], pocLevels: [], departments: [], subDepartments: [], serviceCatalog: [],
-        internalPocs: (directory.internalPocs || []).map((person) => ({ id: person.id, name: person.name, active: person.active !== false }))
+        internalPocs: (directory.internalPocs || []).map((person) => ({
+          id: person.id,
+          name: person.name,
+          email: person.email || "",
+          active: person.active !== false
+        }))
       });
     }
     return json(200, directory);
@@ -5480,6 +5485,9 @@ async function handleApiRequest(request) {
       return error(400, "Select an existing Internal POC or choose Create new Internal POC");
     }
     if (internalPocId && !await store.internalPocById(internalPocId)) return error(400, "Selected Internal POC was not found");
+    if (internalPocId && (await store.listAppUsers()).some((user) => user.internalPocId === internalPocId)) {
+      return error(409, "That Internal POC is already linked to an Application User");
+    }
     const allowedDomains = googleAllowedDomains();
     const domain = email.split("@")[1];
     if (allowedDomains.length && !allowedDomains.includes(domain)) return error(400, "Email must use an approved Google Workspace domain");
@@ -5497,6 +5505,9 @@ async function handleApiRequest(request) {
         } else {
           createdInternalPoc = await store.createInternalPoc({ name, email, active: true });
           internalPocId = createdInternalPoc.id;
+        }
+        if ((await store.listAppUsers()).some((user) => user.internalPocId === internalPocId)) {
+          return error(409, "That Internal POC is already linked to an Application User");
         }
       }
       const user = await store.createAppUser({
@@ -5537,6 +5548,9 @@ async function handleApiRequest(request) {
       : null;
     if (role === "project_user" && !internalPocId) return error(400, "Select the Internal POC this Project User represents");
     if (internalPocId && !await store.internalPocById(internalPocId)) return error(400, "Selected Internal POC was not found");
+    if (internalPocId && users.some((user) => user.id !== appUserId && user.internalPocId === internalPocId)) {
+      return error(409, "That Internal POC is already linked to another Application User");
+    }
     const removesActiveSuperAdmin = existing.role === "super_admin" && existing.active && (role !== "super_admin" || !active);
     if (removesActiveSuperAdmin && await store.activeSuperAdminCount() <= 1) {
       return error(409, "Keep at least one active Super Admin");

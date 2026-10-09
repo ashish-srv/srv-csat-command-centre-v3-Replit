@@ -1521,10 +1521,35 @@ export default function Manage({ onReload, currentUser = null }) {
     } : item));
   }
 
-  async function addAppUsers() {
-    const pending = newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc);
+  async function addAppUsers(options = {}) {
+    const includeExistingChanges = options?.includeExistingChanges === true;
+    let pending = newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc);
     if (!pending.length) {
       showToast("Select at least one Internal POC or enter an Admin email.");
+      return;
+    }
+    const existingUserEmails = new Set(
+      appUsers.map((user) => String(user.email || "").trim().toLowerCase()).filter(Boolean)
+    );
+    const existingInternalPocIds = new Set(
+      appUsers.map((user) => user.internalPocId).filter(Boolean)
+    );
+    const alreadySavedDraftIds = new Set(pending
+      .filter((row) => (
+        existingInternalPocIds.has(row.internalPocId)
+        || existingUserEmails.has(String(row.email || "").trim().toLowerCase())
+      ))
+      .map((row) => row.draftId));
+    const skippedExisting = alreadySavedDraftIds.size;
+    if (skippedExisting) {
+      pending = pending.filter((row) => !alreadySavedDraftIds.has(row.draftId));
+      setNewAppUsers((current) => {
+        const remaining = current.filter((row) => !alreadySavedDraftIds.has(row.draftId));
+        return remaining.length ? remaining : [createAppUserDraft()];
+      });
+    }
+    if (!pending.length) {
+      showToast(`${skippedExisting} selected user${skippedExisting === 1 ? " is" : "s are"} already saved and ${skippedExisting === 1 ? "was" : "were"} removed from the pending list.`);
       return;
     }
     const missingInternalPoc = pending.find((row) => row.role === "project_user" && !row.internalPocId && !row.createInternalPoc);
@@ -1542,8 +1567,29 @@ export default function Manage({ onReload, currentUser = null }) {
       showToast("Enter the new Project User's name.");
       return;
     }
+    const selectedInternalPocIds = pending.map((row) => row.internalPocId).filter(Boolean);
+    if (new Set(selectedInternalPocIds).size !== selectedInternalPocIds.length) {
+      showToast("Each Internal POC can be linked to only one Application User. Remove the repeated selection.");
+      return;
+    }
+    if (includeExistingChanges) {
+      const invalid = appUsers.find((user) => user.role === "project_user" && !user.internalPocId);
+      if (invalid) {
+        showToast(`Select an Internal POC for ${invalid.email}.`);
+        return;
+      }
+      const existingInternalPocIds = appUsers
+        .filter((user) => user.role === "project_user")
+        .map((user) => user.internalPocId)
+        .filter(Boolean);
+      if (new Set(existingInternalPocIds).size !== existingInternalPocIds.length) {
+        showToast("Two existing Project Users are linked to the same Internal POC. Give each user a unique Internal POC before saving.");
+        return;
+      }
+    }
     setSaving(true);
     let added = 0;
+    let updated = 0;
     const addedRoles = new Set();
     const addedEmails = [];
     try {
@@ -1564,6 +1610,18 @@ export default function Manage({ onReload, currentUser = null }) {
         setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId));
       }
       setNewAppUsers((current) => current.length ? current : [createAppUserDraft()]);
+      if (includeExistingChanges) {
+        for (const user of appUsers) {
+          await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {
+            name: user.name,
+            role: user.role,
+            permissions: user.permissions,
+            internalPocId: user.role === "project_user" ? user.internalPocId || null : null,
+            active: user.active
+          }, "PATCH");
+          updated += 1;
+        }
+      }
       // Refresh this list independently. A failure in another Manage dataset
       // must not hide a successfully created Application User.
       const refreshedUsers = await apiAdminGet("/api/admin/app-users");
@@ -1579,7 +1637,7 @@ export default function Manage({ onReload, currentUser = null }) {
       });
       window.requestAnimationFrame(() => { if (appUsersPanelRef.current) appUsersPanelRef.current.open = true; });
       await loadAll(clientId);
-      showToast(`${added} application user${added === 1 ? "" : "s"} added. They can now sign in with Google; Project Users see only projects where their linked Internal POC is assigned to the Project Team.`);
+      showToast(`${added} application user${added === 1 ? "" : "s"} added${updated ? ` and ${updated} existing user${updated === 1 ? "" : "s"} updated` : ""}${skippedExisting ? `; ${skippedExisting} already-saved selection${skippedExisting === 1 ? " was" : "s were"} skipped` : ""}. They can now sign in with Google; Project Users see only projects where their linked Internal POC is assigned to the Project Team.`);
     } catch (saveError) {
       showToast(`${added ? `${added} added. ` : ""}${saveError.message}`);
     } finally {
@@ -1588,9 +1646,22 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function saveAllAppUsers() {
+    const pendingCount = newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc).length;
+    if (pendingCount) {
+      await addAppUsers({ includeExistingChanges: true });
+      return;
+    }
     const invalid = appUsers.find((user) => user.role === "project_user" && !user.internalPocId);
     if (invalid) {
       showToast(`Select an Internal POC for ${invalid.email}.`);
+      return;
+    }
+    const existingInternalPocIds = appUsers
+      .filter((user) => user.role === "project_user")
+      .map((user) => user.internalPocId)
+      .filter(Boolean);
+    if (new Set(existingInternalPocIds).size !== existingInternalPocIds.length) {
+      showToast("Two Project Users are linked to the same Internal POC. Give each user a unique Internal POC before saving.");
       return;
     }
     setSaving(true);
@@ -2512,6 +2583,47 @@ export default function Manage({ onReload, currentUser = null }) {
   const pocs = detail?.pocs || [];
   const services = detail?.services || [];
   const people = directory?.internalPocs || [];
+  const savedLinkedInternalPocIds = new Set(
+    appUsers.map((user) => user.internalPocId).filter(Boolean)
+  );
+  const savedApplicationUserEmails = new Set(
+    appUsers.map((user) => String(user.email || "").trim().toLowerCase()).filter(Boolean)
+  );
+  const internalPocOptionsForDraft = (row) => {
+    const unavailableIds = new Set([
+      ...savedLinkedInternalPocIds,
+      ...newAppUsers
+        .filter((candidate) => candidate.draftId !== row.draftId)
+        .map((candidate) => candidate.internalPocId)
+        .filter(Boolean)
+    ]);
+    return people
+      .filter((person) => person.id === row.internalPocId || (
+        !unavailableIds.has(person.id)
+        && !savedApplicationUserEmails.has(String(person.email || "").trim().toLowerCase())
+      ))
+      .sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")))
+      .map((person) => ({
+        value: person.id,
+        label: `${person.name}${person.email ? ` · ${person.email}` : " · email missing"}${person.active === false ? " · inactive" : ""}`
+      }));
+  };
+  const internalPocOptionsForUser = (user) => {
+    const unavailableIds = new Set([
+      ...appUsers
+        .filter((candidate) => candidate.id !== user.id)
+        .map((candidate) => candidate.internalPocId)
+        .filter(Boolean),
+      ...newAppUsers.map((candidate) => candidate.internalPocId).filter(Boolean)
+    ]);
+    return people
+      .filter((person) => person.id === user.internalPocId || !unavailableIds.has(person.id))
+      .sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")))
+      .map((person) => ({
+        value: person.id,
+        label: `${person.name}${person.email ? ` · ${person.email}` : " · email missing"}${person.active === false ? " · inactive" : ""}`
+      }));
+  };
   const cleanupCycles = cleanupWorkspace?.cycles || [];
   const cleanupIssues = issuesForCleanupCycles(selectedCleanupCycleIds);
   const cleanupCyclesById = new Map(cleanupCycles.map((cycle) => [cycle.id, cycle]));
@@ -2595,6 +2707,7 @@ export default function Manage({ onReload, currentUser = null }) {
     ...group,
     users: appUsers.filter((user) => user.role === group.role)
   }));
+  const pendingAppUserCount = newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc).length;
   const manageAccessClasses = [
     !canManageRecords && "deny-manage-records",
     !canManagePocs && "deny-manage-pocs",
@@ -2674,7 +2787,7 @@ export default function Manage({ onReload, currentUser = null }) {
                     <select value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", createInternalPoc: role === "project_user" ? row.createInternalPoc : false, permissions: defaultPermissions(role) }); }} aria-label="Application role">
                       <option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}
                     </select>
-                    {row.role === "project_user" ? <select value={row.createInternalPoc ? "__new__" : row.internalPocId} onChange={(event) => { const selected = event.target.value; const createInternalPoc = selected === "__new__"; const internalPocId = createInternalPoc ? "" : selected; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { createInternalPoc, internalPocId, name: person?.name || "", email: person?.email || "" }); }} aria-label="Internal POC"><option value="">Select Internal POC</option><option value="__new__">Create new Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">Access across projects</span>}
+                    {row.role === "project_user" ? <SingleSelect compact label="Internal POC" value={row.createInternalPoc ? "__new__" : row.internalPocId} placeholder="Select Internal POC" options={[{ value: "__new__", label: "Create new Internal POC" }, ...internalPocOptionsForDraft(row)]} onChange={(selected) => { const createInternalPoc = selected === "__new__"; const internalPocId = createInternalPoc ? "" : selected; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { createInternalPoc, internalPocId, name: person?.name || "", email: person?.email || "" }); }} /> : <span className="bulk-row-placeholder">Access across projects</span>}
                     {row.role === "project_user" && !row.createInternalPoc ? <span className={`app-user-linked-identity ${row.internalPocId && !row.email ? "missing-email" : ""}`}><strong>{row.name || "Select a person"}</strong><small>{row.email || (row.internalPocId ? "Email missing in Internal POCs" : "Name and email will load automatically")}</small></span> : <span className="app-user-manual-identity"><input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder={row.createInternalPoc ? "New Internal POC name" : "Name"} aria-label="User name" /><input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" /></span>}
                     <select value={row.active ? "active" : "inactive"} onChange={(event) => updateNewAppUser(row.draftId, { active: event.target.value === "active" })} aria-label="User status"><option value="active">Active</option><option value="inactive">Inactive</option></select>
                     <button type="button" className="icon-button danger" disabled={newAppUsers.length === 1} onClick={() => setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId))} aria-label="Remove pending user"><Trash2 size={15} /></button>
@@ -2683,12 +2796,12 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
               <div className="button-row bulk-editor-actions">
                 <Button icon={Plus} onClick={() => setNewAppUsers((current) => [...current, createAppUserDraft()])}>Add another user</Button>
-                <Button variant="primary" onClick={addAppUsers} disabled={saving || !newAppUsers.some((row) => row.email.trim() || row.internalPocId || row.createInternalPoc)}>{saving ? "Adding users…" : `Add ${newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc).length || ""} user${newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc).length === 1 ? "" : "s"}`.trim()}</Button>
+                <Button variant="primary" onClick={addAppUsers} disabled={saving || !pendingAppUserCount}>{saving ? "Adding users…" : `Add ${pendingAppUserCount || ""} selected user${pendingAppUserCount === 1 ? "" : "s"}`.trim()}</Button>
               </div>
             </div>
             <div className="bulk-editor-heading existing-users-heading">
-              <span><strong>Edit users and roles together</strong><small>Make all required role, status and permission changes, then save once.</small></span>
-              <Button variant="primary" onClick={saveAllAppUsers} disabled={saving || !appUsers.length}>{saving ? "Saving users…" : "Save all user changes"}</Button>
+              <span><strong>Edit users and roles together</strong><small>{pendingAppUserCount ? `${pendingAppUserCount} new user${pendingAppUserCount === 1 ? " is" : "s are"} still pending above. This save action will add them too.` : "Make all required role, status and permission changes, then save once."}</small></span>
+              <Button variant="primary" onClick={saveAllAppUsers} disabled={saving || (!appUsers.length && !pendingAppUserCount)}>{saving ? "Saving users…" : pendingAppUserCount ? `Add ${pendingAppUserCount} pending + save all changes` : "Save existing user changes"}</Button>
             </div>
             <div className="admin-control-scroll app-user-role-groups">
               {appUserRoleGroups.map((group) => (
@@ -2710,7 +2823,7 @@ export default function Manage({ onReload, currentUser = null }) {
                           <div className="app-user-row">
                             <input value={user.name || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item))} aria-label={`Name for ${user.email}`} />
                             <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => changeExistingAppUserRole(user.id, event.target.value)} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
-                            {user.role === "project_user" ? <select value={user.internalPocId || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: event.target.value } : item))} aria-label={`Internal POC for ${user.email}`}><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">No Internal POC link required</span>}
+                            {user.role === "project_user" ? <SingleSelect compact label={`Internal POC for ${user.name || user.email}`} value={user.internalPocId || ""} placeholder="Select Internal POC" options={internalPocOptionsForUser(user)} onChange={(value) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: value } : item))} /> : <span className="bulk-row-placeholder">No Internal POC link required</span>}
                             <select value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></select>
                           </div>
                           <div className="app-permission-grid">
