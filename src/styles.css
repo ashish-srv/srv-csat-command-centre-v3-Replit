@@ -4949,6 +4949,7 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
 }
 .manage-page > * { min-width: 0; }
 .manage-secondary-section { order: 100; }
+.manage-cleanup-section { order: 200; }
 .internal-poc-section-actions { justify-content: flex-end; margin-bottom: 12px; }
 .copy-project-structure-actions { align-items: center; margin: -2px 0 12px; }
 .copy-project-structure-actions small { color: var(--muted); line-height: 1.4; }

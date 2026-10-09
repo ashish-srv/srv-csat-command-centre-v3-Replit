@@ -2764,10 +2764,10 @@ export default function Manage({ onReload, currentUser = null }) {
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Project Services</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-cleanup")?.scrollIntoView({ behavior: "smooth" })}>Data Cleanup</button> : null}
         {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
         {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
         {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-service-change-requests")?.scrollIntoView({ behavior: "smooth" })}>Service Requests ({serviceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-cleanup")?.scrollIntoView({ behavior: "smooth" })}>Data Cleanup</button> : null}
       </nav>
 
       {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel manage-secondary-section">
@@ -3761,7 +3761,7 @@ export default function Manage({ onReload, currentUser = null }) {
         id="manage-cleanup"
         title="Project data cleanup"
         badge="Permanent"
-        className="span-12"
+        className="span-12 manage-cleanup-section"
       >
         <p className="form-note warning-note">
           Choose one project from the selected client, then select one or more feedback cycles. Cleanup removes
