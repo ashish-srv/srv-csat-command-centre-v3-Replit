@@ -2264,6 +2264,31 @@ button.metric-card {
 .role-badge { padding: 4px 8px; border-radius: 999px; background: #edf2f7; color: #4b5a6e; font-size: 11px; font-weight: 800; text-transform: capitalize; }
 .role-super_admin { background: #e9f1ff; color: #1e58aa; }
 .role-admin { background: #e9f9f1; color: #137251; }
+.app-user-role-groups { padding: 8px; }
+.app-user-role-group { border: 1px solid var(--soft-line); border-radius: 9px; overflow: hidden; background: #fff; }
+.app-user-role-group + .app-user-role-group { margin-top: 9px; }
+.app-user-role-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 11px 13px;
+  cursor: pointer;
+  list-style: none;
+  background: #f6f8fb;
+}
+.app-user-role-group > summary::-webkit-details-marker { display: none; }
+.app-user-role-group > summary > span:first-child { display: flex; flex-direction: column; gap: 3px; }
+.app-user-role-group > summary small { color: var(--muted); }
+.app-user-role-group.role-group-super_admin > summary { background: #f0f5ff; }
+.app-user-role-group.role-group-admin > summary { background: #f0faf5; }
+.app-user-role-group.role-group-project_user > summary { background: #f5f7fa; }
+.app-user-role-group-body { border-top: 1px solid var(--soft-line); }
+.app-user-role-empty { margin: 0; padding: 14px; color: var(--muted); }
+.user-status-badge { padding: 4px 8px; border-radius: 999px; font-size: 10px; font-weight: 900; text-transform: uppercase; }
+.user-status-badge.active { color: #126a47; background: #dff6ea; }
+.user-status-badge.inactive { color: #9e3129; background: #fde8e5; }
 .app-permission-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
@@ -4880,7 +4905,18 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
 }
 
 /* Role-based access and compact Super Admin controls */
-.project-user-shell { grid-template-columns: 1fr; }
+.app-shell.project-user-shell { grid-template-columns: minmax(0, 1fr); }
+.project-user-shell .workspace { max-width: none; }
+.manage-page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.manage-page > * { min-width: 0; }
+.manage-secondary-section { order: 100; }
+.internal-poc-section-actions { justify-content: flex-end; margin-bottom: 12px; }
+.copy-project-structure-actions { align-items: center; margin: -2px 0 12px; }
+.copy-project-structure-actions small { color: var(--muted); line-height: 1.4; }
 .access-denied-page {
   min-height: 100vh;
   display: grid;
@@ -5151,6 +5187,7 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
   font: 600 13px Verdana, Arial, sans-serif;
 }
 .performance-service-change-controls textarea { resize: vertical; line-height: 1.45; }
+.service-request-error { margin: 0; color: #a8322a; font-size: 12px; font-weight: 800; }
 .request-new-service { margin-top: 0; }
 .service-change-request-list { display: grid; gap: 7px; margin-top: 12px; }
 .service-change-request-list > strong { color: #27364d; font-size: 12px; }

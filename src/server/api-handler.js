@@ -5474,14 +5474,31 @@ async function handleApiRequest(request) {
     if (appAccess.role !== "super_admin" && role !== "project_user") {
       return error(403, "Admins can only add Project Users");
     }
-    const internalPocId = role === "project_user" ? String(body.internalPocId || "").trim() : null;
-    if (role === "project_user" && !internalPocId) return error(400, "Select the Internal POC this Project User represents");
+    let internalPocId = role === "project_user" ? String(body.internalPocId || "").trim() : null;
+    const createLinkedInternalPoc = role === "project_user" && !internalPocId && body.createInternalPoc === true;
+    if (role === "project_user" && !internalPocId && !createLinkedInternalPoc) {
+      return error(400, "Select an existing Internal POC or choose Create new Internal POC");
+    }
     if (internalPocId && !await store.internalPocById(internalPocId)) return error(400, "Selected Internal POC was not found");
     const allowedDomains = googleAllowedDomains();
     const domain = email.split("@")[1];
     if (allowedDomains.length && !allowedDomains.includes(domain)) return error(400, "Email must use an approved Google Workspace domain");
     if (await store.getAppUserByEmail(email)) return error(409, "That application user already exists");
+    let createdInternalPoc = null;
     try {
+      if (createLinkedInternalPoc) {
+        const name = String(body.name || "").trim();
+        if (name.length < 2) return error(400, "Enter the Project User's name");
+        const existingInternalPoc = typeof store.internalPocByEmail === "function"
+          ? await store.internalPocByEmail(email)
+          : null;
+        if (existingInternalPoc) {
+          internalPocId = existingInternalPoc.id;
+        } else {
+          createdInternalPoc = await store.createInternalPoc({ name, email, active: true });
+          internalPocId = createdInternalPoc.id;
+        }
+      }
       const user = await store.createAppUser({
         email,
         name: body.name,
@@ -5491,8 +5508,11 @@ async function handleApiRequest(request) {
         active: body.active !== false,
         actor: appAccess.email || "Password Super Admin"
       });
-      return json(201, { user });
+      return json(201, { user, internalPoc: createdInternalPoc });
     } catch (createError) {
+      if (createdInternalPoc?.id && typeof store.deleteInternalPoc === "function") {
+        try { await store.deleteInternalPoc(createdInternalPoc.id); } catch { /* preserve original error */ }
+      }
       return error(400, "Could not add application user", createError.message);
     }
   }

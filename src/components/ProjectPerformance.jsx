@@ -163,12 +163,21 @@ function ProjectDetailCards({
   const [serviceCatalogId, setServiceCatalogId] = useState("");
   const [requestedServiceName, setRequestedServiceName] = useState("");
   const [changeReason, setChangeReason] = useState("");
+  const [serviceRequestError, setServiceRequestError] = useState("");
   const attachedKeys = new Set((project.services || []).flatMap((service) => [service.serviceCatalogId, service.serviceKey]).filter(Boolean));
   const availableServices = (serviceCatalog || []).filter((service) => service.active !== false && !attachedKeys.has(service.id) && !attachedKeys.has(service.serviceKey));
   const budget = budgetPosition(project);
 
   async function addService() {
-    if (!serviceCatalogId) return;
+    if (!serviceCatalogId) {
+      setServiceRequestError("Select a standard service first.");
+      return;
+    }
+    if (canRequestServiceChanges && changeReason.trim().length < 5) {
+      setServiceRequestError("Enter a short reason for this service change.");
+      return;
+    }
+    setServiceRequestError("");
     const saved = canDirectlyManageServices
       ? await onAddService(project, serviceCatalogId)
       : await onRequestServiceChange(project, { requestType: "add_existing", serviceCatalogId, reason: changeReason });
@@ -179,6 +188,15 @@ function ProjectDetailCards({
   }
 
   async function requestNewService() {
+    if (requestedServiceName.trim().length < 2) {
+      setServiceRequestError("Enter the name of the new service.");
+      return;
+    }
+    if (changeReason.trim().length < 5) {
+      setServiceRequestError("Enter a short reason for requesting this new service.");
+      return;
+    }
+    setServiceRequestError("");
     const saved = await onRequestServiceChange(project, {
       requestType: "add_new",
       requestedServiceName,
@@ -191,6 +209,11 @@ function ProjectDetailCards({
   }
 
   async function requestRemoval(service) {
+    if (changeReason.trim().length < 5) {
+      setServiceRequestError("Enter a short reason before requesting a service removal.");
+      return;
+    }
+    setServiceRequestError("");
     const saved = await onRequestServiceChange(project, {
       requestType: "remove_existing",
       projectServiceId: service.id,
@@ -208,7 +231,7 @@ function ProjectDetailCards({
         <div><dt>Client Group</dt><dd>{project.clientGroup || "Not set"}</dd></div><div><dt>Client Criticality</dt><dd><StatusPill value={project.clientCriticality || "Not set"} /></dd></div><div><dt>Financial Year</dt><dd>{project.financialYear || "Not set"}</dd></div><div><dt>Project Type</dt><dd>{project.projectType || "Not set"}</dd></div><div><dt>Revenue Category</dt><dd>{project.revenueCategory || "Not set"}</dd></div><div><dt>Portfolio Type</dt><dd>{project.portfolioType || "Not set"}</dd></div>
       </dl></Panel>
       <Panel title="Project Team" className="performance-card tone-sky"><dl className="detail-list">
-        <div><dt>Project Director</dt><dd>{project.team?.projectDirector?.name || "Not set"}</dd></div><div><dt>AM</dt><dd>{project.team?.am?.name || "Not set"}</dd></div><div><dt>TL</dt><dd>{project.team?.tl?.name || "Not set"}</dd></div><div><dt>AD</dt><dd>{project.team?.ad?.name || "Not set"}</dd></div><div><dt>AVP</dt><dd>{project.team?.avp?.name || "Not set"}</dd></div>
+        <div><dt>Project Director</dt><dd>{project.team?.projectDirector?.name || "Not set"}</dd></div><div><dt>AVP</dt><dd>{project.team?.avp?.name || "Not set"}</dd></div><div><dt>AD</dt><dd>{project.team?.ad?.name || "Not set"}</dd></div><div><dt>TL</dt><dd>{project.team?.tl?.name || "Not set"}</dd></div><div><dt>AM</dt><dd>{project.team?.am?.name || "Not set"}</dd></div>
       </dl></Panel>
       <Panel title="Commercial Profile" className="performance-card tone-amber"><dl className="detail-list">
         <div><dt>Currency</dt><dd>{project.currency || "INR"}</dd></div><div><dt>FX Rate to INR</dt><dd>{valueOrDash(project.fxRateToInr)}</dd></div><div><dt>PO Amount</dt><dd>{money(project.poAmountLocal, project.currency)}</dd></div><div><dt>Budget Allocated</dt><dd>{money(project.budgetAllocatedLocal, project.currency)}</dd></div><div><dt>Budget Spent</dt><dd>{money(project.budgetSpentLocal, project.currency)}</dd></div><div><dt>Budget Left</dt><dd className={budget.left !== null && budget.left < 0 ? "performance-negative-value" : ""}>{money(budget.left, project.currency)}</dd></div><div><dt>Budget Left %</dt><dd className={budget.percent !== null && budget.percent < 0 ? "performance-negative-value" : ""}>{budget.percent === null ? "Not set" : `${budget.percent.toFixed(1)}%`}</dd></div><div><dt>Revenue Generated</dt><dd>{money(project.revenueGeneratedLocal, project.currency)}</dd></div>
@@ -222,20 +245,21 @@ function ProjectDetailCards({
       <Panel title="Services, Mandates and Delivery" className="performance-wide-panel performance-card tone-indigo">
         <p className="field-caption">CSAT project services</p>
         <p className="form-note">These services control future CSAT questions. Historical and currently open feedback cycles keep their existing service scope.</p>
-        <div className={`service-chip-list ${canDirectlyManageServices || canRequestServiceChanges ? "editable" : ""}`}>{project.services.length ? project.services.map((service) => <span key={service.id}>{service.name}{canDirectlyManageServices ? <button type="button" onClick={() => onRemoveService(project, service)} disabled={removingServiceId === service.id} aria-label={`Remove ${service.name}`}><Trash2 size={13} /></button> : canRequestServiceChanges ? <button type="button" className="service-request-remove" onClick={() => requestRemoval(service)} disabled={!changeReason.trim() || requestingServiceProjectId === project.id} aria-label={`Request removal of ${service.name}`}>Request removal</button> : null}</span>) : <em>No services configured</em>}</div>
+        <div className={`service-chip-list ${canDirectlyManageServices || canRequestServiceChanges ? "editable" : ""}`}>{project.services.length ? project.services.map((service) => <span key={service.id}>{service.name}{canDirectlyManageServices ? <button type="button" onClick={() => onRemoveService(project, service)} disabled={removingServiceId === service.id} aria-label={`Remove ${service.name}`}><Trash2 size={13} /></button> : canRequestServiceChanges ? <button type="button" className="service-request-remove" onClick={() => requestRemoval(service)} disabled={requestingServiceProjectId === project.id} aria-label={`Request removal of ${service.name}`}>Request removal</button> : null}</span>) : <em>No services configured</em>}</div>
         {canDirectlyManageServices || canRequestServiceChanges ? <div className="performance-service-change-controls">
-          {canRequestServiceChanges ? <label><span>Reason for the requested change</span><textarea rows="3" value={changeReason} onChange={(event) => setChangeReason(event.target.value)} placeholder="Explain why this project service should be added or removed" maxLength="1000" /></label> : null}
+          {canRequestServiceChanges ? <label><span>Reason for the requested change</span><textarea rows="3" value={changeReason} onChange={(event) => { setChangeReason(event.target.value); setServiceRequestError(""); }} placeholder="Explain why this project service should be added or removed" maxLength="1000" /></label> : null}
           <div className="performance-service-attach">
           <select value={serviceCatalogId} onChange={(event) => setServiceCatalogId(event.target.value)} aria-label={`Add service to ${project.name}`}>
             <option value="">Select standard service</option>
             {availableServices.map((service) => <option key={service.id} value={service.id}>{service.name}</option>)}
           </select>
-          <Button icon={Plus} onClick={addService} disabled={!serviceCatalogId || (canRequestServiceChanges && !changeReason.trim()) || addingServiceProjectId === project.id || requestingServiceProjectId === project.id}>{addingServiceProjectId === project.id || requestingServiceProjectId === project.id ? "Saving…" : canDirectlyManageServices ? "Add to project" : "Request addition"}</Button>
+          <Button icon={Plus} onClick={addService} disabled={addingServiceProjectId === project.id || requestingServiceProjectId === project.id}>{addingServiceProjectId === project.id || requestingServiceProjectId === project.id ? "Saving…" : canDirectlyManageServices ? "Add to project" : "Request addition"}</Button>
           </div>
           {canRequestServiceChanges ? <div className="performance-service-attach request-new-service">
-            <input value={requestedServiceName} onChange={(event) => setRequestedServiceName(event.target.value)} placeholder="New service not in the catalogue" maxLength="120" />
-            <Button icon={Plus} onClick={requestNewService} disabled={!requestedServiceName.trim() || !changeReason.trim() || requestingServiceProjectId === project.id}>{requestingServiceProjectId === project.id ? "Submitting…" : "Request new service"}</Button>
+            <input value={requestedServiceName} onChange={(event) => { setRequestedServiceName(event.target.value); setServiceRequestError(""); }} placeholder="New service not in the catalogue" maxLength="120" />
+            <Button icon={Plus} onClick={requestNewService} disabled={requestingServiceProjectId === project.id}>{requestingServiceProjectId === project.id ? "Submitting…" : "Request new service"}</Button>
           </div> : null}
+          {serviceRequestError ? <p className="service-request-error" role="alert">{serviceRequestError}</p> : null}
         </div> : null}
         {serviceChangeRequests.length ? <div className="service-change-request-list">
           <strong>Service change requests</strong>
@@ -317,7 +341,26 @@ export default function ProjectPerformance({ currentUser = null }) {
     }
   }
 
-  useEffect(() => { load(""); }, []);
+  const signedInIdentity = `${currentUser?.appUserId || ""}:${currentUser?.internalPocId || ""}:${currentUser?.email || currentUser?.provider || ""}`;
+
+  useEffect(() => {
+    setData(null);
+    setSelectedProjectId("");
+    setViewingProjectId("");
+    void load("");
+  }, [signedInIdentity]);
+
+  useEffect(() => {
+    const refreshAfterReturn = () => {
+      if (!document.hidden) void load(selectedProjectId);
+    };
+    window.addEventListener("pageshow", refreshAfterReturn);
+    document.addEventListener("visibilitychange", refreshAfterReturn);
+    return () => {
+      window.removeEventListener("pageshow", refreshAfterReturn);
+      document.removeEventListener("visibilitychange", refreshAfterReturn);
+    };
+  }, [signedInIdentity, selectedProjectId]);
 
   const projects = useMemo(() => data?.projects || [], [data]);
   const clusterNames = useMemo(() => [...new Set(projects.map((item) => item.clusterName).filter(Boolean))].sort(), [projects]);
@@ -327,13 +370,43 @@ export default function ProjectPerformance({ currentUser = null }) {
   const projectOptions = useMemo(() => projects
     .filter((item) => !cluster || item.clusterName === cluster)
     .filter((item) => !client || item.clientName === client)
-    .map((item) => ({ value: item.id, label: item.name })), [projects, cluster, client]);
-  const statusValues = useMemo(() => (data?.referenceValues?.performance_status || []).map((item) => item.value), [data]);
-  const sentimentValues = useMemo(() => (data?.referenceValues?.client_sentiment || []).map((item) => item.value), [data]);
-  const amOptions = useMemo(() => [...new Map(projects.map((item) => item.team?.am).filter(Boolean).map((item) => [item.id, item])).values()].map((item) => ({ value: item.id, label: item.name })), [projects]);
-  const avpOptions = useMemo(() => [...new Map(projects.map((item) => item.team?.avp).filter(Boolean).map((item) => [item.id, item])).values()].map((item) => ({ value: item.id, label: item.name })), [projects]);
-  const yearOptions = useMemo(() => [...new Set(projects.map((item) => item.financialYear).filter(Boolean))].sort().map((value) => ({ value, label: value })), [projects]);
-  const phaseOptions = useMemo(() => (data?.referenceValues?.current_phase || []).filter((item) => item.active !== false).map((item) => ({ value: item.value, label: item.value })), [data]);
+    .map((item) => ({ value: item.id, label: item.name }))
+    .sort((a, b) => a.label.localeCompare(b.label)), [projects, cluster, client]);
+  const identityScopedProjects = useMemo(() => projects
+    .filter((item) => !cluster || item.clusterName === cluster)
+    .filter((item) => !client || item.clientName === client)
+    .filter((item) => !projectFilter || item.id === projectFilter),
+  [projects, cluster, client, projectFilter]);
+  const statusValues = useMemo(
+    () => [...new Set(identityScopedProjects.map((item) => item.performanceStatus).filter(Boolean))].sort(),
+    [identityScopedProjects]
+  );
+  const sentimentValues = useMemo(
+    () => [...new Set(identityScopedProjects.map((item) => item.clientSentiment).filter(Boolean))].sort(),
+    [identityScopedProjects]
+  );
+  const amOptions = useMemo(() => [...new Map(identityScopedProjects
+    .map((item) => item.team?.am).filter(Boolean).map((item) => [item.id, item])).values()]
+    .map((item) => ({ value: item.id, label: item.name })).sort((a, b) => a.label.localeCompare(b.label)), [identityScopedProjects]);
+  const avpOptions = useMemo(() => [...new Map(identityScopedProjects
+    .map((item) => item.team?.avp).filter(Boolean).map((item) => [item.id, item])).values()]
+    .map((item) => ({ value: item.id, label: item.name })).sort((a, b) => a.label.localeCompare(b.label)), [identityScopedProjects]);
+  const yearOptions = useMemo(() => [...new Set(identityScopedProjects.map((item) => item.financialYear).filter(Boolean))]
+    .sort().map((value) => ({ value, label: value })), [identityScopedProjects]);
+  const phaseOptions = useMemo(() => [...new Set(identityScopedProjects.map((item) => item.currentPhase).filter(Boolean))]
+    .sort().map((value) => ({ value, label: value })), [identityScopedProjects]);
+
+  // Keep every secondary filter valid for the selected cluster/client/project.
+  // Previously a value from another client stayed selected but disappeared
+  // from its dropdown, leaving a blank page with no visible explanation.
+  useEffect(() => {
+    if (status && !statusValues.includes(status)) setStatus("");
+    if (sentiment && !sentimentValues.includes(sentiment)) setSentiment("");
+    if (amFilter && !amOptions.some((item) => item.value === amFilter)) setAmFilter("");
+    if (avpFilter && !avpOptions.some((item) => item.value === avpFilter)) setAvpFilter("");
+    if (yearFilter && !yearOptions.some((item) => item.value === yearFilter)) setYearFilter("");
+    if (phaseFilter && !phaseOptions.some((item) => item.value === phaseFilter)) setPhaseFilter("");
+  }, [status, statusValues, sentiment, sentimentValues, amFilter, amOptions, avpFilter, avpOptions, yearFilter, yearOptions, phaseFilter, phaseOptions]);
 
   const filteredProjects = useMemo(() => projects
     .filter((item) => !cluster || item.clusterName === cluster)
@@ -684,7 +757,7 @@ export default function ProjectPerformance({ currentUser = null }) {
               <Field label="Feedback Interval (days)"><input type="number" min="1" max="365" value={newProject.feedbackIntervalDays} onChange={(event) => setNewProject((current) => ({ ...current, feedbackIntervalDays: event.target.value }))} /></Field>
               <Field label="Goal"><input value={newProject.goal} onChange={(event) => setNewProject((current) => ({ ...current, goal: event.target.value }))} /></Field>
             </div>
-            {currentUser?.role === "project_user" ? <fieldset className="performance-self-roles"><legend>Your role(s) on this project</legend>{[["am", "AM"], ["tl", "TL"], ["ad", "AD"], ["avp", "AVP"], ["project_director", "Project Director"]].map(([value, label]) => <label key={value}><input type="checkbox" checked={newProject.selfTeamRoles.includes(value)} onChange={(event) => setNewProject((current) => ({ ...current, selfTeamRoles: event.target.checked ? [...current.selfTeamRoles, value] : current.selfTeamRoles.filter((role) => role !== value) }))} /><span>{label}</span></label>)}</fieldset> : null}
+            {currentUser?.role === "project_user" ? <fieldset className="performance-self-roles"><legend>Your role(s) on this project</legend>{[["project_director", "Project Director"], ["avp", "AVP"], ["ad", "AD"], ["tl", "TL"], ["am", "AM"]].map(([value, label]) => <label key={value}><input type="checkbox" checked={newProject.selfTeamRoles.includes(value)} onChange={(event) => setNewProject((current) => ({ ...current, selfTeamRoles: event.target.checked ? [...current.selfTeamRoles, value] : current.selfTeamRoles.filter((role) => role !== value) }))} /><span>{label}</span></label>)}</fieldset> : null}
             <div className="button-row section-bottom-actions"><Button onClick={() => setShowCreateProject(false)}>Cancel</Button><Button variant="primary" icon={Plus} onClick={createProject} disabled={creatingProject || !newProject.clientId || !newProject.key.trim() || !newProject.name.trim() || !newProject.startDate || !newProject.endDate}>{creatingProject ? "Creating…" : "Create Paused Project"}</Button></div>
           </Panel>
         </section>
@@ -810,10 +883,10 @@ export default function ProjectPerformance({ currentUser = null }) {
               <Panel title="Project Team">
                 <dl className="detail-list">
                   <div><dt>Project Director</dt><dd>{selectedProject.team?.projectDirector?.name || "Not set"}</dd></div>
-                  <div><dt>AM</dt><dd>{selectedProject.team?.am?.name || "Not set"}</dd></div>
-                  <div><dt>TL</dt><dd>{selectedProject.team?.tl?.name || "Not set"}</dd></div>
-                  <div><dt>AD</dt><dd>{selectedProject.team?.ad?.name || "Not set"}</dd></div>
                   <div><dt>AVP</dt><dd>{selectedProject.team?.avp?.name || "Not set"}</dd></div>
+                  <div><dt>AD</dt><dd>{selectedProject.team?.ad?.name || "Not set"}</dd></div>
+                  <div><dt>TL</dt><dd>{selectedProject.team?.tl?.name || "Not set"}</dd></div>
+                  <div><dt>AM</dt><dd>{selectedProject.team?.am?.name || "Not set"}</dd></div>
                 </dl>
               </Panel>
               <Panel title="Commercial Profile">
@@ -923,10 +996,10 @@ export default function ProjectPerformance({ currentUser = null }) {
                 <h4>Project Team</h4>
                 <div className="performance-form-grid five">
                   <Field label="Project Director"><NativeSelect value={form.projectDirectorId} onChange={(value) => updateField("projectDirectorId", value)} items={internalPocOptions} /></Field>
-                  <Field label="AM"><NativeSelect value={form.amId} onChange={(value) => updateField("amId", value)} items={internalPocOptions} /></Field>
-                  <Field label="TL"><NativeSelect value={form.tlId} onChange={(value) => updateField("tlId", value)} items={internalPocOptions} /></Field>
-                  <Field label="AD"><NativeSelect value={form.adId} onChange={(value) => updateField("adId", value)} items={internalPocOptions} /></Field>
                   <Field label="AVP"><NativeSelect value={form.avpId} onChange={(value) => updateField("avpId", value)} items={internalPocOptions} /></Field>
+                  <Field label="AD"><NativeSelect value={form.adId} onChange={(value) => updateField("adId", value)} items={internalPocOptions} /></Field>
+                  <Field label="TL"><NativeSelect value={form.tlId} onChange={(value) => updateField("tlId", value)} items={internalPocOptions} /></Field>
+                  <Field label="AM"><NativeSelect value={form.amId} onChange={(value) => updateField("amId", value)} items={internalPocOptions} /></Field>
                 </div>
               </div>
 

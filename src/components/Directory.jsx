@@ -232,9 +232,14 @@ export default function Directory({ onOpenProject }) {
   }
 
   useEffect(() => {
-    const validProjectIds = new Set(scopedProjects.map((project) => project.id));
+    const validStatuses = new Set(projectStatusOptions);
+    setProjectStatuses((current) => current.filter((status) => validStatuses.has(status)));
+  }, [projectStatusOptions]);
+
+  useEffect(() => {
+    const validProjectIds = new Set(projectOptions.map((project) => project.id));
     setProjectIds((current) => current.filter((id) => validProjectIds.has(id)));
-  }, [scopedProjects]);
+  }, [projectOptions]);
 
   function keepClientInScope(nextClusterId, nextClientStatuses) {
     if (!clientId) return;

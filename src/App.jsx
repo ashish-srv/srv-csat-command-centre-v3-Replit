@@ -138,6 +138,7 @@ export default function App({ onLogout, currentUser = null }) {
     manage: canOpenManage(currentUser)
   }), [currentUser]);
   const firstAllowedRoute = Object.keys(routeAccess).find((key) => routeAccess[key]) || "performance";
+  const activeRoute = routeAccess[route] ? route : firstAllowedRoute;
   const showAttentionRail = routeAccess.dashboard;
   const needsDashboardData = routeAccess.dashboard || routeAccess.project;
 
@@ -204,35 +205,35 @@ export default function App({ onLogout, currentUser = null }) {
         <nav className="tabbar">
           {routeAccess.dashboard ? <button
             type="button"
-            className={`tab ${route === "dashboard" ? "active" : ""}`}
+            className={`tab ${activeRoute === "dashboard" ? "active" : ""}`}
             onClick={() => navigate("/dashboard")}
           >
             Dashboard
           </button> : null}
           {routeAccess.project ? <button
             type="button"
-            className={`tab ${route === "project" ? "active" : ""}`}
+            className={`tab ${activeRoute === "project" ? "active" : ""}`}
             onClick={() => openProject(projects[0]?.key || "")}
           >
             Project workspace
           </button> : null}
           {routeAccess.directory ? <button
             type="button"
-            className={`tab ${route === "directory" ? "active" : ""}`}
+            className={`tab ${activeRoute === "directory" ? "active" : ""}`}
             onClick={() => navigate("/directory")}
           >
             Directory
           </button> : null}
           {routeAccess.performance ? <button
             type="button"
-            className={`tab ${route === "performance" ? "active" : ""}`}
+            className={`tab ${activeRoute === "performance" ? "active" : ""}`}
             onClick={() => navigate("/project-performance")}
           >
             Project Performance
           </button> : null}
           {routeAccess.manage ? <button
             type="button"
-            className={`tab ${route === "manage" ? "active" : ""}`}
+            className={`tab ${activeRoute === "manage" ? "active" : ""}`}
             onClick={() => navigate("/manage")}
           >
             Manage
@@ -257,13 +258,13 @@ export default function App({ onLogout, currentUser = null }) {
             <p>{error.message}</p>
             <button type="button" className="button primary" onClick={loadDashboard}><span>Try again</span></button>
           </div>
-        ) : route === "directory" ? (
+        ) : activeRoute === "directory" ? (
           <Directory onOpenProject={openProject} />
-        ) : route === "manage" ? (
+        ) : activeRoute === "manage" ? (
           <Manage onReload={loadDashboard} currentUser={currentUser} />
-        ) : route === "performance" ? (
+        ) : activeRoute === "performance" ? (
           <ProjectPerformance currentUser={currentUser} />
-        ) : route === "project" ? (
+        ) : activeRoute === "project" ? (
           <ProjectWorkspace dashboard={dashboard} locationTick={locationTick} onReload={loadDashboard} />
         ) : (
           <Dashboard dashboard={dashboard} onReload={loadDashboard} onOpenProject={openProject} currentUser={currentUser} />

@@ -518,6 +518,15 @@ class SupabaseStore {
     return toInternalPoc(rows[0], manager);
   }
 
+  async internalPocByEmail(email) {
+    const normalized = String(email || "").trim().toLowerCase();
+    if (!normalized) return null;
+    const rows = await this.request("internal_pocs", {
+      query: `email=ilike.${encodeURIComponent(normalized)}&select=*&limit=1`
+    });
+    return rows.length ? toInternalPocRow(rows[0]) : null;
+  }
+
   async servicesForProject(projectId) {
     const rows = await this.request("project_services", {
       query: `project_id=eq.${encodeURIComponent(projectId)}&order=name.asc`

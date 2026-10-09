@@ -58,6 +58,7 @@ function createAppUserDraft() {
     name: "",
     role: "project_user",
     internalPocId: "",
+    createInternalPoc: false,
     active: true,
     permissions: defaultPermissions("project_user")
   };
@@ -300,6 +301,10 @@ function serviceRowsForProject(services, projectId) {
     kpis: service.kpis || "",
     internalPocId: service.internalPocId || ""
   }));
+}
+
+function dateInputValue(value) {
+  return value ? String(value).slice(0, 10) : "";
 }
 
 function CleanupPinModal({ confirmation, pin, error, busy, onPinChange, onCancel, onConfirm }) {
@@ -669,6 +674,7 @@ function pocRowsForProject(pocs, projectId) {
 
 function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCancel, saving }) {
   const rows = value.rows || [];
+  const [copyNotice, setCopyNotice] = useState("");
   const defaultLevelId = levels.find((level) => String(level.name || "").toLowerCase() === "normal")?.id || levels[0]?.id || "";
   function updateRow(index, patch) {
     onChange({ ...value, rows: rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row) });
@@ -680,6 +686,35 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
       rows: rows.filter((_, rowIndex) => rowIndex !== index),
       removedIds: row.id ? [...(value.removedIds || []), row.id] : (value.removedIds || [])
     });
+  }
+
+  function copyPocsFromProject() {
+    const sourceProjectId = value.copySourceProjectId || "";
+    if (!sourceProjectId || !value.projectId || sourceProjectId === value.projectId) return;
+    const targetRows = [...rows, ...pocRowsForProject(pocs, value.projectId)];
+    const existingKeys = new Set(targetRows.map((row) => {
+      const phone = String(row.contactWhatsapp || "").replace(/\D/g, "");
+      const email = String(row.contactEmail || "").trim().toLowerCase();
+      return phone ? `phone:${phone}` : email ? `email:${email}` : `name:${String(row.name || "").trim().toLowerCase()}`;
+    }));
+    const copiedRows = pocRowsForProject(pocs, sourceProjectId)
+      .filter((row) => {
+        const phone = String(row.contactWhatsapp || "").replace(/\D/g, "");
+        const email = String(row.contactEmail || "").trim().toLowerCase();
+        const key = phone ? `phone:${phone}` : email ? `email:${email}` : `name:${String(row.name || "").trim().toLowerCase()}`;
+        if (existingKeys.has(key)) return false;
+        existingKeys.add(key);
+        return true;
+      })
+      .map((row) => ({ ...row, id: undefined, projectId: value.projectId }));
+    onChange({
+      ...value,
+      rows: distributePocWeights([...rows, ...copiedRows]),
+      copySourceProjectId: ""
+    });
+    setCopyNotice(copiedRows.length
+      ? `${copiedRows.length} POC${copiedRows.length === 1 ? "" : "s"} copied into this draft.`
+      : "No new POCs were found; matching POCs are already in this draft.");
   }
 
   const activeWeightTotal = Math.round(rows.reduce(
@@ -695,15 +730,29 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
       </div>
       <div className="form-grid service-project-picker">
         <Field label="Project" hint="the draft below contains every POC saved on this project">
-          <select value={value.projectId} onChange={(event) => onChange({
-            projectId: event.target.value,
-            rows: pocRowsForProject(pocs, event.target.value),
-            removedIds: []
-          })}>
+          <select value={value.projectId} onChange={(event) => {
+            setCopyNotice("");
+            onChange({
+              projectId: event.target.value,
+              rows: pocRowsForProject(pocs, event.target.value),
+              removedIds: [],
+              copySourceProjectId: ""
+            });
+          }}>
             <option value="">Select a project</option>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
         </Field>
+        <Field label="Copy POCs from another project" hint="adds only POCs not already present in this draft">
+          <select value={value.copySourceProjectId || ""} disabled={!value.projectId} onChange={(event) => onChange({ ...value, copySourceProjectId: event.target.value })}>
+            <option value="">Select source project</option>
+            {projects.filter((project) => project.id !== value.projectId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="button-row copy-project-structure-actions">
+        <Button onClick={copyPocsFromProject} disabled={!value.projectId || !value.copySourceProjectId}>Copy POCs into draft</Button>
+        <small className={copyNotice ? "success" : ""}>{copyNotice || "Nothing is saved until you review the copied rows and select Save all POCs."}</small>
       </div>
       <div className="batch-editor">
         {rows.map((row, index) => {
@@ -786,11 +835,29 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
 
 function ServiceBatchForm({ value, projects, services, serviceCatalog, people, onChange, onSave, onCancel, saving }) {
   const rows = value.rows || [];
+  const [copyNotice, setCopyNotice] = useState("");
   function updateRow(index, patch) {
     onChange({ ...value, rows: rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row) });
   }
   function removeRow(index) {
     onChange({ ...value, rows: rows.filter((_, rowIndex) => rowIndex !== index) });
+  }
+  function copyServicesFromProject() {
+    const sourceProjectId = value.copySourceProjectId || "";
+    if (!sourceProjectId || !value.projectId || sourceProjectId === value.projectId) return;
+    const existingKeys = new Set(rows.map((row) => row.serviceCatalogId || row.serviceKey || serviceIdentifier(row.name)));
+    const copiedRows = serviceRowsForProject(services, sourceProjectId)
+      .filter((row) => {
+        const key = row.serviceCatalogId || row.serviceKey || serviceIdentifier(row.name);
+        if (!key || existingKeys.has(key)) return false;
+        existingKeys.add(key);
+        return true;
+      })
+      .map((row) => ({ ...row, id: undefined, projectId: value.projectId }));
+    onChange({ ...value, rows: [...rows, ...copiedRows], copySourceProjectId: "" });
+    setCopyNotice(copiedRows.length
+      ? `${copiedRows.length} service${copiedRows.length === 1 ? "" : "s"} copied into this draft.`
+      : "No new services were found; matching services are already in this draft.");
   }
   return (
     <div className="edit-form">
@@ -800,14 +867,28 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
       </div>
       <div className="form-grid service-project-picker">
         <Field label="Project" hint="the list below contains all services saved on this project">
-          <select value={value.projectId} onChange={(event) => onChange({
-            projectId: event.target.value,
-            rows: serviceRowsForProject(services, event.target.value)
-          })}>
+          <select value={value.projectId} onChange={(event) => {
+            setCopyNotice("");
+            onChange({
+              projectId: event.target.value,
+              rows: serviceRowsForProject(services, event.target.value),
+              copySourceProjectId: ""
+            });
+          }}>
             <option value="">Select a project</option>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
         </Field>
+        <Field label="Copy services from another project" hint="copies service, owner and KPI structure without history">
+          <select value={value.copySourceProjectId || ""} disabled={!value.projectId} onChange={(event) => onChange({ ...value, copySourceProjectId: event.target.value })}>
+            <option value="">Select source project</option>
+            {projects.filter((project) => project.id !== value.projectId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="button-row copy-project-structure-actions">
+        <Button onClick={copyServicesFromProject} disabled={!value.projectId || !value.copySourceProjectId}>Copy services into draft</Button>
+        <small className={copyNotice ? "success" : ""}>{copyNotice || "Nothing is saved until you review the copied rows and select Save all services."}</small>
       </div>
       <div className="batch-editor">
         {rows.map((row, index) => {
@@ -1417,12 +1498,12 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function addAppUsers() {
-    const pending = newAppUsers.filter((row) => row.email.trim() || row.internalPocId);
+    const pending = newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc);
     if (!pending.length) {
       showToast("Select at least one Internal POC or enter an Admin email.");
       return;
     }
-    const missingInternalPoc = pending.find((row) => row.role === "project_user" && !row.internalPocId);
+    const missingInternalPoc = pending.find((row) => row.role === "project_user" && !row.internalPocId && !row.createInternalPoc);
     if (missingInternalPoc) {
       showToast(`Select an Internal POC for ${missingInternalPoc.email}.`);
       return;
@@ -1430,6 +1511,11 @@ export default function Manage({ onReload, currentUser = null }) {
     const missingGoogleEmail = pending.find((row) => !row.email.trim());
     if (missingGoogleEmail) {
       showToast("That Internal POC does not have an email. Add their Google Workspace email under Internal POCs first.");
+      return;
+    }
+    const missingNewInternalName = pending.find((row) => row.role === "project_user" && row.createInternalPoc && row.name.trim().length < 2);
+    if (missingNewInternalName) {
+      showToast("Enter the new Project User's name.");
       return;
     }
     setSaving(true);
@@ -1441,6 +1527,7 @@ export default function Manage({ onReload, currentUser = null }) {
           name: row.name,
           role: row.role,
           internalPocId: row.role === "project_user" ? row.internalPocId : null,
+          createInternalPoc: row.role === "project_user" && row.createInternalPoc,
           active: row.active,
           permissions: row.permissions
         }, "POST");
@@ -1449,6 +1536,7 @@ export default function Manage({ onReload, currentUser = null }) {
         setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId));
       }
       setNewAppUsers((current) => current.length ? current : [createAppUserDraft()]);
+      await loadAll(clientId);
       showToast(`${added} application user${added === 1 ? "" : "s"} added. They can now sign in with Google.`);
     } catch (saveError) {
       showToast(`${added ? `${added} added. ` : ""}${saveError.message}`);
@@ -1642,6 +1730,10 @@ export default function Manage({ onReload, currentUser = null }) {
   async function selectClient(id) {
     setClientId(id);
     closeForms();
+    // A project selected under the previous client/cluster must not remain in
+    // the bulk-status action after it disappears from the filtered table.
+    setSelectedProjectStatusIds([]);
+    setProjectStatusPreview(null);
     const clientDetail = id ? await apiGet(`/api/admin/clients/${encodeURIComponent(id)}`) : null;
     setDetail(clientDetail);
     setSelectedDeletePocIds([]);
@@ -2349,15 +2441,23 @@ export default function Manage({ onReload, currentUser = null }) {
 
   const clients = directory?.clients || [];
   const clusters = directory?.clusters || [];
+  const selectedClient = clients.find((item) => item.id === clientId) || null;
   const filteredClients = clusterFilterId
     ? clients.filter((client) => client.clusterId === clusterFilterId)
     : clients;
+  const displayedClients = clientId
+    ? filteredClients.filter((client) => client.id === clientId)
+    : filteredClients;
+  const displayedClusters = selectedClient
+    ? clusters.filter((cluster) => cluster.id === selectedClient.clusterId)
+    : clusterFilterId
+      ? clusters.filter((cluster) => cluster.id === clusterFilterId)
+      : clusters;
   const levels = directory?.pocLevels || [];
   const serviceCatalog = directory?.serviceCatalog || [];
   const normalLevel = levels.find((level) =>
     String(level.name || "").toLowerCase() === "normal"
   ) || levels[0] || null;
-  const selectedClient = clients.find((item) => item.id === clientId) || null;
   const projects = detail?.projects || [];
   const allProjects = directory?.projects || [];
   const clientsById = new Map(clients.map((client) => [client.id, client]));
@@ -2444,6 +2544,14 @@ export default function Manage({ onReload, currentUser = null }) {
       people: displayedPeople.filter((person) => !departments.some((department) => department.id === person.departmentId))
     }
   ].filter((group) => group.people.length);
+  const appUserRoleGroups = [
+    { role: "super_admin", label: "Super Admins", description: "Full application and user-management access" },
+    { role: "admin", label: "Admins", description: "Configurable operational access" },
+    { role: "project_user", label: "Project Users", description: "Assigned Project Performance access" }
+  ].filter((group) => isSuperAdmin || group.role === "project_user").map((group) => ({
+    ...group,
+    users: appUsers.filter((user) => user.role === group.role)
+  }));
   const manageAccessClasses = [
     !canManageRecords && "deny-manage-records",
     !canManagePocs && "deny-manage-pocs",
@@ -2487,9 +2595,6 @@ export default function Manage({ onReload, currentUser = null }) {
       </FilterBar>
 
       <nav className="manage-section-nav" aria-label="Manage sections">
-        {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
-        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
-        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-service-change-requests")?.scrollIntoView({ behavior: "smooth" })}>Service Requests ({serviceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
         {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
@@ -2504,9 +2609,12 @@ export default function Manage({ onReload, currentUser = null }) {
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-cleanup")?.scrollIntoView({ behavior: "smooth" })}>Data Cleanup</button> : null}
+        {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-service-change-requests")?.scrollIntoView({ behavior: "smooth" })}>Service Requests ({serviceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
       </nav>
 
-      {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel">
+      {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel manage-secondary-section">
         <details>
           <summary>
             <span><strong>Application Users</strong><small>Google access · {appUsers.filter((user) => user.active).length} active</small></span>
@@ -2515,16 +2623,16 @@ export default function Manage({ onReload, currentUser = null }) {
             <p className="form-note">Super Admin always has full access. Super Admin can configure Admins and Project Users. Admins with this permission can manage Project Users only and can never change an Admin or Super Admin account. A user without Project Performance history can be permanently deleted; otherwise deactivate the account to preserve audit attribution.</p>
             <div className="bulk-editor-block">
               <div className="bulk-editor-heading">
-                <span><strong>Add multiple users</strong><small>For a Project User, select the Internal POC and their saved name and email are used automatically. Enter details manually only for Admin or Super Admin.</small></span>
+                <span><strong>Add multiple users</strong><small>For a Project User, link an existing Internal POC or create and link a new Internal POC here in the same step.</small></span>
               </div>
               <div className="app-user-draft-list">
                 {newAppUsers.map((row) => (
                   <div className="app-user-draft-row" key={row.draftId}>
-                    <select value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", permissions: defaultPermissions(role) }); }} aria-label="Application role">
+                    <select value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", createInternalPoc: role === "project_user" ? row.createInternalPoc : false, permissions: defaultPermissions(role) }); }} aria-label="Application role">
                       <option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}
                     </select>
-                    {row.role === "project_user" ? <select value={row.internalPocId} onChange={(event) => { const internalPocId = event.target.value; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { internalPocId, name: person?.name || "", email: person?.email || "" }); }} aria-label="Internal POC"><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">Access across projects</span>}
-                    {row.role === "project_user" ? <span className={`app-user-linked-identity ${row.internalPocId && !row.email ? "missing-email" : ""}`}><strong>{row.name || "Select a person"}</strong><small>{row.email || (row.internalPocId ? "Email missing in Internal POCs" : "Name and email will load automatically")}</small></span> : <span className="app-user-manual-identity"><input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder="Name" aria-label="User name" /><input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" /></span>}
+                    {row.role === "project_user" ? <select value={row.createInternalPoc ? "__new__" : row.internalPocId} onChange={(event) => { const selected = event.target.value; const createInternalPoc = selected === "__new__"; const internalPocId = createInternalPoc ? "" : selected; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { createInternalPoc, internalPocId, name: person?.name || "", email: person?.email || "" }); }} aria-label="Internal POC"><option value="">Select Internal POC</option><option value="__new__">Create new Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">Access across projects</span>}
+                    {row.role === "project_user" && !row.createInternalPoc ? <span className={`app-user-linked-identity ${row.internalPocId && !row.email ? "missing-email" : ""}`}><strong>{row.name || "Select a person"}</strong><small>{row.email || (row.internalPocId ? "Email missing in Internal POCs" : "Name and email will load automatically")}</small></span> : <span className="app-user-manual-identity"><input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder={row.createInternalPoc ? "New Internal POC name" : "Name"} aria-label="User name" /><input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" /></span>}
                     <select value={row.active ? "active" : "inactive"} onChange={(event) => updateNewAppUser(row.draftId, { active: event.target.value === "active" })} aria-label="User status"><option value="active">Active</option><option value="inactive">Inactive</option></select>
                     <button type="button" className="icon-button danger" disabled={newAppUsers.length === 1} onClick={() => setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId))} aria-label="Remove pending user"><Trash2 size={15} /></button>
                   </div>
@@ -2532,32 +2640,40 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
               <div className="button-row bulk-editor-actions">
                 <Button icon={Plus} onClick={() => setNewAppUsers((current) => [...current, createAppUserDraft()])}>Add another user</Button>
-                <Button variant="primary" onClick={addAppUsers} disabled={saving || !newAppUsers.some((row) => row.email.trim() || row.internalPocId)}>{saving ? "Adding users…" : `Add ${newAppUsers.filter((row) => row.email.trim() || row.internalPocId).length || ""} user${newAppUsers.filter((row) => row.email.trim() || row.internalPocId).length === 1 ? "" : "s"}`.trim()}</Button>
+                <Button variant="primary" onClick={addAppUsers} disabled={saving || !newAppUsers.some((row) => row.email.trim() || row.internalPocId || row.createInternalPoc)}>{saving ? "Adding users…" : `Add ${newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc).length || ""} user${newAppUsers.filter((row) => row.email.trim() || row.internalPocId || row.createInternalPoc).length === 1 ? "" : "s"}`.trim()}</Button>
               </div>
             </div>
             <div className="bulk-editor-heading existing-users-heading">
               <span><strong>Edit users and roles together</strong><small>Make all required role, status and permission changes, then save once.</small></span>
               <Button variant="primary" onClick={saveAllAppUsers} disabled={saving || !appUsers.length}>{saving ? "Saving users…" : "Save all user changes"}</Button>
             </div>
-            <div className="admin-control-scroll">
-              {appUsers.map((user) => (
-                <details className="app-user-card" key={user.id}>
-                  <summary><span><strong>{user.email}</strong><small>{user.name || "Name not set"}</small></span><span className={`role-badge role-${user.role}`}>{user.role.replace("_", " ")}</span></summary>
-                  <div className="app-user-card-body">
-                    <div className="app-user-row">
-                      <input value={user.name || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item))} aria-label={`Name for ${user.email}`} />
-                      <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => { const role = event.target.value; setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, role, permissions: defaultPermissions(role) } : item)); }} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
-                      {user.role === "project_user" ? <select value={user.internalPocId || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: event.target.value } : item))} aria-label={`Internal POC for ${user.email}`}><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : null}
-                      <select value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></select>
-                    </div>
-                    <div className="app-permission-grid">
-                      {permissionsForRole(user.role).map((permission) => <label key={permission}><input type="checkbox" checked={user.role === "super_admin" || user.permissions?.[permission] === true} disabled={user.role === "super_admin"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, permissions: { ...item.permissions, [permission]: event.target.checked } } : item))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
-                    </div>
-                    <div className="button-row">
-                      <Button variant="danger" icon={Trash2} onClick={() => deleteAppUser(user)} disabled={saving || user.role === "super_admin" || currentUser?.appUserId === user.id}>Delete user</Button>
-                      {user.role === "super_admin" ? <small className="form-note">Super Admin accounts are protected from deletion.</small> : null}
-                      {currentUser?.appUserId === user.id ? <small className="form-note">You cannot delete your own account.</small> : null}
-                    </div>
+            <div className="admin-control-scroll app-user-role-groups">
+              {appUserRoleGroups.map((group) => (
+                <details className={`app-user-role-group role-group-${group.role}`} key={group.role} defaultOpen={group.role === "project_user"}>
+                  <summary><span><strong>{group.label}</strong><small>{group.description}</small></span><span className={`role-badge role-${group.role}`}>{group.users.length} user{group.users.length === 1 ? "" : "s"}</span></summary>
+                  <div className="app-user-role-group-body">
+                    {group.users.map((user) => (
+                      <details className="app-user-card" key={user.id}>
+                        <summary><span><strong>{user.name || "Name not set"}</strong><small>{user.email}</small></span><span className={`user-status-badge ${user.active ? "active" : "inactive"}`}>{user.active ? "Active" : "Inactive"}</span></summary>
+                        <div className="app-user-card-body">
+                          <div className="app-user-row">
+                            <input value={user.name || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item))} aria-label={`Name for ${user.email}`} />
+                            <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => { const role = event.target.value; setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, role, internalPocId: role === "project_user" ? item.internalPocId : null, permissions: defaultPermissions(role) } : item)); }} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
+                            {user.role === "project_user" ? <select value={user.internalPocId || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: event.target.value } : item))} aria-label={`Internal POC for ${user.email}`}><option value="">Select Internal POC</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select> : <span className="bulk-row-placeholder">No Internal POC link required</span>}
+                            <select value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></select>
+                          </div>
+                          <div className="app-permission-grid">
+                            {permissionsForRole(user.role).map((permission) => <label key={permission}><input type="checkbox" checked={user.role === "super_admin" || user.permissions?.[permission] === true} disabled={user.role === "super_admin"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, permissions: { ...item.permissions, [permission]: event.target.checked } } : item))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
+                          </div>
+                          <div className="button-row">
+                            <Button variant="danger" icon={Trash2} onClick={() => deleteAppUser(user)} disabled={saving || user.role === "super_admin" || currentUser?.appUserId === user.id}>Delete user</Button>
+                            {user.role === "super_admin" ? <small className="form-note">Super Admin accounts are protected from deletion.</small> : null}
+                            {currentUser?.appUserId === user.id ? <small className="form-note">You cannot delete your own account.</small> : null}
+                          </div>
+                        </div>
+                      </details>
+                    ))}
+                    {!group.users.length ? <p className="app-user-role-empty">No {group.label.toLowerCase()} configured.</p> : null}
                   </div>
                 </details>
               ))}
@@ -2567,7 +2683,7 @@ export default function Manage({ onReload, currentUser = null }) {
         </details>
       </section> : null}
 
-      {canManageCatalogues ? <section id="manage-performance-standards" className="admin-collapsible-panel">
+      {canManageCatalogues ? <section id="manage-performance-standards" className="admin-collapsible-panel manage-secondary-section">
         <details>
           <summary>
             <span><strong>Project Performance Standards</strong><small>Controlled dropdown values · Super Admin only</small></span>
@@ -2613,7 +2729,7 @@ export default function Manage({ onReload, currentUser = null }) {
         </details>
       </section> : null}
 
-      {isSuperAdmin ? <section id="manage-service-change-requests" className="admin-collapsible-panel">
+      {isSuperAdmin ? <section id="manage-service-change-requests" className="admin-collapsible-panel manage-secondary-section">
         <details open={serviceChangeRequests.some((request) => request.status === "pending")}>
           <summary>
             <span><strong>Project Service Change Requests</strong><small>Super Admin approval · {serviceChangeRequests.filter((request) => request.status === "pending").length} pending</small></span>
@@ -2821,7 +2937,7 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-clients"
         title="Clients and clusters"
-        badge={`${filteredClients.length} displayed · ${clients.length} clients · ${clusters.length} clusters`}
+        badge={`${displayedClients.length} client${displayedClients.length === 1 ? "" : "s"} · ${displayedClusters.length} cluster${displayedClusters.length === 1 ? "" : "s"} displayed`}
         className="span-12"
         action={
           <div className="button-row">
@@ -2829,8 +2945,8 @@ export default function Manage({ onReload, currentUser = null }) {
             <Button icon={Plus} onClick={() => { closeForms(); setClientForm({ ...EMPTY_CLIENT, clusterId: clusterFilterId }); }}>Add client</Button>
             <Button
               icon={Pencil}
-              disabled={!filteredClients.length}
-              onClick={() => { closeForms(); setClientBatch(clientRowsForBatch(filteredClients)); }}
+              disabled={!displayedClients.length}
+              onClick={() => { closeForms(); setClientBatch(clientRowsForBatch(displayedClients)); }}
             >
               Edit displayed clients
             </Button>
@@ -2881,7 +2997,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <span>Status</span>
             <span />
           </div>
-          {filteredClients.map((client) => {
+          {displayedClients.map((client) => {
             const cluster = clusters.find((item) => item.id === client.clusterId);
             return (
               <div key={client.id} className={`dtable-row ${client.id === clientId ? "selected" : ""}`}>
@@ -2909,17 +3025,17 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
             );
           })}
-          {!filteredClients.length ? (
+          {!displayedClients.length ? (
             <EmptyState
-              title={clusterFilterId ? "No clients in this cluster" : "No clients"}
-              text={clusterFilterId ? "Choose another cluster or add a client to this one." : "Add a cluster, then a client, then its projects."}
+              title={clientId ? "Selected client is outside this cluster" : clusterFilterId ? "No clients in this cluster" : "No clients"}
+              text={clientId ? "Clear either the Client or Cluster filter to see matching records." : clusterFilterId ? "Choose another cluster or add a client to this one." : "Add a cluster, then a client, then its projects."}
             />
           ) : null}
         </div>
         </div>
         {clusters.length ? (
           <div className="cluster-chips">
-            {clusters.map((cluster) => (
+            {displayedClusters.map((cluster) => (
               <div key={cluster.id} className="cluster-chip-group">
                 <button
                   type="button"
@@ -3135,8 +3251,8 @@ export default function Manage({ onReload, currentUser = null }) {
                     key: project.key,
                     name: project.name,
                     activeStatus: project.activeStatus,
-                    startDate: project.startDate || "",
-                    endDate: project.endDate || "",
+                    startDate: dateInputValue(project.startDate),
+                    endDate: dateInputValue(project.endDate),
                     feedbackIntervalDays: project.feedbackIntervalDays
                   });
                 }}
@@ -3162,24 +3278,24 @@ export default function Manage({ onReload, currentUser = null }) {
         className="span-12"
         action={<Button variant="primary" icon={Save} onClick={saveProjectTeams} disabled={saving || !dirtyProjectTeamIds.length}>{saving ? "Saving…" : `Save ${dirtyProjectTeamIds.length || ""} team change${dirtyProjectTeamIds.length === 1 ? "" : "s"}`.trim()}</Button>}
       >
-        <p className="form-note">Assign the Project Director, AM, TL, AD and AVP from the Internal POC master. Edit one or several projects in this scrollable section, then save all changes together. Selecting “Not set” clears that role.</p>
+        <p className="form-note">Assign the Project Director, AVP, AD, TL and AM from the Internal POC master. Edit one or several projects in this scrollable section, then save all changes together. Selecting “Not set” clears that role.</p>
         <div className="manage-section-search">
           <Field label="Search project teams"><input value={projectTeamSearch} onChange={(event) => setProjectTeamSearch(event.target.value)} placeholder="Project, ID, client, cluster or team member" /></Field>
           {projectTeamSearch ? <Button onClick={() => setProjectTeamSearch("")}>Clear search</Button> : null}
         </div>
         <div className="manage-project-team-scroll">
           <div className="project-team-bulk-grid project-team-bulk-head">
-            <span>Project</span><span>Project Director</span><span>AM</span><span>TL</span><span>AD</span><span>AVP</span>
+            <span>Project</span><span>Project Director</span><span>AVP</span><span>AD</span><span>TL</span><span>AM</span>
           </div>
           {displayedProjectTeamRows.map((project) => (
             <div className={`project-team-bulk-grid ${dirtyProjectTeamIds.includes(project.id) ? "changed" : ""}`} key={project.id}>
               <span className="project-team-project"><strong>{project.name}</strong><small>{project.clientName} · {project.key}</small></span>
               {[
                 ["projectDirectorId", "Project Director"],
-                ["amId", "AM"],
-                ["tlId", "TL"],
+                ["avpId", "AVP"],
                 ["adId", "AD"],
-                ["avpId", "AVP"]
+                ["tlId", "TL"],
+                ["amId", "AM"]
               ].map(([field, label]) => <select key={field} value={project.team?.[field] || ""} onChange={(event) => updateProjectTeam(project.id, field, event.target.value)} aria-label={`${label} for ${project.name}`}><option value="">Not set</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active === false ? " (Inactive)" : ""}</option>)}</select>)}
             </div>
           ))}
@@ -3213,6 +3329,7 @@ export default function Manage({ onReload, currentUser = null }) {
         {pocBatch ? (
           <div ref={formRef}>
             <PocBatchForm
+              key={`poc-batch-${pocBatch.projectId}`}
               value={pocBatch}
               projects={projects}
               pocs={pocs}
@@ -3292,6 +3409,7 @@ export default function Manage({ onReload, currentUser = null }) {
         {serviceBatch ? (
           <div ref={formRef}>
             <ServiceBatchForm
+              key={`service-batch-${serviceBatch.projectId}`}
               value={serviceBatch}
               projects={projects}
               services={services}
@@ -3366,13 +3484,13 @@ export default function Manage({ onReload, currentUser = null }) {
         />
       </Panel> : null}
 
-      <Panel
-        id="manage-internal-pocs"
-        title="Internal POCs"
-        badge={`${displayedPeople.length} displayed${showAllInternal ? ` · ${people.length} across the agency` : ` · ${peopleOnThisClient.length} on this client`}`}
-        className="span-12"
-        action={
-          <div className="button-row">
+      <section id="manage-internal-pocs" className="admin-collapsible-panel">
+        <details>
+          <summary>
+            <span><strong>Internal POCs</strong><small>{displayedPeople.length} displayed{showAllInternal ? ` · ${people.length} across the agency` : ` · ${peopleOnThisClient.length} on this client`}</small></span>
+          </summary>
+          <div className="admin-collapsible-body">
+          <div className="button-row internal-poc-section-actions">
             <button type="button" className="row-link" onClick={() => setShowAllInternal((value) => !value)}>
               {showAllInternal ? "Show this client only" : "Show everyone"}
             </button>
@@ -3387,8 +3505,6 @@ export default function Manage({ onReload, currentUser = null }) {
               Add internal POCs
             </Button>
           </div>
-        }
-      >
         {internalForm ? (
           <div ref={formRef}>
             <InternalPocForm
@@ -3426,7 +3542,7 @@ export default function Manage({ onReload, currentUser = null }) {
         <div className="manage-internal-pocs-scroll">
         <div className="internal-department-groups">
           {internalPocDepartmentGroups.map((group) => (
-            <details className="internal-department-group" key={group.id} open>
+            <details className="internal-department-group" key={group.id} defaultOpen={group.people.length <= 8}>
               <summary><span><strong>{group.name}</strong><small>{group.people.length} Internal POC{group.people.length === 1 ? "" : "s"}</small></span></summary>
               <div className="dtable manage-internal">
                 <div className="dtable-head"><span>Name</span><span>Email</span><span>Sub-department</span><span>Reports to</span><span>Active</span><span>Actions</span></div>
@@ -3464,7 +3580,9 @@ export default function Manage({ onReload, currentUser = null }) {
             Add another internal POC
           </Button>
         </div>
-      </Panel>
+          </div>
+        </details>
+      </section>
 
       <Panel
         id="manage-cleanup"

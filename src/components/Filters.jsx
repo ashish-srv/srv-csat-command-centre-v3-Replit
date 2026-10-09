@@ -113,7 +113,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
   );
 }
 
-export function SingleSelect({ label, options, value, onChange, placeholder = "Select" }) {
+export function SingleSelect({ label, options, value, onChange, placeholder = "Select", allowClear = true }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -195,14 +195,16 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
             {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
           </div>
           <div className="filter-menu-actions">
-            <button
-              type="button"
-              className="filter-clear"
-              onClick={() => choose("")}
-              disabled={!value}
-            >
-              Clear
-            </button>
+            {allowClear ? (
+              <button
+                type="button"
+                className="filter-clear"
+                onClick={() => choose("")}
+                disabled={!value}
+              >
+                Clear
+              </button>
+            ) : <span />}
             <button type="button" className="filter-apply" onClick={closeMenu}>OK</button>
           </div>
         </div>

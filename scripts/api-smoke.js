@@ -26,6 +26,7 @@ const calls = {
   createdPocs: [],
   createdServices: [],
   createdCatalogServices: [],
+  createdInternalPocs: [],
   deletedServices: [],
   updatedPocLevels: [],
   clearedProjectMessages: [],
@@ -302,10 +303,21 @@ const store = {
     },
     financialYears: ["2026-2027"]
   }),
-  getAppUserByEmail: async (email) => String(email).toLowerCase() === "employee@srvmedia.com" && store._appUserActive
-    ? { id: "app_user_1", email: "employee@srvmedia.com", name: "SRV Employee", role: store._appUserRole, internalPocId: "ip_1", active: true }
-    : null,
+  getAppUserByEmail: async (email) => {
+    const normalized = String(email).toLowerCase();
+    if (normalized === "employee@srvmedia.com") {
+      if (!store._appUserActive) return null;
+      return { id: "app_user_1", email: "employee@srvmedia.com", name: "SRV Employee", role: store._appUserRole, internalPocId: "ip_1", active: true };
+    }
+    const user = store._applicationUsers.find((item) => item.email.toLowerCase() === normalized);
+    return user ? { ...user } : null;
+  },
   listAppUsers: async () => store._applicationUsers.map((user) => ({ ...user })),
+  createAppUser: async (input) => {
+    const user = { id: `app_user_${store._applicationUsers.length + 1}`, ...input };
+    store._applicationUsers.push(user);
+    return { ...user };
+  },
   activeSuperAdminCount: async () => store._applicationUsers.filter((user) => user.role === "super_admin" && user.active).length,
   deleteAppUserIfNoHistory: async (id) => {
     const user = store._applicationUsers.find((item) => item.id === id);
@@ -376,7 +388,16 @@ const store = {
     return created;
   },
   createCluster: async (input) => ({ id: "clu_new", ...input }),
-  createInternalPoc: async (input) => ({ id: "ip_new", ...input }),
+  internalPocById: async (id) => id === "ip_1"
+    ? { id: "ip_1", name: "Internal Owner", email: "owner@srvmedia.com", active: true }
+    : store._internalPocs.find((item) => item.id === id) || null,
+  internalPocByEmail: async (email) => store._internalPocs.find((item) => item.email?.toLowerCase() === String(email).toLowerCase()) || null,
+  createInternalPoc: async (input) => {
+    const person = { id: `ip_new_${store._internalPocs.length + 1}`, ...input };
+    store._internalPocs.push(person);
+    calls.createdInternalPocs.push(person);
+    return { ...person };
+  },
   updateInternalPoc: async (id, input) => (id === "ip_1" ? { id, ...input } : null),
   deleteInternalPoc: async (id) => id === "ip_1"
     ? { internalPocsDeleted: 1, servicesUnassigned: 2, directReportsUnassigned: 1, appUsersUnlinked: 1, projectTeamAssignmentsCleared: 2 }
@@ -505,6 +526,7 @@ const store = {
   _expiredInactiveFinalSweeps: [],
   _messagingStatus: { enabled: true, updatedAt: null, updatedBy: null },
   _appUserRole: "super_admin",
+  _internalPocs: [],
   _serviceChangeRequests: [],
   _appUserActive: true,
   _applicationUsers: [
@@ -683,6 +705,14 @@ async function scenario(name, fn) {
       reason: "Submitting the same request should be blocked."
     }, { cookie: googleAppCookie });
     assert.strictEqual(duplicate.statusCode, 409);
+    const newServiceRequest = await rawReq("POST", "/api/project-performance/projects/prj_1/service-change-requests", {
+      requestType: "add_new",
+      requestedServiceName: "Influencer Strategy",
+      reason: "The newly approved scope includes influencer strategy."
+    }, { cookie: googleAppCookie });
+    assert.strictEqual(newServiceRequest.statusCode, 201);
+    assert.strictEqual(JSON.parse(newServiceRequest.body).request.serviceName, "Influencer Strategy");
+    assert.strictEqual(JSON.parse(newServiceRequest.body).request.status, "pending");
     store._appUserRole = "super_admin";
   });
 
@@ -3402,6 +3432,22 @@ async function scenario(name, fn) {
   await scenario("admin write with the wrong PIN is rejected", async () => {
     const res = await req("POST", "/api/admin/projects", { clientId: "cl_1", key: "new-one", name: "New" }, { "x-admin-pin": "9999" });
     assert.strictEqual(res.statusCode, 403);
+  });
+
+  await scenario("Project User and linked Internal POC can be created in one Application Users step", async () => {
+    const beforeInternalPocs = calls.createdInternalPocs.length;
+    const response = await rawReq("POST", "/api/admin/app-users", {
+      email: "new.project.user@srvmedia.com",
+      name: "New Project User",
+      role: "project_user",
+      createInternalPoc: true,
+      active: true
+    }, { cookie: googleAppCookie, ...PIN });
+    const payload = JSON.parse(response.body);
+    assert.strictEqual(response.statusCode, 201);
+    assert.strictEqual(calls.createdInternalPocs.length, beforeInternalPocs + 1);
+    assert.strictEqual(payload.internalPoc.email, "new.project.user@srvmedia.com");
+    assert.strictEqual(payload.user.internalPocId, payload.internalPoc.id);
   });
 
   await scenario("Only Super Admin can approve a Project User service request", async () => {

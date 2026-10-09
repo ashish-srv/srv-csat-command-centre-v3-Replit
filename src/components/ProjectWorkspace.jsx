@@ -318,9 +318,18 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     if (!cycles.some((cycle) => cycle.id === cycleId)) selectCycle(cycles[0].id);
   }, [cycles, cycleId, loading, workspace]);
   const cycleSessions = selectedCycle ? selectedCycle.sessions || [] : [];
+  const workspacePocs = workspace?.pocs || [];
+  const cyclePocIds = new Set(cycleSessions.map((session) => session.clientPocId));
+  const feedbackPocOptions = workspacePocs.filter((poc) => cyclePocIds.has(poc.id));
   const feedbackSessions = feedbackPocId
     ? cycleSessions.filter((session) => session.clientPocId === feedbackPocId)
     : cycleSessions;
+
+  useEffect(() => {
+    if (!feedbackPocId || feedbackPocOptions.some((poc) => poc.id === feedbackPocId)) return;
+    setFeedbackPocId("");
+  }, [feedbackPocId, feedbackPocOptions]);
+
   const selectedSession = feedbackSessions.find((session) => session.id === sessionId) || feedbackSessions[0] || null;
   const selectedSessionClosed = Boolean(selectedSession && (
     selectedCycle?.status === "closed"
@@ -353,9 +362,11 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     setCycleId(id);
     const cycle = cycles.find((item) => item.id === id);
     const sessions = cycle ? (cycle.sessions || []) : [];
-    const first = feedbackPocId
+    const matchingPocSession = feedbackPocId
       ? sessions.find((item) => item.clientPocId === feedbackPocId) || null
-      : sessions[0] || null;
+      : null;
+    if (feedbackPocId && !matchingPocSession) setFeedbackPocId("");
+    const first = matchingPocSession || sessions[0] || null;
     setSessionId(first ? first.id : "");
     const requestId = messageRequestRef.current + 1;
     messageRequestRef.current = requestId;
@@ -381,6 +392,11 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
       setSessionId("");
       setMessages([]);
     }
+  }
+
+  function changeCycleTypes(nextCycleTypes) {
+    setCycleTypes(nextCycleTypes);
+    if (nextCycleTypes.length && !nextCycleTypes.includes("quick_checkin")) setQuickOutcomes([]);
   }
 
   async function requestFeedback(cycleType) {
@@ -586,7 +602,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   if (!workspace?.project) return <EmptyState title="No project selected" text="Choose a project from the filter above." />;
 
   const { project } = workspace;
-  const pocs = workspace.pocs || [];
+  const pocs = workspacePocs;
   const services = workspace.services || [];
   const issues = workspace.issues || [];
   // The table shows the SAME cycles as the dropdown. It previously read the
@@ -1022,21 +1038,21 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
         showReset={filtersActive}
         onReset={() => { setCycleTypes([]); setQuickOutcomes([]); setCompletion(""); setFeedbackPocId(""); setRange({ from: "", to: "", basis: "started" }); }}
       >
-        <SingleSelect label="Cluster" value={cluster} placeholder="" onChange={selectCluster}
+        <SingleSelect label="Cluster" value={cluster} placeholder="" allowClear={false} onChange={selectCluster}
           options={[...new Set(allProjects.map((item) => item.clusterName).filter(Boolean))].sort()
             .map((name) => ({ value: name, label: name }))} />
-        <SingleSelect label="Client" value={client} placeholder="" onChange={selectClient}
+        <SingleSelect label="Client" value={client} placeholder="" allowClear={false} onChange={selectClient}
           options={[...new Set(clusterProjects.map((item) => item.clientName).filter(Boolean))].sort()
             .map((name) => ({ value: name, label: name }))} />
-        <SingleSelect label="Project" value={project.key} placeholder="" onChange={pushProject}
+        <SingleSelect label="Project" value={project.key} placeholder="" allowClear={false} onChange={pushProject}
           options={selectableProjects.map((item) => ({ value: item.key, label: item.name }))} />
-        <SingleSelect label="Cycle" value={selectedCycle ? selectedCycle.id : ""} placeholder={cycles.length ? "" : "No cycle"}
+        <SingleSelect label="Cycle" value={selectedCycle ? selectedCycle.id : ""} placeholder={cycles.length ? "" : "No cycle"} allowClear={false}
           onChange={selectCycle}
           options={cycles.map((cycle) => ({
             value: cycle.id,
             label: `${formatCycleType(cycle.cycleType, project.feedbackIntervalDays)} · ${formatDate(cycle.startedAt)}${cycle.status === "closed" ? " · closed" : ""}`
           }))} />
-        <MultiSelect label="Cycle type" allLabel="All types" selected={cycleTypes} onChange={setCycleTypes}
+        <MultiSelect label="Cycle type" allLabel="All types" selected={cycleTypes} onChange={changeCycleTypes}
           options={["pulse", "project_end", "quick_checkin"]}
           renderOption={(value) => formatCycleType(value, project.feedbackIntervalDays)} />
         <MultiSelect label="Quick check-in result" allLabel="All results" selected={quickOutcomes} onChange={setQuickOutcomes}
@@ -1046,7 +1062,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           options={COMPLETION_OPTIONS.map((option) => ({ value: option.value, label: option.label }))} />
         <DateRange range={range} onChange={setRange} />
         <SingleSelect label="Feedback by" value={feedbackPocId} placeholder="All POCs" onChange={selectFeedbackPoc}
-          options={pocs.map((poc) => ({ value: poc.id, label: poc.name }))} />
+          options={feedbackPocOptions.map((poc) => ({ value: poc.id, label: poc.name }))} />
       </FilterBar>
 
       {(range.from || range.to || cycleTypes.length || quickOutcomes.length || completion) && !cycles.length ? (

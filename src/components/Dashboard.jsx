@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Power, RefreshCw, X } from "lucide-react";
 import { apiGet, apiWriteWithAdminPin } from "../api";
 import { cycleInRange, DateRange, FilterBar, MultiSelect } from "./Filters.jsx";
@@ -178,6 +178,39 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
     [allProjects]
   );
 
+  const clusterOptions = useMemo(
+    () => [...new Set(allProjects.map((project) => project.clusterName).filter(Boolean))].sort(),
+    [allProjects]
+  );
+  const clientOptions = useMemo(
+    () => [...new Set(allProjects
+      .filter((project) => !clusters.length || clusters.includes(project.clusterName))
+      .map((project) => project.clientName)
+      .filter(Boolean))].sort(),
+    [allProjects, clusters]
+  );
+  const projectOptions = useMemo(
+    () => [...new Set(allProjects
+      .filter((project) => !clusters.length || clusters.includes(project.clusterName))
+      .filter((project) => !clients.length || clients.includes(project.clientName))
+      .map((project) => project.name)
+      .filter(Boolean))].sort(),
+    [allProjects, clusters, clients]
+  );
+
+  // Parent filters must not leave an invisible child selection behind. That
+  // combination used to produce an empty dashboard even though each dropdown
+  // appeared valid on its own.
+  useEffect(() => {
+    const validClients = new Set(clientOptions);
+    setClients((current) => current.filter((name) => validClients.has(name)));
+  }, [clientOptions]);
+
+  useEffect(() => {
+    const validProjects = new Set(projectOptions);
+    setProjectNames((current) => current.filter((name) => validProjects.has(name)));
+  }, [projectOptions]);
+
   const visibleProjects = useMemo(() => {
     const rangeActive = Boolean(range.from || range.to);
     return allProjects.filter((project) => {
@@ -191,6 +224,37 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
       return true;
     });
   }, [allProjects, clusters, clients, projectNames, statuses, risks, range, cyclesByProject]);
+
+  const visibleProjectIds = useMemo(
+    () => new Set(visibleProjects.map((project) => project.id)),
+    [visibleProjects]
+  );
+  const scheduleScope = useMemo(
+    () => (dashboard?.feedbackSchedule || []).filter((item) => visibleProjectIds.has(item.projectId)),
+    [dashboard, visibleProjectIds]
+  );
+  const scheduleTypeOptions = useMemo(
+    () => [...new Set(scheduleScope.map((item) => item.cycleType).filter(Boolean))].sort(),
+    [scheduleScope]
+  );
+  const scheduleStatusOptions = useMemo(
+    () => [...new Set(scheduleScope
+      .filter((item) => !scheduleTypes.length || scheduleTypes.includes(item.cycleType))
+      .map((item) => item.status)
+      .filter(Boolean))].sort(),
+    [scheduleScope, scheduleTypes]
+  );
+
+  useEffect(() => {
+    const validTypes = new Set(scheduleTypeOptions);
+    setScheduleTypes((current) => current.filter((value) => validTypes.has(value)));
+  }, [scheduleTypeOptions]);
+
+  useEffect(() => {
+    const validStatuses = new Set(scheduleStatusOptions);
+    setScheduleStatuses((current) => current.filter((value) => validStatuses.has(value)));
+  }, [scheduleStatusOptions]);
+  const scheduleFiltersActive = Boolean(scheduleTypes.length || scheduleStatuses.length);
 
   // EVERY hook must sit above the early return below. A hook after it runs on
   // the second render but not the first, which is React error #310 and a blank
@@ -621,15 +685,15 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
       <FilterBar onReset={resetFilters} showReset={filtersActive}>
         <MultiSelect
           label="Cluster" allLabel="All clusters" selected={clusters} onChange={setClusters}
-          options={[...new Set(allProjects.map((project) => project.clusterName).filter(Boolean))].sort()}
+          options={clusterOptions}
         />
         <MultiSelect
           label="Client" allLabel="All clients" selected={clients} onChange={setClients}
-          options={[...new Set(allProjects.map((project) => project.clientName).filter(Boolean))].sort()}
+          options={clientOptions}
         />
         <MultiSelect
           label="Project" allLabel="All projects" selected={projectNames} onChange={setProjectNames}
-          options={allProjects.map((project) => project.name).sort()}
+          options={projectOptions}
         />
         <MultiSelect label="Risk" allLabel="All risk" selected={risks} onChange={setRisks} options={RISK_OPTIONS} />
         <MultiSelect label="Status" allLabel="All statuses" selected={statuses} onChange={setStatuses} options={statusOptions} />
@@ -679,7 +743,9 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
 
       {filtersActive && !visibleProjects.length ? (
         <div className="filter-empty-note">
-          No project has a cycle in this range. Clear the dates to see everything again.
+          {range.from || range.to
+            ? "No project has a feedback cycle in this date range and filter combination. Clear a filter or reset the date range."
+            : "No project matches this filter combination. Clear one of the filters or reset them."}
         </div>
       ) : null}
 
@@ -812,7 +878,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
             allLabel="All cycle types"
             selected={scheduleTypes}
             onChange={setScheduleTypes}
-            options={["pulse", "project_end"]}
+            options={scheduleTypeOptions}
             renderOption={(value) => formatCycleType(value)}
           />
           <MultiSelect
@@ -820,9 +886,14 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
             allLabel="All delivery statuses"
             selected={scheduleStatuses}
             onChange={setScheduleStatuses}
-            options={[...new Set((dashboard.feedbackSchedule || []).map((item) => item.status))]}
+            options={scheduleStatusOptions}
             renderOption={scheduleStatusLabel}
           />
+          {scheduleFiltersActive ? (
+            <button type="button" className="filter-reset" onClick={() => { setScheduleTypes([]); setScheduleStatuses([]); }}>
+              Reset schedule filters
+            </button>
+          ) : null}
         </div>
         <div className="schedule-table" role="region" aria-label="Upcoming feedback schedule" tabIndex={0}>
           <div className="schedule-table-head">
