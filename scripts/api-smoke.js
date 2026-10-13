@@ -112,6 +112,7 @@ const store = {
   },
   hasIssueForAnalysis: async () => false,
   hasOpenCycle: async () => false,
+  projectIdsWithCycleType: async () => new Set(),
   createCycle: async (projectKey, options) => {
     if (options.automatic === true && options.cycleType === "pulse" && project.automaticFeedbackEnabled === false) {
       throw new Error("Automatic 30-day feedback is turned off for this project");

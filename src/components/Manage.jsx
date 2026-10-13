@@ -2531,7 +2531,7 @@ export default function Manage({ onReload, currentUser = null }) {
       return;
     }
     const changes = [
-      automaticFeedbackAction !== "unchanged" ? `interval feedback ${automaticFeedbackAction.toUpperCase()}` : null,
+      automaticFeedbackAction !== "unchanged" ? `scheduled feedback ${automaticFeedbackAction.toUpperCase()}` : null,
       automaticQuickCheckinAction !== "unchanged" ? `quick check-ins ${automaticQuickCheckinAction.toUpperCase()}` : null
     ].filter(Boolean).join(" and ");
     if (!window.confirm(`Set ${changes} for ${automationSelectedProjectIds.length} selected project(s)?\n\nExisting cycles, sessions and POC weights will not be changed.`)) return;
@@ -2856,7 +2856,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <nav className="manage-section-nav" aria-label="Manage sections">
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
-        {canManageAutomation ? <button type="button" onClick={() => document.getElementById("manage-automatic-feedback")?.scrollIntoView({ behavior: "smooth" })}>Automatic Feedback</button> : null}
+        {canManageAutomation ? <button type="button" onClick={() => document.getElementById("manage-automatic-feedback")?.scrollIntoView({ behavior: "smooth" })}>Feedback Delivery</button> : null}
         {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-workbook")?.scrollIntoView({ behavior: "smooth" })}>Excel Onboarding</button> : null}
@@ -3088,12 +3088,12 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <Panel
         id="manage-automatic-feedback"
-        title="Automatic Feedback Controls"
+        title="Automatic Feedback Delivery"
         badge={`${bulkAutomationMatchingProjects.length} matching project${bulkAutomationMatchingProjects.length === 1 ? "" : "s"}`}
         className="span-12"
       >
         <p className="form-note">
-          Turn future automatic interval feedback and quick check-ins on or off for many projects together. Preview is required before applying. Manual sends remain available, and existing cycles, sessions, POC status and POC weights are never changed.
+          Turn future automatic scheduled feedback and quick check-ins on or off for many projects together. Preview is required before applying. Manual sends remain available, and existing cycles, sessions, POC status and POC weights are never changed.
         </p>
         <div className="bulk-automation-filter-grid">
           <Field label="Search projects">
@@ -3133,7 +3133,7 @@ export default function Manage({ onReload, currentUser = null }) {
           </Field>
         </div>
         <div className="bulk-automation-action-grid">
-          <Field label="Automatic interval feedback">
+          <Field label="Scheduled feedback cycles">
             <select value={automaticFeedbackAction} onChange={(event) => { setAutomaticFeedbackAction(event.target.value); clearAutomationPreview(); }}>
               <option value="unchanged">No change</option>
               <option value="off">Turn OFF</option>
@@ -3176,7 +3176,7 @@ export default function Manage({ onReload, currentUser = null }) {
               <span>{automationPreview.blockedProjects} already matched or blocked</span>
             </div>
             <div className="bulk-preview-table automation-preview-table">
-              <div className="automation-preview-row head"><span /><span>Project</span><span>Client / Cluster</span><span>Status</span><span>Interval feedback</span><span>Quick check-ins</span><span>Result</span></div>
+              <div className="automation-preview-row head"><span /><span>Project</span><span>Client / Cluster</span><span>Status</span><span>Scheduled feedback</span><span>Quick check-ins</span><span>Result</span></div>
               {automationPreview.projects.map((project) => {
                 const checked = automationSelectedProjectIds.includes(project.projectId);
                 const stateText = (current, next) => `${current ? "ON" : "OFF"}${current === next ? "" : ` → ${next ? "ON" : "OFF"}`}`;

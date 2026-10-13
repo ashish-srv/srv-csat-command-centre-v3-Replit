@@ -3600,7 +3600,9 @@ async function buildBulkAutomationPreview(store, input = {}) {
   const projectEndIds = typeof store.projectIdsWithCycleType === "function"
     ? await store.projectIdsWithCycleType("project_end")
     : [];
-  const projectEndSet = new Set(projectEndIds.map((id) => String(id)));
+  // The production store returns a Set while lightweight test stores may
+  // return an array. Normalize either shape before checking project-end locks.
+  const projectEndSet = new Set(Array.from(projectEndIds || [], (id) => String(id)));
   const foundIds = new Set(projects.map((project) => String(project.id)));
   const rows = projects.map((project) => {
     const current = {
@@ -4397,7 +4399,7 @@ async function handleApiRequest(request) {
       return error(
         409,
         "Recurring feedback is closed for this project",
-        "Project-end feedback has already been sent, so automatic interval feedback and quick check-ins cannot be reactivated."
+        "Project-end feedback has already been sent, so automatic scheduled feedback and quick check-ins cannot be reactivated."
       );
     }
 
