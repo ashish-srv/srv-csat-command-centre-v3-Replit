@@ -52,6 +52,7 @@ export function canOpenManage(user) {
     "manage_pocs",
     "manage_internal_pocs",
     "manage_catalogues",
+    "messaging_controls",
     "bulk_sends",
     "manage_project_users"
   ].some((permission) => hasPermission(user, permission));

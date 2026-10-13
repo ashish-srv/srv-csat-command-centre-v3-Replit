@@ -1877,6 +1877,7 @@ function adminRoutePermission(method, pathname) {
   if (pathname === "/api/project-performance" || /^\/api\/project-performance\//.test(pathname)) return "project_performance";
   if (pathname === "/api/projects" || /^\/api\/(?:projects|sessions|issues)\//.test(pathname)) return "project_workspace";
   if (pathname === "/api/admin/messaging") return "messaging_controls";
+  if (/^\/api\/admin\/project-automation\//.test(pathname)) return "messaging_controls";
   if (/^\/api\/admin\/bulk-feedback\//.test(pathname)) return "bulk_sends";
   if (/^\/api\/admin\/app-users(?:\/|$)/.test(pathname)) return "manage_project_users";
   if (/^\/api\/admin\/(?:performance-standards|service-catalog)(?:\/|$)/.test(pathname)) return "manage_catalogues";
@@ -3582,6 +3583,76 @@ async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null
   return rows;
 }
 
+async function buildBulkAutomationPreview(store, input = {}) {
+  const suppliedFeedback = typeof input.automaticFeedbackEnabled === "boolean";
+  const suppliedQuickCheckin = typeof input.automaticQuickCheckinEnabled === "boolean";
+  if (!suppliedFeedback && !suppliedQuickCheckin) {
+    throw new Error("Choose at least one automatic sending setting to update");
+  }
+
+  const requestedIds = Array.isArray(input.projectIds)
+    ? [...new Set(input.projectIds.map((id) => String(id || "").trim()).filter(Boolean))]
+    : [];
+  if (!requestedIds.length) throw new Error("Select at least one project");
+
+  const requested = new Set(requestedIds);
+  const projects = (await store.listProjects()).filter((project) => requested.has(String(project.id)));
+  const projectEndIds = typeof store.projectIdsWithCycleType === "function"
+    ? await store.projectIdsWithCycleType("project_end")
+    : [];
+  const projectEndSet = new Set(projectEndIds.map((id) => String(id)));
+  const foundIds = new Set(projects.map((project) => String(project.id)));
+  const rows = projects.map((project) => {
+    const current = {
+      automaticFeedbackEnabled: project.automaticFeedbackEnabled !== false,
+      automaticQuickCheckinEnabled: project.automaticQuickCheckinEnabled !== false
+    };
+    const next = {
+      automaticFeedbackEnabled: suppliedFeedback ? input.automaticFeedbackEnabled : current.automaticFeedbackEnabled,
+      automaticQuickCheckinEnabled: suppliedQuickCheckin ? input.automaticQuickCheckinEnabled : current.automaticQuickCheckinEnabled
+    };
+    const reasons = [];
+    const turningRecurringOn = (suppliedFeedback && input.automaticFeedbackEnabled && !current.automaticFeedbackEnabled)
+      || (suppliedQuickCheckin && input.automaticQuickCheckinEnabled && !current.automaticQuickCheckinEnabled);
+    if (turningRecurringOn && (project.endFeedbackRequestedAt || projectEndSet.has(String(project.id)))) {
+      reasons.push("project-end feedback has already been sent; recurring feedback cannot be reactivated");
+    }
+    if (
+      current.automaticFeedbackEnabled === next.automaticFeedbackEnabled
+      && current.automaticQuickCheckinEnabled === next.automaticQuickCheckinEnabled
+    ) reasons.push("already matches the selected settings");
+
+    return {
+      projectId: project.id,
+      projectKey: project.key,
+      projectName: project.name,
+      clientName: project.clientName || "",
+      clusterName: project.clusterName || "",
+      projectStatus: project.activeStatus || "",
+      current,
+      next,
+      eligible: reasons.length === 0,
+      reasons
+    };
+  });
+
+  for (const missingId of requestedIds.filter((id) => !foundIds.has(String(id)))) {
+    rows.push({
+      projectId: missingId,
+      projectKey: "",
+      projectName: "Project not found",
+      clientName: "",
+      clusterName: "",
+      projectStatus: "",
+      current: null,
+      next: null,
+      eligible: false,
+      reasons: ["project no longer exists"]
+    });
+  }
+  return rows;
+}
+
 // ---------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------
@@ -3757,7 +3828,7 @@ async function handleApiRequest(request) {
       const requiredPermission = adminRoutePermission(method, pathname);
       const dashboardForWorkspace = pathname === "/api/dashboard" && hasAppPermission(appAccess, "project_workspace");
       const directoryForManage = (pathname === "/api/admin/directory" || /^\/api\/admin\/clients\/[^/]+$/.test(pathname)) && [
-        "manage_records", "manage_pocs", "manage_internal_pocs", "manage_catalogues", "bulk_sends", "manage_project_users"
+        "manage_records", "manage_pocs", "manage_internal_pocs", "manage_catalogues", "messaging_controls", "bulk_sends", "manage_project_users"
       ].some((permission) => hasAppPermission(appAccess, permission));
       if (requiredPermission && !hasAppPermission(appAccess, requiredPermission) && !directoryForManage && !dashboardForWorkspace) {
         return error(403, "This feature is turned off for your Admin account");
@@ -5735,6 +5806,85 @@ async function handleApiRequest(request) {
       });
     }
     return json(200, { messaging });
+  }
+
+  if (method === "POST" && pathname === "/api/admin/project-automation/preview") {
+    try {
+      const projects = await buildBulkAutomationPreview(store, body);
+      return json(200, {
+        projects,
+        eligibleProjects: projects.filter((project) => project.eligible).length,
+        blockedProjects: projects.filter((project) => !project.eligible).length
+      });
+    } catch (previewError) {
+      return error(400, previewError.message);
+    }
+  }
+
+  if (method === "PUT" && pathname === "/api/admin/project-automation/bulk") {
+    let preview;
+    try {
+      preview = await buildBulkAutomationPreview(store, body);
+    } catch (previewError) {
+      return error(400, previewError.message);
+    }
+
+    const updated = [];
+    const skipped = preview.filter((project) => !project.eligible);
+    for (const project of preview.filter((item) => item.eligible)) {
+      try {
+        const input = {};
+        if (typeof body.automaticFeedbackEnabled === "boolean") {
+          input.automaticFeedbackEnabled = body.automaticFeedbackEnabled;
+        }
+        if (typeof body.automaticQuickCheckinEnabled === "boolean") {
+          input.automaticQuickCheckinEnabled = body.automaticQuickCheckinEnabled;
+        }
+        const saved = await store.updateProjectAutomationSettings(project.projectId, input);
+        if (!saved) {
+          skipped.push({ ...project, eligible: false, reasons: ["project no longer exists"] });
+          continue;
+        }
+        updated.push({
+          ...project,
+          automaticFeedbackEnabled: saved.automaticFeedbackEnabled !== false,
+          automaticQuickCheckinEnabled: saved.automaticQuickCheckinEnabled !== false,
+          automaticQuickCheckinResumeAt: saved.automaticQuickCheckinResumeAt || null,
+          nextCycleDueAt: saved.nextCycleDueAt || null
+        });
+      } catch (updateError) {
+        skipped.push({ ...project, eligible: false, reasons: [updateError.message] });
+      }
+    }
+
+    if (updated.length && typeof store.recordAutomationEvent === "function") {
+      await store.recordAutomationEvent({
+        eventType: "project_automatic_sending_bulk_changed",
+        status: skipped.length ? "partial" : "recorded",
+        webhookUrlConfigured: false,
+        sentAt: new Date().toISOString(),
+        payload: {
+          projectIds: updated.map((project) => project.projectId),
+          projectCount: updated.length,
+          automaticFeedbackEnabled: typeof body.automaticFeedbackEnabled === "boolean"
+            ? body.automaticFeedbackEnabled
+            : "unchanged",
+          automaticQuickCheckinEnabled: typeof body.automaticQuickCheckinEnabled === "boolean"
+            ? body.automaticQuickCheckinEnabled
+            : "unchanged",
+          existingCyclesSessionsAndPocWeightsChanged: false,
+          changedBy: appAccess?.email || appAccess?.name || "Password Super Admin"
+        }
+      });
+    }
+
+    return json(200, {
+      updated,
+      skipped,
+      updatedProjects: updated.length,
+      skippedProjects: skipped.length,
+      message: "Automatic sending settings updated. Existing cycles, sessions and POC weights were not changed."
+    });
   }
 
   if (method === "POST" && pathname === "/api/admin/bulk-feedback/preview") {

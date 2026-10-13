@@ -3513,6 +3513,58 @@ async function scenario(name, fn) {
   process.env.ADMIN_PIN = "1234";
   const PIN = { "x-admin-pin": "1234" };
 
+  await scenario("bulk automatic feedback controls preview and update selected projects safely", async () => {
+    const previous = {
+      feedback: project.automaticFeedbackEnabled,
+      quick: project.automaticQuickCheckinEnabled,
+      quickResumeAt: project.automaticQuickCheckinResumeAt,
+      nextDue: project.nextCycleDueAt
+    };
+    const pocWeight = poc.weightPercentage;
+    const sessionBefore = store._session;
+    try {
+      const previewResponse = await req("POST", "/api/admin/project-automation/preview", {
+        projectIds: [project.id],
+        automaticFeedbackEnabled: false,
+        automaticQuickCheckinEnabled: false
+      }, PIN);
+      assert.strictEqual(previewResponse.statusCode, 200, previewResponse.body);
+      const preview = JSON.parse(previewResponse.body);
+      assert.strictEqual(preview.eligibleProjects, 1);
+      assert.strictEqual(preview.projects[0].current.automaticFeedbackEnabled, true);
+      assert.strictEqual(preview.projects[0].next.automaticFeedbackEnabled, false);
+
+      const updateResponse = await req("PUT", "/api/admin/project-automation/bulk", {
+        projectIds: [project.id],
+        automaticFeedbackEnabled: false,
+        automaticQuickCheckinEnabled: false
+      }, PIN);
+      assert.strictEqual(updateResponse.statusCode, 200, updateResponse.body);
+      const update = JSON.parse(updateResponse.body);
+      assert.strictEqual(update.updatedProjects, 1);
+      assert.strictEqual(project.automaticFeedbackEnabled, false);
+      assert.strictEqual(project.automaticQuickCheckinEnabled, false);
+      assert.strictEqual(poc.weightPercentage, pocWeight, "bulk controls must preserve POC influence");
+      assert.strictEqual(store._session, sessionBefore, "bulk controls must preserve open sessions");
+      assert.ok(calls.automation.some((event) => event.eventType === "project_automatic_sending_bulk_changed"));
+
+      const duplicatePreviewResponse = await req("POST", "/api/admin/project-automation/preview", {
+        projectIds: [project.id],
+        automaticFeedbackEnabled: false,
+        automaticQuickCheckinEnabled: false
+      }, PIN);
+      const duplicatePreview = JSON.parse(duplicatePreviewResponse.body);
+      assert.strictEqual(duplicatePreview.eligibleProjects, 0);
+      assert.match(duplicatePreview.projects[0].reasons[0], /already matches/i);
+    } finally {
+      project.automaticFeedbackEnabled = previous.feedback;
+      project.automaticQuickCheckinEnabled = previous.quick;
+      project.automaticQuickCheckinResumeAt = previous.quickResumeAt;
+      project.nextCycleDueAt = previous.nextDue;
+      store._session = sessionBefore;
+    }
+  });
+
   await scenario("admin write without the PIN is rejected", async () => {
     const res = await req("POST", "/api/admin/projects", { clientId: "cl_1", key: "new-one", name: "New" });
     assert.strictEqual(res.statusCode, 403);

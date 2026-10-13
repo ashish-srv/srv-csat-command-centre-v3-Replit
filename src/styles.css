@@ -4135,6 +4135,75 @@ button.metric-card {
   margin-bottom: 12px;
 }
 
+.bulk-automation-filter-grid,
+.bulk-automation-action-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 12px;
+  align-items: end;
+  margin-top: 14px;
+}
+
+.bulk-automation-action-grid {
+  grid-template-columns: repeat(2, minmax(220px, 320px)) minmax(260px, 1fr);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.bulk-automation-presets,
+.bulk-automation-preview-actions {
+  align-items: center;
+}
+
+.bulk-automation-preview-actions {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.automation-preview-table {
+  overflow-x: auto;
+}
+
+.automation-preview-row {
+  display: grid;
+  grid-template-columns: 24px minmax(180px, 1.25fr) minmax(170px, 1fr) minmax(90px, .55fr) minmax(135px, .75fr) minmax(135px, .75fr) minmax(180px, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 1050px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.automation-preview-row.head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.automation-preview-row > span { min-width: 0; overflow-wrap: anywhere; }
+.automation-preview-row span strong { display: block; color: var(--ink); }
+.automation-preview-row span small { display: block; margin-top: 2px; color: var(--muted); }
+.automation-preview-row.blocked { background: rgba(181, 61, 50, 0.035); }
+
+.automation-state {
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.automation-state.on { color: var(--green); background: var(--green-soft); }
+.automation-state.off { color: var(--red); background: var(--red-soft); }
+
 .bulk-send-controls { grid-template-columns: minmax(200px, 320px) auto; justify-content: start; }
 .poc-control-actions { margin-bottom: 8px; }
 
@@ -4199,7 +4268,13 @@ button.metric-card {
 @media (max-width: 900px) {
   .poc-control-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bulk-send-controls { grid-template-columns: 1fr; }
+  .bulk-automation-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bulk-automation-action-grid { grid-template-columns: 1fr; }
   .messaging-paused-banner { align-items: flex-start; flex-direction: column; }
+}
+
+@media (max-width: 600px) {
+  .bulk-automation-filter-grid { grid-template-columns: 1fr; }
 }
 
 .setup-steps .done {

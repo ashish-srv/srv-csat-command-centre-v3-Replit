@@ -1304,6 +1304,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const canManagePocs = hasPermission(currentUser, "manage_pocs");
   const canManageInternalPocs = hasPermission(currentUser, "manage_internal_pocs");
   const canManageCatalogues = hasPermission(currentUser, "manage_catalogues");
+  const canManageAutomation = hasPermission(currentUser, "messaging_controls");
   const canBulkSend = hasPermission(currentUser, "bulk_sends");
   const canManageUsers = hasPermission(currentUser, "manage_project_users");
   const isSuperAdmin = currentUser?.role === "super_admin";
@@ -1334,6 +1335,15 @@ export default function Manage({ onReload, currentUser = null }) {
   const [bulkPreview, setBulkPreview] = useState(null);
   const [bulkSelectedProjectIds, setBulkSelectedProjectIds] = useState([]);
   const [bulkSending, setBulkSending] = useState(false);
+  const [automationClusterId, setAutomationClusterId] = useState("");
+  const [automationClientId, setAutomationClientId] = useState("");
+  const [automationProjectStatus, setAutomationProjectStatus] = useState("active");
+  const [automationProjectSearch, setAutomationProjectSearch] = useState("");
+  const [automaticFeedbackAction, setAutomaticFeedbackAction] = useState("unchanged");
+  const [automaticQuickCheckinAction, setAutomaticQuickCheckinAction] = useState("unchanged");
+  const [automationPreview, setAutomationPreview] = useState(null);
+  const [automationSelectedProjectIds, setAutomationSelectedProjectIds] = useState([]);
+  const [automationSaving, setAutomationSaving] = useState(false);
   const [setupForm, setSetupForm] = useState(null);
   const [setupCopySource, setSetupCopySource] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -2454,6 +2464,96 @@ export default function Manage({ onReload, currentUser = null }) {
     }
   }
 
+  function automationMatchingProjects() {
+    const all = directory?.projects || [];
+    const allClients = directory?.clients || [];
+    const allClusters = directory?.clusters || [];
+    const clientMap = new Map(allClients.map((client) => [client.id, client]));
+    const clusterMap = new Map(allClusters.map((cluster) => [cluster.id, cluster]));
+    const needle = automationProjectSearch.trim().toLowerCase();
+    return all.filter((project) => {
+      const client = clientMap.get(project.clientId);
+      if (automationClusterId && client?.clusterId !== automationClusterId) return false;
+      if (automationClientId && project.clientId !== automationClientId) return false;
+      if (automationProjectStatus && project.activeStatus !== automationProjectStatus) return false;
+      if (!needle) return true;
+      const cluster = clusterMap.get(client?.clusterId);
+      return [project.name, project.key, project.activeStatus, client?.name, cluster?.name]
+        .some((value) => String(value || "").toLowerCase().includes(needle));
+    });
+  }
+
+  function bulkAutomationPayload(projectIds) {
+    const payload = { projectIds };
+    if (automaticFeedbackAction !== "unchanged") {
+      payload.automaticFeedbackEnabled = automaticFeedbackAction === "on";
+    }
+    if (automaticQuickCheckinAction !== "unchanged") {
+      payload.automaticQuickCheckinEnabled = automaticQuickCheckinAction === "on";
+    }
+    return payload;
+  }
+
+  function clearAutomationPreview() {
+    setAutomationPreview(null);
+    setAutomationSelectedProjectIds([]);
+  }
+
+  async function previewBulkAutomation() {
+    if (automaticFeedbackAction === "unchanged" && automaticQuickCheckinAction === "unchanged") {
+      showToast("Choose Turn ON or Turn OFF for at least one automatic feedback type.");
+      return;
+    }
+    const matchingProjects = automationMatchingProjects();
+    if (!matchingProjects.length) {
+      showToast("No projects match these filters.");
+      return;
+    }
+    setAutomationSaving(true);
+    try {
+      const preview = await apiWrite(
+        "/api/admin/project-automation/preview",
+        bulkAutomationPayload(matchingProjects.map((project) => project.id)),
+        "POST"
+      );
+      setAutomationPreview(preview);
+      setAutomationSelectedProjectIds(preview.projects.filter((project) => project.eligible).map((project) => project.projectId));
+    } catch (previewError) {
+      showToast(previewError.message);
+    } finally {
+      setAutomationSaving(false);
+    }
+  }
+
+  async function applyBulkAutomation() {
+    if (!automationSelectedProjectIds.length) {
+      showToast("Select at least one eligible project from the preview.");
+      return;
+    }
+    const changes = [
+      automaticFeedbackAction !== "unchanged" ? `interval feedback ${automaticFeedbackAction.toUpperCase()}` : null,
+      automaticQuickCheckinAction !== "unchanged" ? `quick check-ins ${automaticQuickCheckinAction.toUpperCase()}` : null
+    ].filter(Boolean).join(" and ");
+    if (!window.confirm(`Set ${changes} for ${automationSelectedProjectIds.length} selected project(s)?\n\nExisting cycles, sessions and POC weights will not be changed.`)) return;
+
+    setAutomationSaving(true);
+    try {
+      const result = await apiWrite(
+        "/api/admin/project-automation/bulk",
+        bulkAutomationPayload(automationSelectedProjectIds),
+        "PUT"
+      );
+      showToast(`${result.updatedProjects} project${result.updatedProjects === 1 ? "" : "s"} updated${result.skippedProjects ? ` · ${result.skippedProjects} skipped` : ""}.`);
+      clearAutomationPreview();
+      await loadAll(clientId);
+      onReload();
+    } catch (updateError) {
+      showToast(updateError.message);
+    } finally {
+      setAutomationSaving(false);
+    }
+  }
+
   async function previewBulkSend() {
     setBulkSending(true);
     try {
@@ -2575,6 +2675,10 @@ export default function Manage({ onReload, currentUser = null }) {
   const projects = detail?.projects || [];
   const allProjects = directory?.projects || [];
   const clientsById = new Map(clients.map((client) => [client.id, client]));
+  const automationClients = automationClusterId
+    ? clients.filter((client) => client.clusterId === automationClusterId)
+    : clients;
+  const bulkAutomationMatchingProjects = automationMatchingProjects();
   const visibleProjects = allProjects.filter((project) => {
     if (clientId) return project.clientId === clientId;
     if (!clusterFilterId) return true;
@@ -2752,6 +2856,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <nav className="manage-section-nav" aria-label="Manage sections">
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
+        {canManageAutomation ? <button type="button" onClick={() => document.getElementById("manage-automatic-feedback")?.scrollIntoView({ behavior: "smooth" })}>Automatic Feedback</button> : null}
         {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-workbook")?.scrollIntoView({ behavior: "smooth" })}>Excel Onboarding</button> : null}
@@ -2979,6 +3084,124 @@ export default function Manage({ onReload, currentUser = null }) {
         className="span-12"
       >
         <PocControlCentre rows={pocControlRows} levels={levels} onChange={setPocControlRows} onSave={savePocControl} saving={saving} />
+      </Panel>
+
+      <Panel
+        id="manage-automatic-feedback"
+        title="Automatic Feedback Controls"
+        badge={`${bulkAutomationMatchingProjects.length} matching project${bulkAutomationMatchingProjects.length === 1 ? "" : "s"}`}
+        className="span-12"
+      >
+        <p className="form-note">
+          Turn future automatic interval feedback and quick check-ins on or off for many projects together. Preview is required before applying. Manual sends remain available, and existing cycles, sessions, POC status and POC weights are never changed.
+        </p>
+        <div className="bulk-automation-filter-grid">
+          <Field label="Search projects">
+            <input
+              value={automationProjectSearch}
+              onChange={(event) => { setAutomationProjectSearch(event.target.value); clearAutomationPreview(); }}
+              placeholder="Project, client, cluster or status"
+            />
+          </Field>
+          <SingleSelect
+            compact
+            label="Cluster"
+            value={automationClusterId}
+            placeholder="All clusters"
+            options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
+            onChange={(value) => {
+              setAutomationClusterId(value);
+              if (automationClientId && clientsById.get(automationClientId)?.clusterId !== value) setAutomationClientId("");
+              clearAutomationPreview();
+            }}
+          />
+          <SingleSelect
+            compact
+            label="Client"
+            value={automationClientId}
+            placeholder="All clients"
+            options={automationClients.map((client) => ({ value: client.id, label: client.name }))}
+            onChange={(value) => { setAutomationClientId(value); clearAutomationPreview(); }}
+          />
+          <Field label="Project status">
+            <select value={automationProjectStatus} onChange={(event) => { setAutomationProjectStatus(event.target.value); clearAutomationPreview(); }}>
+              <option value="">All statuses</option>
+              <option value="active">Active</option>
+              <option value="paused">Paused</option>
+              <option value="closed">Closed</option>
+            </select>
+          </Field>
+        </div>
+        <div className="bulk-automation-action-grid">
+          <Field label="Automatic interval feedback">
+            <select value={automaticFeedbackAction} onChange={(event) => { setAutomaticFeedbackAction(event.target.value); clearAutomationPreview(); }}>
+              <option value="unchanged">No change</option>
+              <option value="off">Turn OFF</option>
+              <option value="on">Turn ON</option>
+            </select>
+          </Field>
+          <Field label="Automatic quick check-ins">
+            <select value={automaticQuickCheckinAction} onChange={(event) => { setAutomaticQuickCheckinAction(event.target.value); clearAutomationPreview(); }}>
+              <option value="unchanged">No change</option>
+              <option value="off">Turn OFF</option>
+              <option value="on">Turn ON</option>
+            </select>
+          </Field>
+          <div className="button-row bulk-automation-presets">
+            <Button onClick={() => { setAutomaticFeedbackAction("off"); setAutomaticQuickCheckinAction("off"); clearAutomationPreview(); }}>Prepare both OFF</Button>
+            <Button onClick={() => { setAutomaticFeedbackAction("on"); setAutomaticQuickCheckinAction("on"); clearAutomationPreview(); }}>Prepare both ON</Button>
+          </div>
+        </div>
+        <div className="button-row bulk-automation-preview-actions">
+          <Button onClick={() => {
+            setAutomationClusterId("");
+            setAutomationClientId("");
+            setAutomationProjectStatus("active");
+            setAutomationProjectSearch("");
+            clearAutomationPreview();
+          }}>Reset filters</Button>
+          <Button
+            variant="primary"
+            onClick={previewBulkAutomation}
+            disabled={automationSaving || !bulkAutomationMatchingProjects.length || (automaticFeedbackAction === "unchanged" && automaticQuickCheckinAction === "unchanged")}
+          >
+            {automationSaving ? "Checking…" : `Preview ${bulkAutomationMatchingProjects.length} matching project${bulkAutomationMatchingProjects.length === 1 ? "" : "s"}`}
+          </Button>
+        </div>
+        {automationPreview ? (
+          <>
+            <div className="bulk-preview-summary">
+              <strong>{automationSelectedProjectIds.length} selected projects</strong>
+              <span>{automationPreview.eligibleProjects} ready to update</span>
+              <span>{automationPreview.blockedProjects} already matched or blocked</span>
+            </div>
+            <div className="bulk-preview-table automation-preview-table">
+              <div className="automation-preview-row head"><span /><span>Project</span><span>Client / Cluster</span><span>Status</span><span>Interval feedback</span><span>Quick check-ins</span><span>Result</span></div>
+              {automationPreview.projects.map((project) => {
+                const checked = automationSelectedProjectIds.includes(project.projectId);
+                const stateText = (current, next) => `${current ? "ON" : "OFF"}${current === next ? "" : ` → ${next ? "ON" : "OFF"}`}`;
+                return (
+                  <div className={`automation-preview-row ${project.eligible ? "" : "blocked"}`} key={project.projectId}>
+                    <input type="checkbox" checked={checked} disabled={!project.eligible} onChange={() => setAutomationSelectedProjectIds(checked ? automationSelectedProjectIds.filter((id) => id !== project.projectId) : [...automationSelectedProjectIds, project.projectId])} aria-label={`Select ${project.projectName}`} />
+                    <span><strong>{project.projectName}</strong><small>{project.projectKey}</small></span>
+                    <span><strong>{project.clientName || "Client not set"}</strong><small>{project.clusterName || "Cluster not set"}</small></span>
+                    <span>{project.projectStatus || "Not set"}</span>
+                    <span className={project.next?.automaticFeedbackEnabled ? "automation-state on" : "automation-state off"}>{project.current ? stateText(project.current.automaticFeedbackEnabled, project.next.automaticFeedbackEnabled) : "--"}</span>
+                    <span className={project.next?.automaticQuickCheckinEnabled ? "automation-state on" : "automation-state off"}>{project.current ? stateText(project.current.automaticQuickCheckinEnabled, project.next.automaticQuickCheckinEnabled) : "--"}</span>
+                    <span className={project.eligible ? "success" : "missing"}>{project.eligible ? "Ready" : project.reasons.join(" · ")}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="button-row section-bottom-actions">
+              <Button onClick={() => setAutomationSelectedProjectIds(automationPreview.projects.filter((project) => project.eligible).map((project) => project.projectId))}>Select all eligible</Button>
+              <Button onClick={() => setAutomationSelectedProjectIds([])}>Deselect all</Button>
+              <Button variant="primary" onClick={applyBulkAutomation} disabled={automationSaving || !automationSelectedProjectIds.length}>
+                {automationSaving ? "Applying…" : `Apply to ${automationSelectedProjectIds.length} selected project${automationSelectedProjectIds.length === 1 ? "" : "s"}`}
+              </Button>
+            </div>
+          </>
+        ) : null}
       </Panel>
 
       <Panel
