@@ -72,6 +72,14 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject }) {
     stopped: "Stopped",
     awaiting: "Awaiting first reply"
   };
+  const activityStatusLabel = (item) => {
+    if (item.cycleType !== "quick_checkin") return activityStatus[item.responseStatus] || item.responseStatus;
+    if (item.responseStatus === "completed" && item.quickCheckinOutcome === "no_response") return "Closed without response";
+    if (item.responseStatus === "completed" && item.quickCheckinOutcome === "awaiting_details_expired") return "Closed without details";
+    if (item.quickCheckinState === "quick_checkin_window") return "Quick check-in response received";
+    if (item.quickCheckinState === "quick_checkin_detail") return "Waiting for feedback details";
+    return activityStatus[item.responseStatus] || "Quick check-in";
+  };
 
   if (collapsed) {
     return (
@@ -141,7 +149,7 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject }) {
           })}
         >
           <strong>{item.pocName}</strong>
-          <span>{item.projectName} · {activityStatus[item.responseStatus] || item.responseStatus}</span>
+          <span>{item.projectName} · {activityStatusLabel(item)}</span>
           <small>{formatDateTime(item.latestClientReplyAt || item.lastClientResponseAt)}</small>
         </button>
       ))}

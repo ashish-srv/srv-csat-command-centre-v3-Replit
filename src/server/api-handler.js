@@ -3519,7 +3519,10 @@ async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clien
 
 async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null) {
   const projects = await store.listProjects();
-  const requested = Array.isArray(requestedProjectIds) && requestedProjectIds.length
+  // `null` means no caller scope was supplied. An explicitly supplied empty
+  // array means the active UI scope contains no projects and must return none,
+  // never fall back to every project in the database.
+  const requested = Array.isArray(requestedProjectIds)
     ? new Set(requestedProjectIds.map((id) => String(id)))
     : null;
   const reservedPhones = new Map();
@@ -5543,7 +5546,7 @@ async function handleApiRequest(request) {
         .some((permission) => hasAppPermission(appAccess, permission));
     if (userManagementOnly) {
       return json(200, {
-        clusters: [], clients: [], projects: [], clientPocs: [], pocLevels: [], departments: [], subDepartments: [], serviceCatalog: [],
+        clusters: [], clients: [], projects: [], clientPocs: [], projectServices: [], pocLevels: [], departments: [], subDepartments: [], serviceCatalog: [],
         internalPocs: (directory.internalPocs || []).map((person) => ({
           id: person.id,
           name: person.name,
@@ -6421,10 +6424,11 @@ async function handleApiRequest(request) {
         return error(400, `${current.name}: active influence must be more than 0% and no more than 100%`);
       }
       const levelId = String(item.levelId || current.levelId || "").trim();
+      const salutation = String(item.salutation ?? current.salutation ?? current.name ?? "").trim();
       if (active && (!levelId || (levels && !levels.has(levelId)))) {
         return error(400, `${current.name}: select a Normal or Important tag before activation`);
       }
-      prepared.push({ current, active, weightPercentage, levelId });
+      prepared.push({ current, active, weightPercentage, levelId, salutation });
       if (!currentByProject.has(current.projectId)) {
         currentByProject.set(current.projectId, await store.pocsForProject(current.projectId, { activeOnly: false }));
       }
@@ -6447,6 +6451,7 @@ async function handleApiRequest(request) {
     const pocs = [];
     for (const item of prepared) {
       pocs.push(await store.updateClientPoc(item.current.id, {
+        salutation: item.salutation || null,
         active: item.active,
         weightPercentage: item.weightPercentage,
         levelId: item.levelId || null

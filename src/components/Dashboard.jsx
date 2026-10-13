@@ -44,6 +44,10 @@ function responseLabel(value) {
   return RESPONSE_LABELS[value] || "Awaiting First Reply";
 }
 
+function responseFilterLabel(value) {
+  return value === "partial" ? "Responded / Partial" : responseLabel(value);
+}
+
 function responseTone(value) {
   if (value === "completed") return "strong";
   if (value === "partial") return "watch";
@@ -51,7 +55,37 @@ function responseTone(value) {
   return "weak";
 }
 
+function responseDisplayLabel(session, status = session.responseStatus) {
+  if (session.cycleType !== "quick_checkin") return responseLabel(status);
+  if (status === "stopped") return "Stopped";
+  if (status === "completed") {
+    if (session.quickCheckinOutcome === "no_response") return "Closed · No Response";
+    if (session.quickCheckinOutcome === "awaiting_details_expired") return "Closed · No Details";
+    return "Completed";
+  }
+  if (session.quickCheckinState === "quick_checkin_detail") return "Awaiting Feedback Details";
+  if (session.quickCheckinState === "quick_checkin_window") return "Response Received";
+  return "Awaiting First Reply";
+}
+
 function responseLifecycle(session) {
+  if (session.cycleType === "quick_checkin") {
+    if (session.responseStatus === "stopped") {
+      return session.lastClientResponseAt ? "Stopped · response preserved" : "Stopped · no response received";
+    }
+    if (session.responseStatus === "completed") {
+      if (session.quickCheckinOutcome === "no_response") return "Closed without a response";
+      if (session.quickCheckinOutcome === "awaiting_details_expired") return "Closed · feedback details not received";
+      return "Quick check-in response window closed";
+    }
+    if (session.quickCheckinState === "quick_checkin_detail") {
+      return "Waiting for feedback details";
+    }
+    if (session.quickCheckinState === "quick_checkin_window") {
+      return `Response received${session.reminderDueAt ? ` · window closes ${formatDateTime(session.reminderDueAt)}` : ""}`;
+    }
+    return "Waiting for quick check-in response";
+  }
   if (session.responseStatus === "stopped") {
     return session.lastClientResponseAt ? "Stopped · feedback preserved" : "Stopped · no response received";
   }
@@ -75,15 +109,16 @@ function riskLabel(project, cycles) {
 function ProjectRow({ project, cycles, sessions, expanded, onToggle, onOpenProject }) {
   const risk = riskLabel(project, cycles);
   const latest = cycles[0] || null;
-  const visibleCycleIds = new Set(cycles.map((cycle) => cycle.id));
   const cycleById = new Map(cycles.map((cycle) => [cycle.id, cycle]));
-  const pocRows = sessions.filter((session) => visibleCycleIds.has(session.cycleId));
+  // `sessions` has already passed the dashboard filters. It intentionally also
+  // contains quick check-ins, while `cycles` remains rating-only for CSAT KPIs.
+  const pocRows = sessions;
 
   return (
     <>
       <div className={`ptable-row ${riskClass(risk)}`}>
         <button type="button" className="ptable-expand" onClick={onToggle} aria-expanded={expanded} aria-label={expanded ? "Hide POC sessions" : "Show POC sessions"}>
-          {cycles.length ? (expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />) : null}
+          {cycles.length || pocRows.length ? (expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />) : null}
         </button>
         <div className="ptable-name">
           <strong>{project.name}</strong>
@@ -109,11 +144,11 @@ function ProjectRow({ project, cycles, sessions, expanded, onToggle, onOpenProje
         <div key={session.id} className={`ptable-subrow poc-session-subrow ${responseTone(status)}`}>
           <span />
           <span className="subrow-label">{session.pocName || "POC"}</span>
-          <span><StatusPill value={responseLabel(status)} tone={responseTone(status)} /></span>
-          <span>{cycle ? formatCycleType(cycle.cycleType, project.feedbackIntervalDays) : "Feedback cycle"}</span>
+          <span><StatusPill value={responseDisplayLabel(session, status)} tone={responseTone(status)} /></span>
+          <span>{formatCycleType(cycle?.cycleType || session.cycleType, project.feedbackIntervalDays)}</span>
           <span>{formatDate(session.startedAt || session.cycleStartedAt)}</span>
           <span>{session.closedAt ? formatDate(session.closedAt) : "Open"}</span>
-          <span>{Number(session.reminderCount) || 0} / 3 reminders</span>
+          <span>{session.cycleType === "quick_checkin" ? "Quick check-in" : `${Number(session.reminderCount) || 0} / 3 reminders`}</span>
           <b className={scoreClass(session.csatScore)}>{formatScore(session.csatScore)}</b>
           <span className="poc-session-lifecycle">{responseLifecycle(session)}</span>
           <button type="button" className="row-link" onClick={() => onOpenProject(project.key)}>Open</button>
@@ -136,6 +171,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
   const [range, setRange] = useState({ from: "", to: "", basis: "started" });
   const [expanded, setExpanded] = useState({});
   const [responseFilter, setResponseFilter] = useState("all");
+  const [responseCycleScope, setResponseCycleScope] = useState("all");
   const [scheduleTypes, setScheduleTypes] = useState([]);
   const [scheduleStatuses, setScheduleStatuses] = useState([]);
   const [messagingPrompt, setMessagingPrompt] = useState(false);
@@ -146,6 +182,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
 
   const allProjects = dashboard?.projects || [];
   const allCycles = dashboard?.cycles || [];
+  const allResponseSessions = dashboard?.responseTracker || dashboard?.responseQueue || [];
   const messagingEnabled = dashboard?.messaging?.enabled !== false;
   const canControlMessaging = hasPermission(currentUser, "messaging_controls");
 
@@ -173,6 +210,15 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
     }
     return map;
   }, [allCycles, range]);
+
+  const responseSessionProjectIdsInRange = useMemo(() => new Set(
+    allResponseSessions
+      .filter((session) => cycleInRange({
+        startedAt: session.cycleStartedAt || session.startedAt,
+        closedAt: session.cycleClosedAt || session.closedAt
+      }, range))
+      .map((session) => session.projectId)
+  ), [allResponseSessions, range]);
 
   const statusOptions = useMemo(
     () => [...new Set(allProjects.map((project) => project.activeStatus).filter(Boolean))],
@@ -220,11 +266,14 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
       if (projectNames.length && !projectNames.includes(project.name)) return false;
       if (statuses.length && !statuses.includes(project.activeStatus)) return false;
       if (risks.length && !risks.includes(riskLabel(project, cyclesByProject.get(project.id) || []))) return false;
-      // With a range set, a project only counts if it has a cycle inside it.
-      if (rangeActive && !(cyclesByProject.get(project.id) || []).length) return false;
+      // Quick check-ins are excluded from rating-based `cycles`, but they are
+      // still real operational activity and must keep their project visible.
+      if (rangeActive
+        && !(cyclesByProject.get(project.id) || []).length
+        && !responseSessionProjectIdsInRange.has(project.id)) return false;
       return true;
     });
-  }, [allProjects, clusters, clients, projectNames, statuses, risks, range, cyclesByProject]);
+  }, [allProjects, clusters, clients, projectNames, statuses, risks, range, cyclesByProject, responseSessionProjectIdsInRange]);
 
   const visibleProjectIds = useMemo(
     () => new Set(visibleProjects.map((project) => project.id)),
@@ -309,7 +358,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
   const openCycles = (dashboard.openCycles || [])
     .filter((cycle) => visibleIds.has(cycle.projectId))
     .filter((cycle) => cycleInRange(cycle, range));
-  const responseTracker = (dashboard.responseTracker || dashboard.responseQueue || [])
+  const responseTracker = allResponseSessions
     .filter((session) => visibleIds.has(session.projectId))
     .filter((session) => cycleInRange({
       startedAt: session.cycleStartedAt || session.startedAt,
@@ -335,9 +384,12 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
     counts[key] = (counts[key] || 0) + 1;
     return counts;
   }, { awaiting: 0, partial: 0, completed: 0, stopped: 0 });
+  const scopedResponseTracker = responseCycleScope === "rating"
+    ? responseTracker.filter((session) => session.cycleType !== "quick_checkin")
+    : responseTracker;
   const filteredResponseTracker = responseFilter === "all"
-    ? responseTracker
-    : responseTracker.filter((session) => session.responseStatus === responseFilter);
+    ? scopedResponseTracker
+    : scopedResponseTracker.filter((session) => session.responseStatus === responseFilter);
 
   const statusIsDefault = statuses.length === 1 && statuses[0] === "active";
   const filtersActive = Boolean(
@@ -350,8 +402,9 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
     setRange({ from: "", to: "", basis: "started" });
   }
 
-  function showResponses(filter = "all") {
+  function showResponses(filter = "all", cycleScope = "all") {
     setResponseFilter(filter);
+    setResponseCycleScope(cycleScope);
     window.setTimeout(() => {
       document.getElementById("response-tracker")?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 0);
@@ -423,7 +476,10 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
     });
 
     const filterText = (values, fallback = "All") => values.length ? values.join(", ") : fallback;
-    const selectedResponseLabel = responseFilter === "all" ? "All responses" : responseLabel(responseFilter);
+    const selectedResponseLabel = [
+      responseCycleScope === "rating" ? "Rating feedback cycles" : "All cycle types",
+      responseFilter === "all" ? "All responses" : responseFilterLabel(responseFilter)
+    ].join(" · ");
     return {
       title: "CSAT dashboard report",
       subtitle: "Filtered client, project, POC and service results from the CSAT Command Centre",
@@ -442,7 +498,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
       metrics: [
         { label: "Projects", value: visibleProjects.length },
         { label: "Average CSAT", value: formatScore(avgCsat), detail: `${scored.length} rated projects` },
-        { label: "Cycles completed", value: completedCycles.length },
+        { label: "Rating cycles completed", value: completedCycles.length },
         { label: "At risk", value: atRisk },
         { label: "POC sessions", value: filteredResponseTracker.length },
         { label: "Open issues", value: openIssues.length }
@@ -457,7 +513,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
             { key: "projects", label: "Projects", width: 12 },
             { key: "ratedProjects", label: "Rated projects", width: 14 },
             { key: "avgCsat", label: "Average CSAT", width: 14, numberFormat: "0.0" },
-            { key: "cycles", label: "Cycles", width: 10 },
+            { key: "cycles", label: "Rating cycles", width: 14 },
             { key: "openIssues", label: "Open issues", width: 12 },
             { key: "atRisk", label: "At risk", width: 10 }
           ],
@@ -472,7 +528,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
             { key: "client", label: "Client", width: 24 },
             { key: "project", label: "Project", width: 28 },
             { key: "status", label: "Status", width: 12 },
-            { key: "cycles", label: "Cycles", width: 10 },
+            { key: "cycles", label: "Rating cycles", width: 14 },
             { key: "latestCycle", label: "Latest cycle", width: 18 },
             { key: "latestStarted", label: "Latest started", width: 14 },
             { key: "csat", label: "CSAT", width: 10, numberFormat: "0.0" },
@@ -516,7 +572,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
               poc: session.pocName || "--",
               cycle: formatCycleType(session.cycleType, project?.feedbackIntervalDays),
               started: formatDateTime(session.cycleStartedAt || session.startedAt),
-              response: responseLabel(session.responseStatus),
+              response: responseDisplayLabel(session),
               reminders: Number(session.reminderCount) || 0,
               csat: session.csatScore,
               latestReply: session.latestClientReply || "--"
@@ -616,7 +672,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
               Showing {visibleProjects.length} of {allProjects.length}{" "}
               {allProjects.length === 1 ? "project" : "projects"}
               {range.from || range.to
-                ? ` · ${rangeCycles.length} ${rangeCycles.length === 1 ? "cycle" : "cycles"} in range, ${completedCycles.length} completed`
+                ? ` · ${rangeCycles.length} rating ${rangeCycles.length === 1 ? "cycle" : "cycles"} and ${responseTracker.length} POC ${responseTracker.length === 1 ? "session" : "sessions"} in range`
                 : ""}
             </p>
           ) : null}
@@ -758,7 +814,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
           caption={`${scored.length} of ${visibleProjects.length} projects rated`}
           tone={scoreClass(avgCsat)}
         />
-        <MetricCard label="Cycles Completed" value={completedCycles.length} caption={range.from || range.to ? "in range" : "all time"} />
+        <MetricCard label="Rating Cycles Completed" value={completedCycles.length} caption={range.from || range.to ? "in range" : "all time"} />
         <MetricCard label="At Risk" value={atRisk} tone={atRisk ? "weak" : "strong"} />
         <MetricCard
           label="Open Issues"
@@ -772,18 +828,19 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
 
       <div className="metric-row six response-summary">
         <MetricCard
-          label="Cycles Sent"
+          label="Rating Cycles Sent"
           value={rangeCycles.length}
-          caption="click to view their POC sessions"
-          onClick={() => showResponses("all")}
+          caption="rating-based cycles; click to view sessions"
+          onClick={() => showResponses("all", "rating")}
           title="Show all feedback-cycle POC sessions"
+          active={responseCycleScope === "rating" && responseFilter === "all"}
         />
         <MetricCard
           label="POC Sessions Sent"
           value={responseTracker.length}
           caption="individual feedback requests"
           onClick={() => showResponses("all")}
-          active={responseFilter === "all"}
+          active={responseCycleScope === "all" && responseFilter === "all"}
         />
         <MetricCard
           label="Awaiting First Reply"
@@ -794,9 +851,9 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
           active={responseFilter === "awaiting"}
         />
         <MetricCard
-          label="Partial Response"
+          label="Responded / Partial"
           value={responseCounts.partial}
-          caption="client replied; feedback incomplete"
+          caption="client replied; response window or feedback remains open"
           tone="watch"
           onClick={() => showResponses("partial")}
           active={responseFilter === "partial"}
@@ -942,7 +999,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
         >
           <div className="session-list">
             {openCycles.map((cycle) => (
-              <button key={cycle.id} type="button" className={`session-row ${riskClass(cycle.riskLevel)}`} onClick={() => cycle.projectKey && onOpenProject(cycle.projectKey)}>
+              <button key={cycle.id} type="button" className={`session-row ${riskClass(cycle.riskLevel)}`} onClick={() => cycle.projectKey && onOpenProject(cycle.projectKey, { cycleId: cycle.id })}>
                 <strong>{cycle.projectName || "Project"}</strong>
                 <span>{formatCycleType(cycle.cycleType, cycle.feedbackIntervalDays)} · {formatCycleCoverage(cycle)}</span>
                 <em>Started {formatDate(cycle.startedAt)}</em>
@@ -990,9 +1047,9 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
           title="Feedback Cycle & POC Response Tracker"
           badge={`${filteredResponseTracker.length} of ${responseTracker.length} POC sessions shown`}
           className="span-12 dashboard-anchor-section"
-          action={responseFilter !== "all" ? (
-            <button type="button" className="filter-reset" onClick={() => setResponseFilter("all")}>
-              Clear {responseLabel(responseFilter)} filter <X size={12} aria-hidden="true" />
+          action={responseFilter !== "all" || responseCycleScope !== "all" ? (
+            <button type="button" className="filter-reset" onClick={() => { setResponseFilter("all"); setResponseCycleScope("all"); }}>
+              Clear response filter <X size={12} aria-hidden="true" />
             </button>
           ) : null}
         >
@@ -1015,6 +1072,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
                 session.completionStatus === "completed" ? "completed"
                   : session.lastClientResponseAt ? "partial" : "awaiting"
               );
+              const statusLabel = responseDisplayLabel(session, status);
               return (
                 <button
                   key={session.id}
@@ -1034,7 +1092,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
                     <strong>{session.projectName || "Project"}</strong>
                     <small>{formatCycleType(session.cycleType)} · started {formatDate(session.cycleStartedAt || session.startedAt)}</small>
                   </span>
-                  <span><StatusPill value={responseLabel(status)} tone={responseTone(status)} /></span>
+                  <span><StatusPill value={statusLabel} tone={responseTone(status)} /></span>
                   <span className="latest-reply">
                     <span className="reply-preview">{session.latestClientReply || "No client reply yet"}</span>
                     {session.latestClientReplyAt ? <small>{formatDateTime(session.latestClientReplyAt)}</small> : null}
@@ -1049,7 +1107,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
             })}
             {!filteredResponseTracker.length ? (
               <EmptyState
-                title={`No ${responseFilter === "all" ? "feedback sessions" : responseLabel(responseFilter).toLowerCase()}`}
+                title={`No ${responseFilter === "all" ? "feedback sessions" : responseFilterLabel(responseFilter).toLowerCase()}`}
                 text="Choose another response card or adjust the dashboard filters."
               />
             ) : null}

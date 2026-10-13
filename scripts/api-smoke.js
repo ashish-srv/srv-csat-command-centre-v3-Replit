@@ -2994,6 +2994,10 @@ async function scenario(name, fn) {
       id: "cyc_tracker", project_id: "prj_1", cycle_type: "pulse", status: "open",
       started_at: "2026-09-01T10:00:00.000Z", closed_at: null
     };
+    const quickCycleRow = {
+      id: "cyc_quick_tracker", project_id: "prj_1", cycle_type: "quick_checkin", status: "open",
+      started_at: "2026-09-03T10:00:00.000Z", closed_at: null
+    };
     const sessionRows = [
       {
         id: "sess_awaiting", cycle_id: "cyc_tracker", project_id: "prj_1", client_poc_id: "poc_a",
@@ -3032,6 +3036,16 @@ async function scenario(name, fn) {
         csat_score: 5, predicted_csat: 5, csat_source: "predicted",
         client_pocs: { name: "Stopped POC" }, projects: { project_key: project.key, name: project.name },
         feedback_cycles: cycleRow
+      },
+      {
+        id: "sess_quick", cycle_id: "cyc_quick_tracker", project_id: "prj_1", client_poc_id: "poc_e",
+        status: "started", completion_status: "not_started",
+        conversation_state: { state: "quick_checkin_choice" },
+        started_at: quickCycleRow.started_at, completed_at: null, last_client_response_at: null,
+        reminder_due_at: "2026-09-04T10:00:00.000Z", reminder_count: 0,
+        csat_score: null, predicted_csat: null, csat_source: null,
+        client_pocs: { name: "Quick Check-in POC" }, projects: { project_key: project.key, name: project.name },
+        feedback_cycles: quickCycleRow
       }
     ];
     dashboardStore.request = async (table, options = {}) => {
@@ -3046,7 +3060,11 @@ async function scenario(name, fn) {
           title: "Wrong creative went live", root_cause: "Wrong creative went live", created_at: cycleRow.started_at
         }];
       }
-      if (table === "feedback_cycles") return [cycleRow];
+      if (table === "feedback_cycles") {
+        return options.query.includes("cycle_type=neq.quick_checkin")
+          ? [cycleRow]
+          : [quickCycleRow, cycleRow];
+      }
       if (table === "feedback_sessions") return sessionRows;
       if (table === "messages") {
         assert.match(options.query, /side=eq\.client/);
@@ -3062,11 +3080,15 @@ async function scenario(name, fn) {
     const dashboard = await dashboardStore.getDashboard();
     assert.deepStrictEqual(
       dashboard.responseTracker.map((session) => session.responseStatus),
-      ["awaiting", "partial", "completed", "stopped"]
+      ["awaiting", "partial", "completed", "stopped", "awaiting"]
     );
     assert.strictEqual(dashboard.responseTracker[1].latestClientReply, "PPC lead quality is poor");
     assert.strictEqual(dashboard.responseTracker[3].stoppedByAdmin, true);
     assert.strictEqual(dashboard.responseTracker[3].closureReason, "stopped_by_admin");
+    assert.strictEqual(dashboard.responseTracker[4].cycleType, "quick_checkin");
+    assert.strictEqual(dashboard.responseTracker[4].quickCheckinState, "quick_checkin_choice");
+    assert.ok(dashboard.openCycles.some((cycle) => cycle.cycleType === "quick_checkin"));
+    assert.ok(!dashboard.cycles.some((cycle) => cycle.cycleType === "quick_checkin"), "quick check-ins must not alter full-feedback KPI history");
     assert.strictEqual(dashboard.openIssues[0].service_name, "Creatives");
   });
 
@@ -3727,6 +3749,13 @@ async function scenario(name, fn) {
       assert.strictEqual(clear.statusCode, 200);
       assert.strictEqual(JSON.parse(clear.body).projects[0].eligible, true);
 
+      const emptyScope = await req("POST", "/api/admin/bulk-feedback/preview", {
+        cycleType: "quick_checkin",
+        projectIds: []
+      }, PIN);
+      assert.strictEqual(emptyScope.statusCode, 200);
+      assert.deepStrictEqual(JSON.parse(emptyScope.body).projects, [], "an empty filtered scope must not fall back to all projects");
+
       store.getWhatsappRoutingContext = async () => ({
         status: "active",
         poc,
@@ -3853,14 +3882,15 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 200);
   });
 
-  await scenario("POC Control Centre saves status, tag and manual influence together", async () => {
+  await scenario("POC Control Centre saves salutation, status, tag and manual influence together", async () => {
     const res = await req("PUT", "/api/admin/pocs/bulk-control", {
-      updates: [{ id: poc.id, active: true, levelId: "important", weightPercentage: 100 }]
+      updates: [{ id: poc.id, salutation: "Haranath Sir", active: true, levelId: "important", weightPercentage: 100 }]
     }, PIN);
     const payload = JSON.parse(res.body);
     assert.strictEqual(res.statusCode, 200);
     assert.strictEqual(payload.updated, 1);
     assert.strictEqual(payload.pocs[0].active, true);
+    assert.strictEqual(payload.pocs[0].salutation, "Haranath Sir");
     assert.strictEqual(payload.pocs[0].levelId, "important");
     assert.strictEqual(payload.pocs[0].weightPercentage, 100);
   });

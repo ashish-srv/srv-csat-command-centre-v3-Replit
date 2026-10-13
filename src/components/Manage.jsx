@@ -3,7 +3,7 @@ import { Download, Lock, Pencil, Plus, RefreshCw, Save, Trash2, Upload, X } from
 import { apiAdminGet, apiGet, apiWrite, apiWriteWithAdminPin, hasAdminPin, setAdminPin } from "../api";
 import { formatCycleType, formatDate, formatDateTime, formatPocWeightShare } from "../format";
 import { parseCsatWorkbook } from "../lib/workbook-import";
-import { FilterBar, SingleSelect } from "./Filters.jsx";
+import { FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, ErrorBlock, LoadingBlock, Panel } from "./Ui.jsx";
 import {
   APP_PERMISSION_LABELS, defaultPermissions, hasPermission, permissionsForRole
@@ -562,22 +562,59 @@ function OrganizationStandardsEditor({ value, clusters, departments, subDepartme
   </div>;
 }
 
-function PocControlCentre({ rows, levels, onChange, onSave, saving }) {
+function PocControlCentre({ rows, levels, clusters, onChange, onSave, saving }) {
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("");
-  const [client, setClient] = useState("");
-  const [project, setProject] = useState("");
+  const [statuses, setStatuses] = useState([]);
+  const [clusterIds, setClusterIds] = useState([]);
+  const [clientIds, setClientIds] = useState([]);
+  const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [selected, setSelected] = useState([]);
-  const clients = [...new Set(rows.map((row) => row.clientName).filter(Boolean))].sort();
-  const projects = [...new Set(rows
-    .filter((row) => !client || row.clientName === client)
-    .map((row) => row.projectName).filter(Boolean))].sort();
+  const clusterNames = new Map((clusters || []).map((cluster) => [cluster.id, cluster.name]));
+  const availableClusterIds = [...new Set(rows.map((row) => row.clusterId).filter(Boolean))]
+    .sort((left, right) => String(clusterNames.get(left) || "").localeCompare(String(clusterNames.get(right) || "")));
+  const availableClients = [...new Map(rows
+    .filter((row) => !clusterIds.length || clusterIds.includes(row.clusterId))
+    .filter((row) => row.clientId)
+    .map((row) => [row.clientId, row.clientName || "Client"])).entries()]
+    .sort((left, right) => left[1].localeCompare(right[1]));
+  const availableClientIds = availableClients.map(([id]) => id);
+  const clientNames = new Map(availableClients);
+  const availableProjects = [...new Map(rows
+    .filter((row) => !clusterIds.length || clusterIds.includes(row.clusterId))
+    .filter((row) => !clientIds.length || clientIds.includes(row.clientId))
+    .filter((row) => row.projectId)
+    .map((row) => [row.projectId, row.projectName || row.projectKey || "Project"])).entries()]
+    .sort((left, right) => left[1].localeCompare(right[1]));
+  const availableProjectIds = availableProjects.map(([id]) => id);
+  const projectNames = new Map(availableProjects);
+
+  useEffect(() => {
+    const allowed = new Set(rows.map((row) => row.id));
+    setSelected((current) => current.filter((id) => allowed.has(id)));
+  }, [rows.map((row) => row.id).join("|")]);
+
+  useEffect(() => {
+    const allowed = new Set(availableClusterIds);
+    setClusterIds((current) => current.filter((id) => allowed.has(id)));
+  }, [availableClusterIds.join("|")]);
+
+  useEffect(() => {
+    const allowed = new Set(availableClientIds);
+    setClientIds((current) => current.filter((id) => allowed.has(id)));
+  }, [availableClientIds.join("|")]);
+
+  useEffect(() => {
+    const allowed = new Set(availableProjectIds);
+    setSelectedProjectIds((current) => current.filter((id) => allowed.has(id)));
+  }, [availableProjectIds.join("|")]);
+
   const needle = query.trim().toLowerCase();
   const visible = rows.filter((row) => (
-    (!status || (status === "active" ? row.active : !row.active))
-    && (!client || row.clientName === client)
-    && (!project || row.projectName === project)
-    && (!needle || [row.name, row.contactWhatsapp, row.clientName, row.projectName]
+    (!statuses.length || statuses.includes(row.active ? "Active" : "Inactive"))
+    && (!clusterIds.length || clusterIds.includes(row.clusterId))
+    && (!clientIds.length || clientIds.includes(row.clientId))
+    && (!selectedProjectIds.length || selectedProjectIds.includes(row.projectId))
+    && (!needle || [row.name, row.salutation, row.contactWhatsapp, row.clientName, row.projectName, clusterNames.get(row.clusterId)]
       .some((value) => String(value || "").toLowerCase().includes(needle)))
   ));
   const visibleIds = visible.map((row) => row.id);
@@ -616,10 +653,11 @@ function PocControlCentre({ rows, levels, onChange, onSave, saving }) {
       </div>
       <div className="poc-control-filters">
         <Field label="Search"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="POC, WhatsApp, client or project" /></Field>
-        <Field label="Status"><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select></Field>
-        <Field label="Client"><select value={client} onChange={(event) => { setClient(event.target.value); setProject(""); }}><option value="">All clients</option>{clients.map((name) => <option key={name} value={name}>{name}</option>)}</select></Field>
-        <Field label="Project"><select value={project} onChange={(event) => setProject(event.target.value)}><option value="">All projects</option>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></Field>
-        {(query || status || client || project) ? <Button onClick={() => { setQuery(""); setStatus(""); setClient(""); setProject(""); }}>Reset filters</Button> : null}
+        <MultiSelect label="Cluster" allLabel="All clusters" options={availableClusterIds} selected={clusterIds} onChange={setClusterIds} renderOption={(id) => clusterNames.get(id) || "Cluster"} />
+        <MultiSelect label="Client" allLabel="All clients" options={availableClientIds} selected={clientIds} onChange={setClientIds} renderOption={(id) => clientNames.get(id) || "Client"} />
+        <MultiSelect label="Project" allLabel="All projects" options={availableProjectIds} selected={selectedProjectIds} onChange={setSelectedProjectIds} renderOption={(id) => projectNames.get(id) || "Project"} />
+        <MultiSelect label="Status" allLabel="All statuses" options={["Active", "Inactive"]} selected={statuses} onChange={setStatuses} />
+        {(query || statuses.length || clusterIds.length || clientIds.length || selectedProjectIds.length) ? <Button onClick={() => { setQuery(""); setStatuses([]); setClusterIds([]); setClientIds([]); setSelectedProjectIds([]); }}>Reset filters</Button> : null}
       </div>
       <div className="button-row poc-control-actions">
         <Button onClick={() => setSelected(allVisibleSelected ? selected.filter((id) => !visibleIds.includes(id)) : [...new Set([...selected, ...visibleIds])])}>
@@ -630,13 +668,14 @@ function PocControlCentre({ rows, levels, onChange, onSave, saving }) {
         <Button onClick={redistribute} disabled={!selected.length}>Redistribute affected projects equally</Button>
         <Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save all changed POCs"}</Button>
       </div>
-      <p className="form-note">For manual percentages, edit the Influence column and save. Equal redistribution includes every active POC on each affected project, not only displayed rows.</p>
+      <p className="form-note">Edit Salutation or Influence directly, then save. Equal redistribution includes every active POC on each affected project, not only displayed rows.</p>
       <div className="poc-control-table">
-        <div className="poc-control-row head"><span /><span>POC</span><span>Client</span><span>Project</span><span>Tag</span><span>Status</span><span>Influence</span></div>
+        <div className="poc-control-row head"><span /><span>POC</span><span>Salutation</span><span>Client</span><span>Project</span><span>Tag</span><span>Status</span><span>Influence</span></div>
         {visible.map((row) => (
           <div className="poc-control-row" key={row.id}>
             <input type="checkbox" checked={selected.includes(row.id)} onChange={() => setSelected(selected.includes(row.id) ? selected.filter((id) => id !== row.id) : [...selected, row.id])} aria-label={`Select ${row.name}`} />
             <span><strong>{row.name}</strong><small>{row.contactWhatsapp || "No WhatsApp"}</small></span>
+            <input value={row.salutation || ""} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, salutation: event.target.value } : item))} placeholder={row.name || "Salutation"} aria-label={`Salutation for ${row.name}`} />
             <span>{row.clientName || "--"}</span>
             <span><strong>{row.projectName || "--"}</strong><small>{row.projectKey || ""}</small></span>
             <select value={row.levelId || ""} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, levelId: event.target.value } : item))} aria-label={`POC tag for ${row.name}`}>
@@ -1857,6 +1896,12 @@ export default function Manage({ onReload, currentUser = null }) {
     // the bulk-status action after it disappears from the filtered table.
     setSelectedProjectStatusIds([]);
     setProjectStatusPreview(null);
+    setAutomationClusterId("");
+    setAutomationClientId("");
+    setAutomationPreview(null);
+    setAutomationSelectedProjectIds([]);
+    setBulkPreview(null);
+    setBulkSelectedProjectIds([]);
     const clientDetail = id ? await apiGet(`/api/admin/clients/${encodeURIComponent(id)}`) : null;
     setDetail(clientDetail);
     setSelectedDeletePocIds([]);
@@ -2207,7 +2252,23 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   function previewProjectStatusChanges() {
-    const selected = (directory?.projects || []).filter((project) => selectedProjectStatusIds.includes(project.id));
+    // Preview only records still present in the currently displayed scope.
+    // This prevents a selection made under an earlier search/filter from
+    // silently changing a now-hidden project.
+    const clientsByProjectId = new Map((directory?.clients || []).map((client) => [client.id, client]));
+    const needle = projectSearch.trim().toLowerCase();
+    const selected = (directory?.projects || [])
+      .filter((project) => !clientId || project.clientId === clientId)
+      .filter((project) => !clusterFilterId || clientsByProjectId.get(project.clientId)?.clusterId === clusterFilterId)
+      .filter((project) => !needle || [
+        project.name,
+        project.key,
+        project.activeStatus,
+        clientsByProjectId.get(project.clientId)?.name,
+        project.startDate,
+        project.endDate
+      ].some((value) => String(value || "").toLowerCase().includes(needle)))
+      .filter((project) => selectedProjectStatusIds.includes(project.id));
     const changes = selected.filter((project) => project.activeStatus !== bulkProjectStatus);
     if (!selected.length) {
       showToast("Select at least one project.");
@@ -2443,12 +2504,26 @@ export default function Manage({ onReload, currentUser = null }) {
     }
   }
 
+  function pageScopedProjects() {
+    const clientsByScopeId = new Map((directory?.clients || []).map((client) => [client.id, client]));
+    return (directory?.projects || [])
+      .filter((project) => !clientId || project.clientId === clientId)
+      .filter((project) => !clusterFilterId || clientsByScopeId.get(project.clientId)?.clusterId === clusterFilterId);
+  }
+
   async function savePocControl() {
+    const scopedProjectIds = new Set(pageScopedProjects().map((project) => project.id));
+    const scopedRows = pocControlRows.filter((row) => scopedProjectIds.has(row.projectId));
+    if (!scopedRows.length) {
+      showToast("No POC assignments match the top Cluster and Client filters.");
+      return;
+    }
     setSaving(true);
     try {
       const result = await apiWrite("/api/admin/pocs/bulk-control", {
-        updates: pocControlRows.map((row) => ({
+        updates: scopedRows.map((row) => ({
           id: row.id,
+          salutation: row.salutation || "",
           active: row.active,
           levelId: row.levelId || "",
           weightPercentage: row.active ? Number(row.weightPercentage) : 0
@@ -2465,7 +2540,7 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   function automationMatchingProjects() {
-    const all = directory?.projects || [];
+    const all = pageScopedProjects();
     const allClients = directory?.clients || [];
     const allClusters = directory?.clusters || [];
     const clientMap = new Map(allClients.map((client) => [client.id, client]));
@@ -2557,7 +2632,10 @@ export default function Manage({ onReload, currentUser = null }) {
   async function previewBulkSend() {
     setBulkSending(true);
     try {
-      const preview = await apiWrite("/api/admin/bulk-feedback/preview", { cycleType: bulkCycleType }, "POST");
+      const preview = await apiWrite("/api/admin/bulk-feedback/preview", {
+        cycleType: bulkCycleType,
+        projectIds: pageScopedProjects().map((project) => project.id)
+      }, "POST");
       setBulkPreview(preview);
       setBulkSelectedProjectIds(preview.projects.filter((project) => project.eligible).map((project) => project.projectId));
       if (!preview.messaging.enabled) showToast("WhatsApp messaging is paused. You can review the preview, but sending is disabled.");
@@ -2675,15 +2753,20 @@ export default function Manage({ onReload, currentUser = null }) {
   const projects = detail?.projects || [];
   const allProjects = directory?.projects || [];
   const clientsById = new Map(clients.map((client) => [client.id, client]));
-  const automationClients = automationClusterId
-    ? clients.filter((client) => client.clusterId === automationClusterId)
-    : clients;
+  const pageScopeClients = clients
+    .filter((client) => !clusterFilterId || client.clusterId === clusterFilterId)
+    .filter((client) => !clientId || client.id === clientId);
+  const pageScopeClusterIds = new Set(pageScopeClients.map((client) => client.clusterId).filter(Boolean));
+  const pageScopeClusters = clusters.filter((cluster) => pageScopeClusterIds.has(cluster.id));
+  const automationClients = pageScopeClients
+    .filter((client) => !automationClusterId || client.clusterId === automationClusterId);
   const bulkAutomationMatchingProjects = automationMatchingProjects();
-  const visibleProjects = allProjects.filter((project) => {
-    if (clientId) return project.clientId === clientId;
-    if (!clusterFilterId) return true;
-    return clientsById.get(project.clientId)?.clusterId === clusterFilterId;
-  });
+  const visibleProjects = pageScopedProjects();
+  const visibleProjectIds = new Set(visibleProjects.map((project) => project.id));
+  const scopedClientPocs = (directory?.clientPocs || []).filter((poc) => visibleProjectIds.has(poc.projectId));
+  const scopedProjectServices = (directory?.projectServices || []).filter((service) => visibleProjectIds.has(service.projectId));
+  const scopedPocControlRows = pocControlRows.filter((poc) => visibleProjectIds.has(poc.projectId));
+  const scopedServiceChangeRequests = serviceChangeRequests.filter((request) => visibleProjectIds.has(request.projectId));
   const pocs = detail?.pocs || [];
   const services = detail?.services || [];
   const people = directory?.internalPocs || [];
@@ -2732,17 +2815,24 @@ export default function Manage({ onReload, currentUser = null }) {
   const cleanupIssues = issuesForCleanupCycles(selectedCleanupCycleIds);
   const cleanupCyclesById = new Map(cleanupCycles.map((cycle) => [cycle.id, cycle]));
 
-  // Internal POCs reach a project through its services: project -> service ->
-  // internal_poc_id. Showing every SRV person on every project made it look as
-  // though staff were shared across clients, and made it easy to route an
-  // issue to somebody with no involvement.
+  // Internal POCs reach a project through service ownership or a Project Team
+  // role. The selected client must include both relationships without showing
+  // unrelated agency staff.
   const projectIds = new Set(projects.map((item) => item.id));
   const internalPocIdsOnThisClient = new Set(
     services.filter((svc) => projectIds.has(svc.projectId) && svc.internalPocId)
       .map((svc) => svc.internalPocId)
   );
+  for (const project of projectTeamRows.filter((item) => projectIds.has(item.id))) {
+    for (const personId of Object.values(project.team || {})) {
+      if (personId) internalPocIdsOnThisClient.add(personId);
+    }
+  }
   const peopleOnThisClient = people.filter((person) => internalPocIdsOnThisClient.has(person.id));
-  const peopleBeforeClusterFilter = showAllInternal ? people : peopleOnThisClient;
+  // Selecting a client at the top is a hard scope even when "show all" was
+  // previously enabled. Without a selected client, the agency/cluster toggle
+  // retains its original meaning.
+  const peopleBeforeClusterFilter = clientId ? peopleOnThisClient : showAllInternal ? people : peopleOnThisClient;
   const visiblePeople = clusterFilterId
     ? peopleBeforeClusterFilter.filter((person) => person.clusterId === clusterFilterId)
     : peopleBeforeClusterFilter;
@@ -2821,6 +2911,11 @@ export default function Manage({ onReload, currentUser = null }) {
     !canManageUsers && "deny-manage-users"
   ].filter(Boolean).join(" ");
 
+  function updateScopedPocControlRows(nextRows) {
+    const replacements = new Map(nextRows.map((row) => [row.id, row]));
+    setPocControlRows((current) => current.map((row) => replacements.get(row.id) || row));
+  }
+
   return (
     <div className={`manage-page ${manageAccessClasses}`}>
       <div className="topbar">
@@ -2853,6 +2948,10 @@ export default function Manage({ onReload, currentUser = null }) {
           options={filteredClients.map((client) => ({ value: client.id, label: client.name }))}
         />
       </FilterBar>
+      <p className="manage-scope-note">
+        The Cluster and Client selections scope every project-linked section below. Application Users, Excel onboarding,
+        organization standards, standard services and performance standards remain agency-wide master data.
+      </p>
 
       <nav className="manage-section-nav" aria-label="Manage sections">
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
@@ -2871,7 +2970,7 @@ export default function Manage({ onReload, currentUser = null }) {
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
         {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
         {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
-        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-service-change-requests")?.scrollIntoView({ behavior: "smooth" })}>Service Requests ({serviceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-service-change-requests")?.scrollIntoView({ behavior: "smooth" })}>Service Requests ({scopedServiceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-cleanup")?.scrollIntoView({ behavior: "smooth" })}>Data Cleanup</button> : null}
       </nav>
 
@@ -3008,14 +3107,14 @@ export default function Manage({ onReload, currentUser = null }) {
       </section> : null}
 
       {isSuperAdmin ? <section id="manage-service-change-requests" className="admin-collapsible-panel manage-secondary-section">
-        <details open={serviceChangeRequests.some((request) => request.status === "pending")}>
+        <details open={scopedServiceChangeRequests.some((request) => request.status === "pending")}>
           <summary>
-            <span><strong>Project Service Change Requests</strong><small>Super Admin approval · {serviceChangeRequests.filter((request) => request.status === "pending").length} pending</small></span>
+            <span><strong>Project Service Change Requests</strong><small>Super Admin approval · {scopedServiceChangeRequests.filter((request) => request.status === "pending").length} pending in current scope</small></span>
           </summary>
           <div className="admin-collapsible-body">
             <p className="form-note">Project Users can request additions or removals, but these requests do not change CSAT. Approving a request changes future feedback cycles only; historical feedback remains intact. Changes cannot be approved while that project has an open feedback cycle.</p>
             <div className="admin-control-scroll service-change-review-list">
-              {[...serviceChangeRequests].sort((left, right) => {
+              {[...scopedServiceChangeRequests].sort((left, right) => {
                 if (left.status === "pending" && right.status !== "pending") return -1;
                 if (left.status !== "pending" && right.status === "pending") return 1;
                 return new Date(right.createdAt || 0) - new Date(left.createdAt || 0);
@@ -3051,7 +3150,12 @@ export default function Manage({ onReload, currentUser = null }) {
                   </div> : <p className="service-change-review-note"><strong>Review note:</strong> {request.reviewNote || "No note added"}</p>}
                 </article>
               ))}
-              {!serviceChangeRequests.length ? <EmptyState title="No project service requests" text="Requests from Project Users will appear here and can be approved or rejected by a Super Admin." /> : null}
+              {!scopedServiceChangeRequests.length ? <EmptyState
+                title={clusterFilterId || clientId ? "No project service requests in this scope" : "No project service requests"}
+                text={clusterFilterId || clientId
+                  ? "Clear the top Cluster or Client filter to check other projects."
+                  : "Requests from Project Users will appear here for Super Admin review."}
+              /> : null}
             </div>
           </div>
         </details>
@@ -3080,10 +3184,10 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-poc-control"
         title="POC Control Centre"
-        badge={`${pocControlRows.filter((poc) => poc.active).length} active · ${pocControlRows.filter((poc) => !poc.active).length} inactive`}
+        badge={`${scopedPocControlRows.filter((poc) => poc.active).length} active · ${scopedPocControlRows.filter((poc) => !poc.active).length} inactive in current scope`}
         className="span-12"
       >
-        <PocControlCentre rows={pocControlRows} levels={levels} onChange={setPocControlRows} onSave={savePocControl} saving={saving} />
+        <PocControlCentre rows={scopedPocControlRows} levels={levels} clusters={pageScopeClusters} onChange={updateScopedPocControlRows} onSave={savePocControl} saving={saving} />
       </Panel>
 
       <Panel
@@ -3108,7 +3212,7 @@ export default function Manage({ onReload, currentUser = null }) {
             label="Cluster"
             value={automationClusterId}
             placeholder="All clusters"
-            options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
+            options={pageScopeClusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
             onChange={(value) => {
               setAutomationClusterId(value);
               if (automationClientId && clientsById.get(automationClientId)?.clusterId !== value) setAutomationClientId("");
@@ -3207,7 +3311,7 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-bulk-sends"
         title="Bulk Feedback Sends"
-        badge="PIN protected · preview required"
+        badge={`${visibleProjects.length} project${visibleProjects.length === 1 ? "" : "s"} in current scope · preview required`}
         className="span-12"
       >
         <p className="form-note">
@@ -3220,7 +3324,7 @@ export default function Manage({ onReload, currentUser = null }) {
               <option value="quick_checkin">Quick check-in</option>
             </select>
           </Field>
-          <Button variant="primary" onClick={previewBulkSend} disabled={bulkSending}>{bulkSending ? "Checking…" : "Preview eligible projects"}</Button>
+          <Button variant="primary" onClick={previewBulkSend} disabled={bulkSending || !visibleProjects.length}>{bulkSending ? "Checking…" : "Preview eligible projects"}</Button>
         </div>
         {bulkPreview ? (
           <>
@@ -3609,8 +3713,8 @@ export default function Manage({ onReload, currentUser = null }) {
           </div> : null}
         </div>
         <div className="manage-section-search">
-          <Field label="Search projects"><input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Project, ID, client, status or date" /></Field>
-          {projectSearch ? <Button onClick={() => setProjectSearch("")}>Clear search</Button> : null}
+          <Field label="Search projects"><input value={projectSearch} onChange={(event) => { setProjectSearch(event.target.value); setSelectedProjectStatusIds([]); setProjectStatusPreview(null); }} placeholder="Project, ID, client, status or date" /></Field>
+          {projectSearch ? <Button onClick={() => { setProjectSearch(""); setSelectedProjectStatusIds([]); setProjectStatusPreview(null); }}>Clear search</Button> : null}
         </div>
         <div className="manage-projects-scroll">
         <div className="dtable manage-projects">
@@ -3703,18 +3807,18 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-client-pocs"
         title="Client POCs"
-        badge={`${pocs.length} total`}
+        badge={`${scopedClientPocs.length} in current scope`}
         className="span-12"
         action={
           <div className="button-row">
             <Button
               icon={Pencil}
               variant="primary"
-              disabled={!projects.length}
+              disabled={!visibleProjects.length}
               onClick={() => {
                 closeForms();
-                const projectId = projects[0]?.id || "";
-                setPocBatch({ projectId, rows: pocRowsForProject(pocs, projectId), removedIds: [] });
+                const projectId = visibleProjects[0]?.id || "";
+                setPocBatch({ projectId, rows: pocRowsForProject(scopedClientPocs, projectId), removedIds: [] });
               }}
             >
               Manage project POCs
@@ -3727,8 +3831,8 @@ export default function Manage({ onReload, currentUser = null }) {
             <PocBatchForm
               key={`poc-batch-${pocBatch.projectId}`}
               value={pocBatch}
-              projects={projects}
-              pocs={pocs}
+              projects={visibleProjects}
+              pocs={scopedClientPocs}
               levels={levels}
               saving={saving}
               onChange={setPocBatch}
@@ -3748,8 +3852,8 @@ export default function Manage({ onReload, currentUser = null }) {
             <span>Active</span>
             <span />
           </div>
-          {pocs.map((poc) => {
-            const project = projects.find((item) => item.id === poc.projectId);
+          {scopedClientPocs.map((poc) => {
+            const project = visibleProjects.find((item) => item.id === poc.projectId);
             return (
               <div key={poc.id} className="dtable-row">
                 <strong>{poc.name}</strong>
@@ -3757,7 +3861,7 @@ export default function Manage({ onReload, currentUser = null }) {
                 <span>{poc.designation || "--"}</span>
                 <span className={`mono ${poc.contactWhatsapp ? "" : "missing"}`}>{poc.contactWhatsapp || "not set"}</span>
                 <span>{poc.birthDate ? formatDate(poc.birthDate) : "--"}</span>
-                <span>{poc.levelName ? `${poc.levelName} · ${formatPocWeightShare(poc, pocs)}` : "Not set"}</span>
+                <span>{poc.levelName ? `${poc.levelName} · ${formatPocWeightShare(poc, scopedClientPocs.filter((item) => item.projectId === poc.projectId))}` : "Not set"}</span>
                 <span className={poc.active ? "" : "missing"}>{poc.active ? "Yes" : "No"}</span>
                 <button
                   type="button"
@@ -3767,7 +3871,7 @@ export default function Manage({ onReload, currentUser = null }) {
                     closeForms();
                     setPocBatch({
                       projectId: poc.projectId,
-                      rows: pocRowsForProject(pocs, poc.projectId),
+                      rows: pocRowsForProject(scopedClientPocs, poc.projectId),
                       removedIds: []
                     });
                   }}
@@ -3777,8 +3881,8 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
             );
           })}
-          {!pocs.length ? (
-            <EmptyState title="No POCs" text="POCs may be stored without a WhatsApp number. Add a valid number before sending feedback." />
+          {!scopedClientPocs.length ? (
+            <EmptyState title="No POCs in the current scope" text="POCs may be stored without a WhatsApp number. Add a valid number before sending feedback." />
           ) : null}
         </div>
       </Panel>
@@ -3786,16 +3890,16 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-services"
         title="Services and owners"
-        badge={`${services.length} on this client`}
+        badge={`${scopedProjectServices.length} in current scope`}
         className="span-12"
         action={
           <Button
             icon={Plus}
-            disabled={!projects.length}
+            disabled={!visibleProjects.length}
             onClick={() => {
               closeForms();
-              const projectId = projects[0]?.id || "";
-              setServiceBatch({ projectId, rows: serviceRowsForProject(services, projectId) });
+              const projectId = visibleProjects[0]?.id || "";
+              setServiceBatch({ projectId, rows: serviceRowsForProject(scopedProjectServices, projectId) });
             }}
           >
             Manage services
@@ -3807,8 +3911,8 @@ export default function Manage({ onReload, currentUser = null }) {
             <ServiceBatchForm
               key={`service-batch-${serviceBatch.projectId}`}
               value={serviceBatch}
-              projects={projects}
-              services={services}
+              projects={visibleProjects}
+              services={scopedProjectServices}
               serviceCatalog={serviceCatalog}
               people={people}
               saving={saving}
@@ -3827,8 +3931,8 @@ export default function Manage({ onReload, currentUser = null }) {
             <span>Reporting manager</span>
             <span />
           </div>
-          {services.map((service) => {
-            const project = projects.find((item) => item.id === service.projectId);
+          {scopedProjectServices.map((service) => {
+            const project = visibleProjects.find((item) => item.id === service.projectId);
             const owner = peopleById.get(service.internalPocId);
             const manager = owner ? peopleById.get(owner.reportingManagerId) : null;
             return (
@@ -3846,7 +3950,7 @@ export default function Manage({ onReload, currentUser = null }) {
                     closeForms();
                     setServiceBatch({
                       projectId: service.projectId,
-                      rows: serviceRowsForProject(services, service.projectId)
+                      rows: serviceRowsForProject(scopedProjectServices, service.projectId)
                     });
                   }}
                 >
@@ -3855,8 +3959,8 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
             );
           })}
-          {!services.length ? (
-            <EmptyState title="No services on this client" text="Feedback cannot be routed to an owner until services exist." />
+          {!scopedProjectServices.length ? (
+            <EmptyState title="No services in the current scope" text="Feedback cannot be routed to an owner until services exist." />
           ) : null}
         </div>
       </Panel>

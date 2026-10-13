@@ -4126,10 +4126,17 @@ button.metric-card {
 
 .poc-control-metrics { margin-bottom: 14px; }
 
+.manage-scope-note {
+  margin: -2px 0 14px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .poc-control-filters,
 .bulk-send-controls {
   display: grid;
-  grid-template-columns: minmax(190px, 1.6fr) repeat(3, minmax(130px, 1fr)) auto;
+  grid-template-columns: minmax(190px, 1.6fr) repeat(4, minmax(130px, 1fr)) auto;
   gap: 10px;
   align-items: end;
   margin-bottom: 12px;
@@ -4227,7 +4234,9 @@ button.metric-card {
   font-size: 12px;
 }
 
-.poc-control-row { grid-template-columns: 24px minmax(170px, 1.2fr) minmax(150px, 1fr) minmax(180px, 1.2fr) 120px 110px 100px; }
+.poc-control-row { min-width: 1120px; }
+
+.poc-control-row { grid-template-columns: 24px minmax(170px, 1.2fr) minmax(160px, 1fr) minmax(150px, 1fr) minmax(180px, 1.2fr) 120px 110px 100px; }
 .bulk-preview-row { grid-template-columns: 24px minmax(170px, 1.2fr) minmax(140px, 1fr) minmax(180px, 1.2fr) minmax(230px, 1.5fr) minmax(160px, 1fr); }
 
 .poc-control-row.head,
@@ -4250,6 +4259,7 @@ button.metric-card {
 .poc-control-row span small,
 .bulk-preview-row span small { display: block; margin-top: 2px; color: var(--muted); }
 .poc-control-row select,
+.poc-control-row input:not([type="checkbox"]),
 .poc-control-row input[type="number"] { width: 100%; min-width: 0; }
 
 .poc-control-row input[type="checkbox"],

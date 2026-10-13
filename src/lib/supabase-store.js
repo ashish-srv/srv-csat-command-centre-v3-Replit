@@ -2242,11 +2242,12 @@ class SupabaseStore {
   // -------------------------------------------------------------------
 
   async getDirectory() {
-    const [clusters, clients, projects, clientPocRows, pocLevelRows, departments, subDepartments, internalPocs, serviceCatalog] = await Promise.all([
+    const [clusters, clients, projects, clientPocRows, projectServiceRows, pocLevelRows, departments, subDepartments, internalPocs, serviceCatalog] = await Promise.all([
       this.request("clusters", { query: "select=*&order=name.asc" }),
       this.request("clients", { query: "select=*&order=name.asc" }),
       this.request("projects", { query: "select=*&order=name.asc" }),
       this.request("client_pocs", { query: "select=*&order=name.asc" }),
+      this.request("project_services", { query: "select=*&order=name.asc" }),
       this.request("poc_levels", { query: "select=*&order=weight.desc" }),
       this.request("departments", { query: "select=*&order=name.asc" }),
       this.request("sub_departments", { query: "select=*&order=name.asc" }),
@@ -2282,6 +2283,7 @@ class SupabaseStore {
           clusterId: client?.cluster_id || null
         };
       }),
+      projectServices: projectServiceRows.map((row) => toService(row)),
       pocLevels: pocLevelRows.map((row) => ({ id: row.id, name: row.name, weight: Number(row.weight) })),
       departments: departments.map((row) => ({ id: row.id, name: row.name })),
       subDepartments: subDepartments.map((row) => ({ id: row.id, name: row.name, departmentId: row.department_id })),
@@ -3346,11 +3348,16 @@ class SupabaseStore {
     }));
 
     const openCycleRows = await this.request("feedback_cycles", {
-      query: "status=eq.open&cycle_type=neq.quick_checkin&select=*&order=started_at.desc"
+      // Open Cycles is an operational queue, so it must include quick
+      // check-ins that are still waiting for a response or their 10-minute
+      // response window to close. CSAT KPI history below still deliberately
+      // excludes quick check-ins because they do not collect a rating.
+      query: "status=eq.open&select=*&order=started_at.desc"
     });
 
-    // Every cycle, not just the open ones. The dashboard table expands a project
-    // row into its cycles, and the date-range filter needs the full history.
+    // Every rating-based feedback cycle, not just the open ones. Quick check-ins
+    // remain in the operational queues below, but never enter CSAT averages,
+    // rating-cycle totals or risk history because they collect no rating.
     const allCycleRows = [];
     for (let offset = 0; ; offset += 1000) {
       const page = await this.request("feedback_cycles", {
@@ -3374,8 +3381,7 @@ class SupabaseStore {
 
     // Read only the latest client bubble for each listed session. Chunking keeps
     // PostgREST URLs bounded while avoiding a separate request per POC.
-    const fullFeedbackResponseRows = responseRows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin");
-    const responseSessionIds = fullFeedbackResponseRows.map((row) => row.id).filter(Boolean);
+    const responseSessionIds = responseRows.map((row) => row.id).filter(Boolean);
     const latestClientMessage = new Map();
     for (let index = 0; index < responseSessionIds.length; index += 100) {
       const ids = responseSessionIds.slice(index, index + 100).map((id) => encodeURIComponent(id));
@@ -3395,7 +3401,7 @@ class SupabaseStore {
       ? Math.round((scored.reduce((sum, p) => sum + p.csatScore, 0) / scored.length) * 10) / 10
       : null;
 
-    const responseTracker = fullFeedbackResponseRows.map((row) => {
+    const responseTracker = responseRows.map((row) => {
       const state = row.conversation_state || {};
       const exhausted = Boolean(state.reminderExhausted);
       const latestReply = latestClientMessage.get(row.id) || null;
@@ -3444,6 +3450,8 @@ class SupabaseStore {
         stoppedAt: state.stoppedAt || null,
         closedAt: state.stoppedAt || state.reminderClosedAt || row.completed_at || null,
         closureReason: state.closureReason || null,
+        quickCheckinState: row.feedback_cycles?.cycle_type === "quick_checkin" ? state.state || null : null,
+        quickCheckinOutcome: row.feedback_cycles?.cycle_type === "quick_checkin" ? state.quickCheckinOutcome || null : null,
         csatScore: num(row.csat_score),
         predictedCsat: num(row.predicted_csat),
         csatSource: row.csat_source || null
