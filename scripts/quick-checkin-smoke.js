@@ -1,10 +1,13 @@
 const assert = require("node:assert/strict");
-const { SupabaseStore, quickCheckinScheduleKey } = require("../src/lib/supabase-store");
+const { SupabaseStore, quickCheckinScheduleKey, nextQuickCheckinAt } = require("../src/lib/supabase-store");
 
 assert.equal(quickCheckinScheduleKey("2026-10-10T18:30:00.000Z"), "2026-10-11");
 assert.equal(quickCheckinScheduleKey("2026-10-21T04:30:00.000Z"), "2026-10-21");
 assert.equal(quickCheckinScheduleKey("2026-10-20T12:00:00.000Z"), null);
 assert.equal(quickCheckinScheduleKey("not-a-date"), null);
+assert.equal(nextQuickCheckinAt("2026-10-11T03:30:00.000Z"), "2026-10-11T04:30:00.000Z");
+assert.equal(nextQuickCheckinAt("2026-10-11T05:30:00.000Z"), "2026-10-21T04:30:00.000Z");
+assert.equal(nextQuickCheckinAt("2026-10-22T05:30:00.000Z"), "2026-11-11T04:30:00.000Z");
 
 async function run() {
   const scheduler = new SupabaseStore({ skipEnv: true });
@@ -18,7 +21,12 @@ async function run() {
       endDate: "2026-10-31", endFeedbackRequestedAt: "2026-09-29T12:00:00.000Z"
     },
     { id: "p6", key: "historic-project-end", activeStatus: "active", clientActiveStatus: "active", endDate: "2026-10-31" },
-    { id: "p7", key: "date-ended", activeStatus: "active", clientActiveStatus: "active", endDate: "2026-10-10" }
+    { id: "p7", key: "date-ended", activeStatus: "active", clientActiveStatus: "active", endDate: "2026-10-10" },
+    { id: "p8", key: "quick-automatic-off", activeStatus: "active", clientActiveStatus: "active", automaticQuickCheckinEnabled: false },
+    {
+      id: "p9", key: "quick-resumes-later", activeStatus: "active", clientActiveStatus: "active",
+      automaticQuickCheckinEnabled: true, automaticQuickCheckinResumeAt: "2026-10-21T04:30:00.000Z"
+    }
   ];
   scheduler.projectIdsWithCycleType = async () => new Set(["p6"]);
   scheduler.hasScheduledQuickCheckin = async (projectId) => projectId === "p2";
@@ -39,6 +47,10 @@ async function run() {
     {
       id: "p6", key: "historic-project-end", activeStatus: "active", endDate: "2026-10-31",
       nextCycleDueAt: "2026-09-30T00:00:00.000Z"
+    },
+    {
+      id: "p8", key: "monthly-automatic-off", activeStatus: "active", endDate: "2026-10-31",
+      nextCycleDueAt: "2026-09-30T00:00:00.000Z", automaticFeedbackEnabled: false
     }
   ];
   monthlyScheduler.projectIdsWithCycleType = async () => new Set(["p5", "p6"]);
@@ -62,6 +74,30 @@ async function run() {
   await assert.rejects(
     guardedStore.createCycle("manual-project-end", { cycleType: "quick_checkin" }),
     /project-end feedback has already been sent/i
+  );
+
+  const automaticGuardStore = new SupabaseStore({ skipEnv: true });
+  automaticGuardStore.getProject = async () => ({
+    id: "p8",
+    key: "automatic-off",
+    feedbackIntervalDays: 30,
+    automaticFeedbackEnabled: false,
+    automaticQuickCheckinEnabled: false,
+    pocs: []
+  });
+  automaticGuardStore.hasAnyCycle = async () => false;
+  await assert.rejects(
+    automaticGuardStore.createCycle("automatic-off", { cycleType: "pulse", automatic: true }),
+    /automatic 30-day feedback is turned off/i
+  );
+  await assert.rejects(
+    automaticGuardStore.createCycle("automatic-off", { cycleType: "quick_checkin", automatic: true }),
+    /automatic quick check-ins are turned off/i
+  );
+  await assert.rejects(
+    automaticGuardStore.createCycle("automatic-off", { cycleType: "pulse" }),
+    /no active POC/i,
+    "manual sends must pass the automatic-setting guard and fail only for the independently missing POC"
   );
 
   const store = new SupabaseStore({ skipEnv: true });

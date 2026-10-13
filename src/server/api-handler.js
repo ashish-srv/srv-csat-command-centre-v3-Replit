@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const { createStore } = require("../lib/store");
-const { MAX_REMINDERS } = require("../lib/supabase-store");
+const { MAX_REMINDERS, nextQuickCheckinAt } = require("../lib/supabase-store");
 const { processWhatsAppReply, getConversationState, buildChecklist, applyCaptured, applyServiceScopeDecision, applyTurnProgress, isEverythingCovered, soundsLikeFarewell, isMoveOnReply, overallRatingQuestion, projectEndReviewQuestion, buildAnalysis, detectors, STATES, GUARDRAILS, CLOSING_GRACE_MS, DEFERRAL_REPLY, SERVICE_SCOPE_DECISIONS, SERVICE_SCOPE_QUESTION } = require("../lib/whatsapp-state-machine");
 const { offScriptReply, reviewIssues, readTone, readNps, interpretReply, conductTurn, predictSatisfaction, cleanRepeatedText, extractExplicitAppreciations, hasSatisfactionEvidence, ALERT_CONFIDENCE_THRESHOLD } = require("../lib/gemini");
 const { emitAutomation } = require("../lib/n8n");
@@ -1869,6 +1869,7 @@ function projectUserRouteAllowed(access, method, pathname) {
 
 function adminRoutePermission(method, pathname) {
   if (pathname === "/api/dashboard") return "dashboard";
+  if (method === "PUT" && /^\/api\/projects\/[^/]+\/automation-settings$/.test(pathname)) return "messaging_controls";
   if (method === "POST" && pathname === "/api/project-performance/projects") return "add_projects";
   if (method === "POST" && /^\/api\/project-performance\/projects\/[^/]+\/service-change-requests$/.test(pathname)) return "project_performance";
   if (["POST", "DELETE"].includes(method) && /^\/api\/project-performance\/projects\/[^/]+\/services(?:\/[^/]+)?$/.test(pathname)) return "manage_project_services";
@@ -3483,12 +3484,13 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 // Cycle creation (one session per active POC)
 // ---------------------------------------------------------------------
 
-async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clientPocIds, scheduleKey }) {
+async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clientPocIds, scheduleKey, automatic = false }) {
   if (!await whatsappMessagingEnabled(store)) throw new Error("WhatsApp messaging is paused");
   const result = await store.createCycle(projectKey, {
     cycleType,
     channel: "whatsapp",
     scheduleKey: scheduleKey || null,
+    automatic,
     ...(Array.isArray(clientPocIds) ? { clientPocIds } : {})
   });
   const { cycle, sessions, project, pocs } = result;
@@ -3827,8 +3829,8 @@ async function handleApiRequest(request) {
     for (const project of dashboard.projects || []) {
       if (project.activeStatus !== "active") continue;
       const activePocCount = Number(dashboard.projectPocCounts?.[project.id]) || 0;
-      const addScheduleRow = (cycleType, dueAt, baseStatus) => {
-        if (!dueAt) return;
+      const addScheduleRow = (cycleType, dueAt, baseStatus, statusReason = null) => {
+        if (!dueAt && baseStatus !== "automatic_off") return;
         const open = openCycleKeys.has(`${project.id}|${cycleType}`);
         const skipped = latestSkippedByProjectType.get(`${project.key}|${cycleType}`) || null;
         const lastStarted = Date.parse(project.lastCycleStartedAt || "");
@@ -3844,7 +3846,7 @@ async function handleApiRequest(request) {
           dueAt,
           activePocCount,
           status: open ? "open" : skipStillRelevant ? "blocked" : baseStatus,
-          blockedReason: skipStillRelevant ? skipped.reason : null,
+          blockedReason: skipStillRelevant ? skipped.reason : statusReason,
           attemptedAt: skipStillRelevant ? skipped.attemptedAt : null
         });
       };
@@ -3861,15 +3863,36 @@ async function handleApiRequest(request) {
       const ended = project.endDate && new Date(project.endDate).getTime() <= nowMs;
       const projectEndStarted = Boolean(project.endFeedbackRequestedAt)
         || projectEndProjectIds.has(project.id);
-      if (project.nextCycleDueAt && !ended && !projectEndStarted) {
+      if (!ended && !projectEndStarted) {
+        if (project.automaticFeedbackEnabled === false) {
+          addScheduleRow("pulse", project.nextCycleDueAt, "automatic_off", "Automatic sending off");
+        } else if (project.nextCycleDueAt) {
+          addScheduleRow(
+            "pulse",
+            project.nextCycleDueAt,
+            new Date(project.nextCycleDueAt).getTime() <= nowMs ? "due" : "upcoming"
+          );
+        }
+        const quickResumeAt = Date.parse(project.automaticQuickCheckinResumeAt || "");
+        const quickDueAt = Number.isFinite(quickResumeAt) && quickResumeAt > nowMs
+          ? project.automaticQuickCheckinResumeAt
+          : nextQuickCheckinAt(new Date(nowMs));
         addScheduleRow(
-          "pulse",
-          project.nextCycleDueAt,
-          new Date(project.nextCycleDueAt).getTime() <= nowMs ? "due" : "upcoming"
+          "quick_checkin",
+          quickDueAt,
+          project.automaticQuickCheckinEnabled === false ? "automatic_off" : "upcoming",
+          project.automaticQuickCheckinEnabled === false ? "Automatic sending off" : null
         );
       }
     }
-    feedbackSchedule.sort((left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime());
+    feedbackSchedule.sort((left, right) => {
+      const leftDue = Date.parse(left.dueAt || "");
+      const rightDue = Date.parse(right.dueAt || "");
+      if (!Number.isFinite(leftDue) && !Number.isFinite(rightDue)) return left.projectName.localeCompare(right.projectName);
+      if (!Number.isFinite(leftDue)) return 1;
+      if (!Number.isFinite(rightDue)) return -1;
+      return leftDue - rightDue;
+    });
     return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule, messaging });
   }
 
@@ -4278,6 +4301,71 @@ async function handleApiRequest(request) {
     const workspace = await store.getProjectWorkspace(decodeURIComponent(workspaceMatch[1]));
     if (!workspace) return error(404, "Project not found");
     return json(200, workspace);
+  }
+
+  const automationSettingsMatch = pathname.match(/^\/api\/projects\/([^/]+)\/automation-settings$/);
+  if (method === "PUT" && automationSettingsMatch) {
+    const projectKey = decodeURIComponent(automationSettingsMatch[1]);
+    const project = await store.getProject(projectKey);
+    if (!project) return error(404, "Project not found");
+
+    const suppliedFeedback = Object.prototype.hasOwnProperty.call(body, "automaticFeedbackEnabled");
+    const suppliedQuickCheckin = Object.prototype.hasOwnProperty.call(body, "automaticQuickCheckinEnabled");
+    if (!suppliedFeedback && !suppliedQuickCheckin) {
+      return error(400, "Choose at least one automatic sending setting to update");
+    }
+    if (suppliedFeedback && typeof body.automaticFeedbackEnabled !== "boolean") {
+      return error(400, "automaticFeedbackEnabled must be true or false");
+    }
+    if (suppliedQuickCheckin && typeof body.automaticQuickCheckinEnabled !== "boolean") {
+      return error(400, "automaticQuickCheckinEnabled must be true or false");
+    }
+    const turningRecurringOn = (suppliedFeedback && body.automaticFeedbackEnabled)
+      || (suppliedQuickCheckin && body.automaticQuickCheckinEnabled);
+    if (turningRecurringOn && await projectEndFeedbackStarted(store, project)) {
+      return error(
+        409,
+        "Recurring feedback is closed for this project",
+        "Project-end feedback has already been sent, so automatic interval feedback and quick check-ins cannot be reactivated."
+      );
+    }
+
+    const input = {};
+    if (suppliedFeedback) input.automaticFeedbackEnabled = body.automaticFeedbackEnabled;
+    if (suppliedQuickCheckin) input.automaticQuickCheckinEnabled = body.automaticQuickCheckinEnabled;
+    const saved = await store.updateProjectAutomationSettings(project.id, input);
+    if (!saved) return error(404, "Project not found");
+
+    if (typeof store.recordAutomationEvent === "function") {
+      await store.recordAutomationEvent({
+        eventType: "project_automatic_sending_changed",
+        status: "recorded",
+        webhookUrlConfigured: false,
+        sentAt: new Date().toISOString(),
+        payload: {
+          projectId: project.id,
+          projectKey: project.key,
+          projectName: project.name,
+          previous: {
+            automaticFeedbackEnabled: project.automaticFeedbackEnabled !== false,
+            automaticQuickCheckinEnabled: project.automaticQuickCheckinEnabled !== false,
+            automaticQuickCheckinResumeAt: project.automaticQuickCheckinResumeAt || null,
+            nextCycleDueAt: project.nextCycleDueAt || null
+          },
+          next: {
+            automaticFeedbackEnabled: saved.automaticFeedbackEnabled !== false,
+            automaticQuickCheckinEnabled: saved.automaticQuickCheckinEnabled !== false,
+            automaticQuickCheckinResumeAt: saved.automaticQuickCheckinResumeAt || null,
+            nextCycleDueAt: saved.nextCycleDueAt || null
+          },
+          changedBy: appAccess?.email || appAccess?.name || "Password Super Admin"
+        }
+      });
+    }
+    return json(200, {
+      project: saved,
+      message: "Automatic sending settings updated. Existing cycles, sessions and POC weights were not changed."
+    });
   }
 
   const requestFeedbackMatch = pathname.match(/^\/api\/projects\/([^/]+)\/request-feedback$/);
@@ -5079,7 +5167,8 @@ async function handleApiRequest(request) {
           projectKey: target.projectKey,
           cycleType: target.cycleType,
           baseUrl,
-          reason: "scheduled"
+          reason: "scheduled",
+          automatic: true
         }));
       } catch (cycleError) {
         // A project with no reachable POC must not abort the whole run.
@@ -5122,7 +5211,8 @@ async function handleApiRequest(request) {
           cycleType: "quick_checkin",
           scheduleKey: due.scheduleKey,
           baseUrl,
-          reason: "scheduled_11th_or_21st"
+          reason: "scheduled_11th_or_21st",
+          automatic: true
         }));
       } catch (cycleError) {
         const skippedTarget = { projectKey: target.projectKey, cycleType: "quick_checkin", reason: cycleError.message };

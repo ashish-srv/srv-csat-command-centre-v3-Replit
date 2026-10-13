@@ -3356,6 +3356,64 @@ button.metric-card {
 .schedule-table-row > span:nth-child(5) { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .schedule-table-row small { display: block; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 
+.project-automation-controls {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 15px;
+  border: 1px solid #d4dce7;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 8px 22px rgba(19, 26, 36, 0.04);
+}
+
+.project-automation-heading,
+.project-automation-card,
+.project-automation-copy {
+  display: flex;
+  align-items: center;
+}
+
+.project-automation-heading { justify-content: space-between; gap: 16px; }
+.project-automation-heading .eyebrow { display: block; margin-bottom: 3px; }
+.project-automation-heading h3 { color: var(--header); font-size: 17px; }
+.project-automation-note { color: var(--muted-strong); font-size: 12px; text-align: right; }
+.project-automation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.project-automation-card {
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 80px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-left-width: 5px;
+  border-radius: 10px;
+}
+.project-automation-card.on { border-left-color: var(--green); background: var(--green-soft); }
+.project-automation-card.off { border-left-color: var(--red); background: var(--red-soft); }
+.project-automation-copy { min-width: 0; gap: 10px; }
+.project-automation-card.on .project-automation-copy > svg { color: var(--green); }
+.project-automation-card.off .project-automation-copy > svg { color: var(--red); }
+.project-automation-copy > div { display: grid; min-width: 0; gap: 4px; }
+.project-automation-copy strong { color: var(--ink); font-size: 14px; }
+.project-automation-copy span { color: var(--muted-strong); font-size: 12px; }
+.automation-toggle {
+  flex: 0 0 auto;
+  min-width: 64px;
+  min-height: 36px;
+  padding: 7px 13px;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.automation-toggle.on { background: var(--green); }
+.automation-toggle.off { background: var(--red); }
+.automation-toggle:disabled { cursor: not-allowed; opacity: 0.55; }
+.project-automation-locked { margin: 0; color: var(--red); font-size: 12px; font-weight: 700; }
+
 .schedule-skip-history {
   max-height: min(300px, 38vh);
   overflow-y: auto;
@@ -3896,6 +3954,9 @@ button.metric-card {
 }
 
 @media (max-width: 900px) {
+  .project-automation-grid { grid-template-columns: 1fr; }
+  .project-automation-heading { align-items: flex-start; flex-direction: column; }
+  .project-automation-note { text-align: left; }
   .metric-row.five,
   .metric-row.six { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

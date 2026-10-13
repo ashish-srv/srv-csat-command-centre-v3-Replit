@@ -28,6 +28,25 @@ function quickCheckinScheduleKey(nowIso = new Date().toISOString()) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+function nextQuickCheckinAt(nowValue = new Date()) {
+  const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  if (!Number.isFinite(now.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(now).reduce((result, part) => {
+    if (part.type !== "literal") result[part.type] = Number(part.value);
+    return result;
+  }, {});
+  const scheduledAt = (year, month, day) => new Date(Date.UTC(year, month - 1, day, 4, 30, 0));
+  for (const day of [11, 21]) {
+    const candidate = scheduledAt(parts.year, parts.month, day);
+    if (candidate.getTime() >= now.getTime()) return candidate.toISOString();
+  }
+  const month = parts.month === 12 ? 1 : parts.month + 1;
+  const year = parts.month === 12 ? parts.year + 1 : parts.year;
+  return scheduledAt(year, month, 11).toISOString();
+}
+
 function firstPulseDueAt(startDate, intervalDays = 30) {
   const start = startDate
     ? new Date(`${String(startDate).slice(0, 10)}T00:00:00.000Z`)
@@ -228,6 +247,9 @@ function toProject(row, extra = {}) {
     feedbackIntervalDays: row.feedback_interval_days,
     lastCycleStartedAt: row.last_cycle_started_at,
     nextCycleDueAt: row.next_cycle_due_at,
+    automaticFeedbackEnabled: row.automatic_feedback_enabled !== false,
+    automaticQuickCheckinEnabled: row.automatic_quick_checkin_enabled !== false,
+    automaticQuickCheckinResumeAt: row.automatic_quick_checkin_resume_at || null,
     endFeedbackRequestedAt: row.end_feedback_requested_at,
     csatScore: num(row.csat_score),
     clientActiveStatus: extra.clientActiveStatus || null,
@@ -1016,6 +1038,12 @@ class SupabaseStore {
     const allowedCycleTypes = new Set(["pulse", "project_end", "quick_checkin"]);
     const cycleType = allowedCycleTypes.has(options.cycleType) ? options.cycleType : "pulse";
     const isQuickCheckin = cycleType === "quick_checkin";
+    if (options.automatic === true && cycleType === "pulse" && project.automaticFeedbackEnabled === false) {
+      throw new Error(`Automatic ${project.feedbackIntervalDays || 30}-day feedback is turned off for this project`);
+    }
+    if (options.automatic === true && isQuickCheckin && project.automaticQuickCheckinEnabled === false) {
+      throw new Error("Automatic quick check-ins are turned off for this project");
+    }
     const projectEndAlreadyStarted = Boolean(project.endFeedbackRequestedAt)
       || (cycleType !== "project_end" && await this.hasAnyCycle(project.id, "project_end"));
     if (cycleType !== "project_end" && projectEndAlreadyStarted) {
@@ -2040,6 +2068,8 @@ class SupabaseStore {
 
       if (projectEndAlreadyStarted) continue;
 
+      if (project.automaticFeedbackEnabled === false) continue;
+
       const pulseDue = project.nextCycleDueAt && new Date(project.nextCycleDueAt).getTime() <= nowMs;
       const projectEnded = project.endDate && new Date(project.endDate).getTime() <= nowMs;
       if (pulseDue && !projectEnded && !(await this.hasOpenCycle(project.id, "pulse"))) {
@@ -3006,6 +3036,36 @@ class SupabaseStore {
     return rows.length ? toProject(rows[0]) : null;
   }
 
+  async updateProjectAutomationSettings(projectId, input = {}) {
+    const project = await this.getProjectById(projectId);
+    if (!project) return null;
+
+    const body = { updated_at: new Date().toISOString() };
+    if (input.automaticFeedbackEnabled !== undefined) {
+      const enabled = Boolean(input.automaticFeedbackEnabled);
+      body.automatic_feedback_enabled = enabled;
+      // Switching the cadence back on starts a fresh interval. We deliberately
+      // do not catch up old due dates or alter any POC/session data.
+      if (enabled && project.automaticFeedbackEnabled === false) {
+        body.next_cycle_due_at = addDays(new Date(), project.feedbackIntervalDays || 30);
+      }
+    }
+    if (input.automaticQuickCheckinEnabled !== undefined) {
+      const enabled = Boolean(input.automaticQuickCheckinEnabled);
+      body.automatic_quick_checkin_enabled = enabled;
+      if (enabled && project.automaticQuickCheckinEnabled === false) {
+        body.automatic_quick_checkin_resume_at = nextQuickCheckinAt(new Date());
+      }
+    }
+
+    const rows = await this.request("projects", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(projectId)}`,
+      body
+    });
+    return rows.length ? this.getProjectById(projectId) : null;
+  }
+
   /**
    * Older/admin-created projects can have no first pulse date. Initialising only
    * a missing value preserves the engine-owned cadence of projects that have
@@ -3573,6 +3633,9 @@ class SupabaseStore {
     const targets = [];
     for (const project of projects) {
       if (project.activeStatus !== "active" || project.clientActiveStatus !== "active") continue;
+      if (project.automaticQuickCheckinEnabled === false) continue;
+      const resumeAt = Date.parse(project.automaticQuickCheckinResumeAt || "");
+      if (Number.isFinite(resumeAt) && resumeAt > nowMs) continue;
       const projectEnded = project.endDate && new Date(project.endDate).getTime() <= nowMs;
       if (projectEnded || project.endFeedbackRequestedAt || projectEndProjectIds.has(project.id)) continue;
       if (await this.hasScheduledQuickCheckin(project.id, scheduleKey)) continue;
@@ -4233,5 +4296,6 @@ module.exports = {
   MAX_REMINDERS,
   REMINDER_INTERVAL_HOURS,
   sessionIsTerminal,
-  quickCheckinScheduleKey
+  quickCheckinScheduleKey,
+  nextQuickCheckinAt
 };

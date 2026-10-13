@@ -293,7 +293,7 @@ export default function App({ onLogout, currentUser = null }) {
         ) : activeRoute === "performance" ? (
           <ProjectPerformance currentUser={currentUser} />
         ) : activeRoute === "project" ? (
-          <ProjectWorkspace dashboard={dashboard} locationTick={locationTick} onReload={loadDashboard} />
+          <ProjectWorkspace dashboard={dashboard} locationTick={locationTick} onReload={loadDashboard} currentUser={currentUser} />
         ) : (
           <Dashboard dashboard={dashboard} onReload={loadDashboard} onOpenProject={openProject} currentUser={currentUser} />
         )}

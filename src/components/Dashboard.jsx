@@ -24,6 +24,7 @@ const SCHEDULE_STATUS_LABELS = {
   due: "Due now",
   manual_required: "Manual send required",
   blocked: "Blocked / skipped",
+  automatic_off: "Automatic sending off",
   open: "Cycle open",
   requested: "Already requested"
 };
@@ -33,7 +34,7 @@ function scheduleStatusLabel(value) {
 }
 
 function scheduleStatusTone(value) {
-  if (["blocked", "manual_required"].includes(value)) return "weak";
+  if (["blocked", "manual_required", "automatic_off"].includes(value)) return "weak";
   if (["due", "upcoming_manual"].includes(value)) return "watch";
   if (["open", "requested"].includes(value)) return "strong";
   return "neutral";

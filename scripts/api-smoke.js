@@ -9,6 +9,11 @@ const project = {
   clientId: "cl_1",
   key: "acme-ug",
   name: "Acme University UG Admissions",
+  feedbackIntervalDays: 30,
+  nextCycleDueAt: "2026-11-01T00:00:00.000Z",
+  automaticFeedbackEnabled: true,
+  automaticQuickCheckinEnabled: true,
+  automaticQuickCheckinResumeAt: null,
   services: [
     { id: "svc_ppc", projectId: "prj_1", serviceKey: "ppc", name: "PPC / Media", ownerName: "Riya", managerEmail: "mgr.ppc@srvmedia.com" },
     { id: "svc_website", projectId: "prj_1", serviceKey: "website", name: "Website / SEO", ownerName: "Neha", managerEmail: "mgr.web@srvmedia.com" }
@@ -108,6 +113,12 @@ const store = {
   hasIssueForAnalysis: async () => false,
   hasOpenCycle: async () => false,
   createCycle: async (projectKey, options) => {
+    if (options.automatic === true && options.cycleType === "pulse" && project.automaticFeedbackEnabled === false) {
+      throw new Error("Automatic 30-day feedback is turned off for this project");
+    }
+    if (options.automatic === true && options.cycleType === "quick_checkin" && project.automaticQuickCheckinEnabled === false) {
+      throw new Error("Automatic quick check-ins are turned off for this project");
+    }
     calls.createdCycleRequests.push({ projectKey, options });
     return {
       cycle: { id: "cyc_1", projectId: project.id, cycleType: options.cycleType, status: "open" },
@@ -237,6 +248,22 @@ const store = {
     return store._session;
   },
   getDueFeedbackTargets: async () => [{ projectKey: project.key, cycleType: "pulse" }],
+  updateProjectAutomationSettings: async (projectId, input) => {
+    assert.strictEqual(projectId, project.id);
+    if (input.automaticFeedbackEnabled !== undefined) {
+      if (input.automaticFeedbackEnabled && project.automaticFeedbackEnabled === false) {
+        project.nextCycleDueAt = "2026-11-12T00:00:00.000Z";
+      }
+      project.automaticFeedbackEnabled = input.automaticFeedbackEnabled;
+    }
+    if (input.automaticQuickCheckinEnabled !== undefined) {
+      if (input.automaticQuickCheckinEnabled && project.automaticQuickCheckinEnabled === false) {
+        project.automaticQuickCheckinResumeAt = "2026-11-21T04:30:00.000Z";
+      }
+      project.automaticQuickCheckinEnabled = input.automaticQuickCheckinEnabled;
+    }
+    return { ...project };
+  },
   getInactiveFinalSweepCandidates: async () => store._inactiveFinalSweepCandidates,
   markInactiveFinalSweepClaimed: async (sessionId, conversationState) => {
     calls.inactiveCompletionClaims.push({ sessionId, conversationState });
@@ -956,6 +983,68 @@ async function scenario(name, fn) {
     const res = await req("GET", "/api/projects/acme-ug/workspace");
     assert.strictEqual(res.statusCode, 200);
     assert.strictEqual(JSON.parse(res.body).project.key, "acme-ug");
+  });
+
+  await scenario("project automatic sending controls preserve manual sends, open data and POC influence", async () => {
+    const previous = {
+      feedback: project.automaticFeedbackEnabled,
+      quick: project.automaticQuickCheckinEnabled,
+      quickResumeAt: project.automaticQuickCheckinResumeAt,
+      nextDue: project.nextCycleDueAt
+    };
+    const pocWeight = poc.weightPercentage;
+    const sessionBefore = store._session;
+    const automationClaimsBefore = new Map(calls.automationClaims);
+    calls.createdCycleRequests.length = 0;
+    calls.automation.length = 0;
+    try {
+      const turnedOff = await req("PUT", `/api/projects/${project.key}/automation-settings`, {
+        automaticFeedbackEnabled: false,
+        automaticQuickCheckinEnabled: false
+      });
+      assert.strictEqual(turnedOff.statusCode, 200, turnedOff.body);
+      const offPayload = JSON.parse(turnedOff.body);
+      assert.strictEqual(offPayload.project.automaticFeedbackEnabled, false);
+      assert.strictEqual(offPayload.project.automaticQuickCheckinEnabled, false);
+      assert.strictEqual(poc.weightPercentage, pocWeight, "POC influence must not be changed");
+      assert.strictEqual(store._session, sessionBefore, "existing sessions must not be changed");
+      assert.ok(calls.automation.some((event) => event.eventType === "project_automatic_sending_changed"));
+
+      const scheduled = await req("POST", "/api/automation/create-due-sessions", {});
+      assert.strictEqual(scheduled.statusCode, 201);
+      const scheduledPayload = JSON.parse(scheduled.body);
+      assert.strictEqual(scheduledPayload.cycles.length, 0);
+      assert.strictEqual(scheduledPayload.skipped.length, 1);
+      assert.match(scheduledPayload.skipped[0].reason, /automatic 30-day feedback is turned off/i);
+
+      const manual = await req("POST", `/api/projects/${project.key}/request-feedback`, {
+        cycleType: "pulse",
+        clientPocIds: [poc.id]
+      });
+      assert.strictEqual(manual.statusCode, 201, manual.body);
+      assert.strictEqual(calls.createdCycleRequests.at(-1).options.automatic, false);
+
+      const turnedOn = await req("PUT", `/api/projects/${project.key}/automation-settings`, {
+        automaticFeedbackEnabled: true,
+        automaticQuickCheckinEnabled: true
+      });
+      assert.strictEqual(turnedOn.statusCode, 200, turnedOn.body);
+      const onProject = JSON.parse(turnedOn.body).project;
+      assert.strictEqual(onProject.automaticFeedbackEnabled, true);
+      assert.strictEqual(onProject.automaticQuickCheckinEnabled, true);
+      assert.ok(onProject.automaticQuickCheckinResumeAt, "quick check-in reactivation must wait for the next scheduled date");
+      assert.notStrictEqual(onProject.nextCycleDueAt, previous.nextDue, "reactivation must start a fresh interval");
+      assert.strictEqual(poc.weightPercentage, pocWeight);
+    } finally {
+      project.automaticFeedbackEnabled = previous.feedback;
+      project.automaticQuickCheckinEnabled = previous.quick;
+      project.automaticQuickCheckinResumeAt = previous.quickResumeAt;
+      project.nextCycleDueAt = previous.nextDue;
+      store._session = sessionBefore;
+      calls.createdCycleRequests.length = 0;
+      calls.automationClaims.clear();
+      for (const [key, value] of automationClaimsBefore) calls.automationClaims.set(key, value);
+    }
   });
 
   await scenario("manual rating questions advance the correct survey state", async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Ban, Bell, Check, CheckCircle2, RefreshCw, RotateCcw, Send, Users } from "lucide-react";
-import { apiGet, apiPost } from "../api";
+import { Ban, Bell, Check, CheckCircle2, Power, RefreshCw, RotateCcw, Send, Users } from "lucide-react";
+import { apiGet, apiPost, apiPut } from "../api";
 import { cycleInRange, DateRange, FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
 import {
   formatCycleCoverage, formatCycleStatus, formatCycleType, formatDate, formatDateTime,
@@ -9,6 +9,7 @@ import {
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill, TonePill } from "./Ui.jsx";
 import ReportDownloads from "./ReportDownloads.jsx";
+import { hasPermission } from "../permissions";
 
 const COMPLETION_OPTIONS = [
   { value: "", label: "Any completion" },
@@ -112,7 +113,7 @@ function IssueNoteModal({ action, onCancel, onSubmit }) {
   );
 }
 
-export default function ProjectWorkspace({ dashboard, locationTick, onReload }) {
+export default function ProjectWorkspace({ dashboard, locationTick, onReload, currentUser }) {
   const [workspace, setWorkspace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -129,6 +130,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const [feedbackPocId, setFeedbackPocId] = useState("");
   const [manualWhatsappText, setManualWhatsappText] = useState("");
   const [manualWhatsappSending, setManualWhatsappSending] = useState(false);
+  const [automationSaving, setAutomationSaving] = useState("");
   const timelineRef = useRef(null);
   const issuesRef = useRef(null);
   const workspaceRequestRef = useRef(0);
@@ -435,6 +437,35 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
     }
   }
 
+  async function changeAutomaticSending(field, enabled) {
+    const project = workspace?.project;
+    if (!project || automationSaving) return;
+    const isFeedback = field === "automaticFeedbackEnabled";
+    const label = isFeedback
+      ? `automatic ${project.feedbackIntervalDays || 30}-day feedback`
+      : "automatic quick check-ins";
+    const effect = enabled
+      ? isFeedback
+        ? `The next automatic cycle will be scheduled ${project.feedbackIntervalDays || 30} days from now. Missed cycles will not be sent.`
+        : "The project will be eligible on the next 11th or 21st. Missed check-ins will not be sent."
+      : "Future automatic sends will stop. Existing cycles and conversations will continue, and manual send buttons will remain available.";
+    if (!window.confirm(`${enabled ? "Turn on" : "Turn off"} ${label} for ${project.name}?\n\n${effect}\n\nPOC status and influence percentages will not change.`)) return;
+
+    setAutomationSaving(field);
+    try {
+      const data = await apiPut(`/api/projects/${encodeURIComponent(project.key)}/automation-settings`, {
+        [field]: enabled
+      });
+      setWorkspace((current) => current ? { ...current, project: data.project } : current);
+      showToast(data.message || "Automatic sending setting updated.");
+      await onReload?.();
+    } catch (saveError) {
+      showToast(saveError.message);
+    } finally {
+      setAutomationSaving("");
+    }
+  }
+
   async function sendReminder() {
     if (!messagingEnabled) { showToast("WhatsApp messaging is paused. Email notifications remain active."); return; }
     if (!actionPocs.length) {
@@ -611,6 +642,9 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
   const allCycles = workspace.cycles || [];
   const projectEndFeedbackLocked = Boolean(project.endFeedbackRequestedAt)
     || allCycles.some((cycle) => cycle.cycleType === "project_end");
+  const canManageAutomaticSending = hasPermission(currentUser, "messaging_controls");
+  const automaticFeedbackOn = !projectEndFeedbackLocked && project.automaticFeedbackEnabled !== false;
+  const automaticQuickCheckinOn = !projectEndFeedbackLocked && project.automaticQuickCheckinEnabled !== false;
   // Feedback with no owner and no SLA: billing, a named person, a process.
   // It cannot be an issue, but dropping it loses real feedback — a client told
   // us his invoices were wrong and it went nowhere.
@@ -1070,6 +1104,67 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload }) 
           No cycle on this project matches these filters. Clear them to see the full history.
         </div>
       ) : null}
+
+      <section className="project-automation-controls" aria-labelledby="project-automation-title">
+        <div className="project-automation-heading">
+          <div>
+            <span className="eyebrow">Project sending controls</span>
+            <h3 id="project-automation-title">Automatic feedback delivery</h3>
+          </div>
+          <span className="project-automation-note">Manual send buttons remain available when automatic sending is off.</span>
+        </div>
+        <div className="project-automation-grid">
+          <article className={`project-automation-card ${automaticFeedbackOn ? "on" : "off"}`}>
+            <div className="project-automation-copy">
+              <Power size={20} aria-hidden="true" />
+              <div>
+                <strong>Automatic {project.feedbackIntervalDays || 30}-Day Feedback</strong>
+                <span>{projectEndFeedbackLocked
+                  ? "Closed after project-end feedback"
+                  : automaticFeedbackOn ? `Next due ${formatDate(project.nextCycleDueAt)}` : "Automatic sending off"}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              className={`automation-toggle ${automaticFeedbackOn ? "on" : "off"}`}
+              onClick={() => changeAutomaticSending("automaticFeedbackEnabled", project.automaticFeedbackEnabled === false)}
+              disabled={!canManageAutomaticSending || projectEndFeedbackLocked || Boolean(automationSaving)}
+              aria-pressed={automaticFeedbackOn}
+              title={!canManageAutomaticSending
+                ? "Only an Admin or Super Admin with Messaging controls can change this setting."
+                : projectEndFeedbackLocked ? "Project-end feedback has already closed recurring feedback." : undefined}
+            >
+              {automationSaving === "automaticFeedbackEnabled" ? "Saving…" : projectEndFeedbackLocked ? "CLOSED" : automaticFeedbackOn ? "ON" : "OFF"}
+            </button>
+          </article>
+          <article className={`project-automation-card ${automaticQuickCheckinOn ? "on" : "off"}`}>
+            <div className="project-automation-copy">
+              <Power size={20} aria-hidden="true" />
+              <div>
+                <strong>Automatic Quick Check-ins</strong>
+                <span>{projectEndFeedbackLocked
+                  ? "Closed after project-end feedback"
+                  : automaticQuickCheckinOn ? "Next eligible 11th or 21st" : "Automatic sending off"}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              className={`automation-toggle ${automaticQuickCheckinOn ? "on" : "off"}`}
+              onClick={() => changeAutomaticSending("automaticQuickCheckinEnabled", project.automaticQuickCheckinEnabled === false)}
+              disabled={!canManageAutomaticSending || projectEndFeedbackLocked || Boolean(automationSaving)}
+              aria-pressed={automaticQuickCheckinOn}
+              title={!canManageAutomaticSending
+                ? "Only an Admin or Super Admin with Messaging controls can change this setting."
+                : projectEndFeedbackLocked ? "Project-end feedback has already closed recurring feedback." : undefined}
+            >
+              {automationSaving === "automaticQuickCheckinEnabled" ? "Saving…" : projectEndFeedbackLocked ? "CLOSED" : automaticQuickCheckinOn ? "ON" : "OFF"}
+            </button>
+          </article>
+        </div>
+        {projectEndFeedbackLocked ? (
+          <p className="project-automation-locked">Project-end feedback has already been sent, so recurring automatic delivery stays closed.</p>
+        ) : null}
+      </section>
 
       <div className="metric-row">
         <MetricCard
