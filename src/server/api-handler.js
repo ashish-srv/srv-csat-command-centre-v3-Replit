@@ -6899,6 +6899,67 @@ function quickCheckinSessionId(body) {
   return match ? match[1] : null;
 }
 
+function normalizedQuickCheckinReply(text) {
+  return String(text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[’]/g, "'")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+}
+
+function quickCheckinCoveredReply(text) {
+  const normalized = normalizedQuickCheckinReply(text);
+  return /^(?:everything|it|that|this)\s+(?:is|was|has been)?\s*(?:already\s+)?(?:covered|sorted|handled)(?:\s+for now)?$/i.test(normalized)
+    || /^(?:all|everything)\s+(?:covered|sorted|handled)(?:\s+for now)?$/i.test(normalized)
+    || /^(?:nothing|no)\s+(?:else|more|further)(?:\s+(?:to add|from (?:me|my side)|at the moment|for now))?$/i.test(normalized)
+    || /^(?:that's|that is)\s+(?:all|it)(?:\s+(?:from (?:me|my side)|for now))?$/i.test(normalized)
+    || /^(?:done|covered|sorted)(?:\s+for now)?$/i.test(normalized);
+}
+
+function quickCheckinMeetingReferenceWithoutDetail(text) {
+  const normalized = normalizedQuickCheckinReply(text);
+  const subjectFirst = /^(?:(?:the\s+)?same|it|this|that)\s+(?:(?:was|has been|is)\s+)?(?:already\s+)?(?:discussed|covered|mentioned|raised|shared|taken up)\s+(?:(?:in|during|on)\s+)?(?:the\s+)?(?:today's\s+)?(?:meeting|call|discussion)(?:\s+today)?$/i;
+  const actionFirst = /^(?:we\s+)?(?:have\s+)?(?:already\s+)?(?:discussed|covered|mentioned|raised|shared|taken up|spoke about|talked about)\s+(?:(?:the\s+)?same|it|this|that)?\s*(?:(?:in|during|on)\s+)?(?:the\s+)?(?:today's\s+)?(?:meeting|call|discussion)(?:\s+today)?$/i;
+  return subjectFirst.test(normalized) || actionFirst.test(normalized);
+}
+
+function quickCheckinAcknowledgementReply(text) {
+  const normalized = normalizedQuickCheckinReply(text);
+  return /^(?:ok|okay|okey|sure|alright|all right|noted|understood|got it|yes|yep|yeah|thanks|thank you|👍(?:🏻|🏼|🏽|🏾|🏿)?)$/i.test(normalized);
+}
+
+function quickCheckinDetailDecision(text, interpretation) {
+  if (quickCheckinCoveredReply(text)) return "covered";
+  if (quickCheckinMeetingReferenceWithoutDetail(text)) return "meeting_reference";
+  if (quickCheckinAcknowledgementReply(text)) return "acknowledgement";
+
+  if (interpretation?.deferRequested || interpretation?.intent === "defer") return "defer";
+  if (interpretation?.intent === "negative") return "covered";
+  if (interpretation?.intent === "affirmative") return "acknowledgement";
+  if (interpretation?.intent === "off_topic" || interpretation?.intent === "rating") return "off_topic";
+  if (["more_detail", "unclear"].includes(interpretation?.intent)) return "needs_detail";
+
+  if (interpretation?.intent === "feedback") {
+    const captured = Array.isArray(interpretation.captured) ? interpretation.captured : [];
+    const hasCompleteServicePoint = captured.some((item) => (
+      String(item.summary || "").trim()
+      && (item.needsFollowUp !== true || interpretation.explainsProblem === true || item.sentiment === "positive")
+    ));
+    const hasMeaningfulFeedback = hasCompleteServicePoint
+      || (Array.isArray(interpretation.observations) && interpretation.observations.length > 0)
+      || (Array.isArray(interpretation.appreciations) && interpretation.appreciations.length > 0)
+      || interpretation.explainsProblem === true
+      || interpretation.serviceScope === "overall_feedback";
+    return hasMeaningfulFeedback ? "feedback" : "needs_detail";
+  }
+
+  // A model timeout, rejected payload or unavailable key must never turn an
+  // uncertain message into completed feedback. Keep waiting instead.
+  return "uncertain";
+}
+
 async function handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil }) {
   const providerMessageId = body.providerMessageId || null;
   if (providerMessageId && await store.hasProviderMessage(providerMessageId)) {
@@ -6934,12 +6995,13 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   let postCompletionHandoff = false;
   let postCompletionHandoffEvent = null;
 
-  const interpretAndRecord = async () => {
-    let interpretation = await interpretReply({
+  const interpretDetail = async () => interpretReply({
       project,
       question: `What needs improvement, what is going well, or what should management know about ${project.name}?`,
       text
     });
+  const recordDetail = async (inputInterpretation) => {
+    let interpretation = inputInterpretation;
     if (!interpretation.sentiment) {
       const negative = /\b(issue|problem|improv\w*|delay\w*|late|slow|poor|bad|concern|not (?:good|working|happy)|unhappy|miss\w*)\b/i.test(text);
       const positive = /\b(good|great|fine|excellent|happy|appreciat\w*|well done|satisfied)\b/i.test(text);
@@ -6953,6 +7015,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     if (recorded.sentiment !== "positive") alertText = text;
     return recorded;
   };
+  const interpretAndRecord = async () => recordDetail(await interpretDetail());
 
   const responseDeadline = Date.parse(
     state.state === "quick_checkin_window"
@@ -6994,6 +7057,39 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   } else if (state.state === "quick_checkin_choice" && /^(?:yes|no|ok|okay)$/i.test(normalized)) {
     result = { session };
     replyText = "Please choose All good if everything is going well, or Share feedback if anything needs improvement or should be brought to management's attention.";
+  } else if (state.state === "quick_checkin_detail") {
+    let decision = quickCheckinDetailDecision(text, null);
+    let interpretation = null;
+    if (!["covered", "meeting_reference", "acknowledgement"].includes(decision)) {
+      interpretation = await interpretDetail();
+      decision = quickCheckinDetailDecision(text, interpretation);
+    }
+
+    if (decision === "covered") {
+      result = await store.applyQuickCheckinResponse(session.id, { outcome: "feedback_shared" });
+      replyText = `Thank you, ${poc.salutation || poc.name}. We understand there is nothing further you would like the Directors to note at the moment. Your response has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+    } else if (decision === "meeting_reference") {
+      result = { session };
+      replyText = `Thank you for letting us know, ${poc.salutation || poc.name}. We understand this was discussed in today's meeting. If there is anything you would like the Directors to specifically note or follow up on, please feel free to share it here. If everything is covered, just let us know.`;
+    } else if (decision === "acknowledgement") {
+      result = { session };
+      replyText = `Thank you, ${poc.salutation || poc.name}. Please share the feedback whenever convenient.`;
+    } else if (decision === "defer") {
+      result = { session };
+      replyText = `No problem, ${poc.salutation || poc.name}. Please share it here whenever convenient.`;
+    } else if (decision === "feedback") {
+      result = await recordDetail(interpretation);
+      replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+    } else if (decision === "off_topic") {
+      result = { session };
+      replyText = "To continue this quick check-in, please share what needs improvement, any issue you are facing, or anything you would like management to be aware of.";
+    } else if (decision === "needs_detail") {
+      result = { session };
+      replyText = `Thank you, ${poc.salutation || poc.name}. Could you please add a little more detail about what needs improvement or what you would like management to follow up on?`;
+    } else {
+      result = { session };
+      replyText = "I want to make sure your feedback is recorded accurately. Please share what needs improvement, any issue you are facing, or anything you would like management to be aware of.";
+    }
   } else {
     result = await interpretAndRecord();
     replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;

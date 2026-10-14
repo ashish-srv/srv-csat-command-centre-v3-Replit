@@ -42,6 +42,7 @@ const calls = {
   deletedClients: [],
   updatedProjects: [],
   deletedClusters: [],
+  quickCheckinResponses: [],
   reminderOptions: [],
   inactiveCompletionClaims: [],
   inactiveCompletionFinishes: [],
@@ -104,6 +105,38 @@ const store = {
     if (store._atomicDuplicateIds.has(message.providerMessageId)) return null;
     if (calls.messages.some((m) => m.providerMessageId === message.providerMessageId)) return null;
     return store.addMessage(sessionId, message);
+  },
+  applyQuickCheckinResponse: async (sessionId, input = {}) => {
+    const now = new Date().toISOString();
+    const detail = String(input.detail || "").trim();
+    const waitingForDetail = input.outcome === "needs_improvement" && !detail;
+    const previousState = store._session.conversationState || {};
+    const outcome = waitingForDetail
+      ? "needs_improvement"
+      : detail || input.outcome === "feedback_shared" || previousState.quickCheckinOutcome === "feedback_shared"
+        ? "feedback_shared"
+        : "all_good";
+    const conversationState = {
+      ...previousState,
+      state: waitingForDetail ? "quick_checkin_detail" : "quick_checkin_window",
+      quickCheckinOutcome: outcome,
+      quickCheckinDetail: detail || previousState.quickCheckinDetail || null,
+      quickCheckinWindowExpiresAt: waitingForDetail ? null : "2099-01-01T00:10:00.000Z"
+    };
+    store._session = {
+      ...store._session,
+      status: "partial",
+      completionStatus: "partial",
+      lastClientResponseAt: now,
+      conversationState
+    };
+    calls.quickCheckinResponses.push({ sessionId, input, session: store._session });
+    return {
+      session: store._session,
+      sentiment: input.interpretation?.sentiment || "neutral",
+      service: null,
+      issue: null
+    };
   },
   applyAnalysis: async (sessionId, analysis) => {
     calls.analyses.push(analysis);
@@ -2419,6 +2452,167 @@ async function scenario(name, fn) {
     assert.strictEqual(calls.automation.filter((e) => e.eventType === "manager_alert").length, 1);
     assert.ok(!calls.automation.some((e) => e.eventType === "post_completion_message"));
     assert.ok(/already closed/i.test(payload.whatsappReplyText));
+  });
+
+  await scenario("quick check-in acknowledgements and meeting references keep waiting for feedback", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    const responsesBefore = calls.quickCheckinResponses.length;
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async () => { throw new Error("Gemini must not run for deterministic pending-detail replies"); };
+    store._session = {
+      id: "sess_1", cycleId: "cyc_quick", projectId: "prj_1", clientPocId: "poc_1",
+      status: "partial", completionStatus: "partial", sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: {
+        state: "quick_checkin_detail",
+        quickCheckinOutcome: "needs_improvement",
+        quickCheckinWindowExpiresAt: null
+      }
+    };
+    try {
+      const acknowledgement = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "Okay" });
+      const acknowledgementPayload = JSON.parse(acknowledgement.body);
+      assert.strictEqual(acknowledgementPayload.state, "quick_checkin_detail");
+      assert.match(acknowledgementPayload.whatsappReplyText, /share the feedback whenever convenient/i);
+      assert.doesNotMatch(acknowledgementPayload.whatsappReplyText, /next 10 minutes/i);
+      assert.strictEqual(calls.quickCheckinResponses.length, responsesBefore);
+
+      const meetingReference = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        text: "Discussed the same in the today’s meeting"
+      });
+      const meetingPayload = JSON.parse(meetingReference.body);
+      assert.strictEqual(meetingPayload.state, "quick_checkin_detail");
+      assert.match(meetingPayload.whatsappReplyText, /Directors to specifically note or follow up on/i);
+      assert.match(meetingPayload.whatsappReplyText, /If everything is covered, just let us know/i);
+      assert.doesNotMatch(meetingPayload.whatsappReplyText, /next 10 minutes/i);
+      assert.strictEqual(calls.quickCheckinResponses.length, responsesBefore);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
+  });
+
+  await scenario("quick check-in understands a natural covered response without exact wording", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output_text: JSON.stringify({
+          intent: "negative", deferRequested: false, serviceScope: "none", sentiment: "neutral", rating: null,
+          serviceHint: null, serviceHints: [], explainsProblem: false, isObservation: false,
+          serviceFeedback: [], observations: [], appreciations: []
+        })
+      })
+    });
+    store._session = {
+      id: "sess_1", cycleId: "cyc_quick", projectId: "prj_1", clientPocId: "poc_1",
+      status: "partial", completionStatus: "partial", sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: { state: "quick_checkin_detail", quickCheckinOutcome: "needs_improvement" }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        text: "I think we have taken care of everything already"
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(payload.state, "quick_checkin_window");
+      assert.strictEqual(payload.session.conversationState.quickCheckinOutcome, "feedback_shared");
+      assert.match(payload.whatsappReplyText, /nothing further/i);
+      assert.match(payload.whatsappReplyText, /next 10 minutes/i);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
+  });
+
+  await scenario("quick check-in starts its window only after substantive feedback", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output_text: JSON.stringify({
+          intent: "feedback", deferRequested: false, serviceScope: "none", sentiment: "positive", rating: null,
+          serviceHint: "PPC / Media", serviceHints: ["PPC / Media"], explainsProblem: true, isObservation: false,
+          serviceFeedback: [{ serviceHint: "PPC / Media", sentiment: "positive", summary: "PPC reports are clear and timely", declined: false, needsFollowUp: false }],
+          observations: [], appreciations: []
+        })
+      })
+    });
+    store._session = {
+      id: "sess_1", cycleId: "cyc_quick", projectId: "prj_1", clientPocId: "poc_1",
+      status: "partial", completionStatus: "partial", sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: { state: "quick_checkin_detail", quickCheckinOutcome: "needs_improvement" }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        text: "PPC reports are clear and timely"
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(payload.state, "quick_checkin_window");
+      assert.strictEqual(payload.session.conversationState.quickCheckinOutcome, "feedback_shared");
+      assert.match(payload.whatsappReplyText, /feedback has been recorded/i);
+      assert.match(payload.whatsappReplyText, /next 10 minutes/i);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
+  });
+
+  await scenario("quick check-in fails safe when feedback meaning cannot be confirmed", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    const responsesBefore = calls.quickCheckinResponses.length;
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async () => { throw new Error("simulated Gemini timeout"); };
+    store._session = {
+      id: "sess_1", cycleId: "cyc_quick", projectId: "prj_1", clientPocId: "poc_1",
+      status: "partial", completionStatus: "partial", sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: { state: "quick_checkin_detail", quickCheckinOutcome: "needs_improvement" }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "Something different" });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(payload.state, "quick_checkin_detail");
+      assert.match(payload.whatsappReplyText, /recorded accurately/i);
+      assert.doesNotMatch(payload.whatsappReplyText, /next 10 minutes/i);
+      assert.strictEqual(calls.quickCheckinResponses.length, responsesBefore);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
   });
 
   await scenario("closed quick check-in routes substantive messages to human handoff", async () => {

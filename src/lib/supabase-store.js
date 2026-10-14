@@ -3522,7 +3522,7 @@ class SupabaseStore {
         : new Date(nowDate.getTime() + (10 * 60 * 1000)).toISOString();
     const outcome = waitingForDetail
       ? "needs_improvement"
-      : detail || previousState.quickCheckinOutcome === "feedback_shared"
+      : detail || input.outcome === "feedback_shared" || previousState.quickCheckinOutcome === "feedback_shared"
         ? "feedback_shared"
         : "all_good";
     const conversationState = {
