@@ -6492,6 +6492,18 @@ async function handleApiRequest(request) {
       prepared.push({ ...row, name, serviceKey, serviceCatalogId: catalog?.id || null, projectId });
     }
 
+    const currentScope = [...new Set(current.map((service) => service.serviceKey))].sort();
+    const requestedScope = [...new Set(prepared.map((service) => service.serviceKey))].sort();
+    const serviceScopeChanged = currentScope.length !== requestedScope.length
+      || currentScope.some((serviceKey, index) => serviceKey !== requestedScope[index]);
+    if (serviceScopeChanged && typeof store.hasOpenFeedbackCycle === "function" && await store.hasOpenFeedbackCycle(projectId)) {
+      return error(
+        409,
+        "Project services cannot be added or removed while a feedback cycle is open",
+        "Close or complete the current cycle first so its service scope cannot change mid-conversation. Owners and KPI notes may still be updated without changing the service list."
+      );
+    }
+
     const removed = current.filter((service) => !seenIds.has(service.id));
     for (const service of removed) await store.deleteProjectService(service.id);
     const saved = [];

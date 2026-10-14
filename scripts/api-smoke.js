@@ -487,7 +487,7 @@ const store = {
   updateProjectService: async (id, input) => ({ id, ...input }),
   deleteProjectService: async (id) => { calls.deletedServices.push(id); return true; },
   servicesForProject: async (projectId) => project.services.filter((service) => service.projectId === projectId),
-  hasOpenFeedbackCycle: async () => false,
+  hasOpenFeedbackCycle: async () => Boolean(store._hasOpenFeedbackCycle),
   listServiceChangeRequests: async ({ projectIds = null, status = null } = {}) => store._serviceChangeRequests
     .filter((request) => !projectIds || projectIds.includes(request.projectId))
     .filter((request) => !status || request.status === status)
@@ -4829,6 +4829,25 @@ async function scenario(name, fn) {
     assert.deepStrictEqual(payload.removed, ["svc_website"]);
     assert.strictEqual(calls.deletedServices.length, beforeDeleted + 1);
     assert.strictEqual(payload.services[1].serviceKey, "design");
+  });
+
+  await scenario("project service scope cannot change during an open feedback cycle", async () => {
+    const beforeDeleted = calls.deletedServices.length;
+    store._hasOpenFeedbackCycle = true;
+    try {
+      const res = await req("PUT", "/api/admin/projects/prj_1/services", {
+        services: [
+          { id: "svc_ppc", name: "PPC / Media", internalPocId: "ip_1", kpis: "Qualified leads" },
+          { name: "Design", internalPocId: "ip_1", kpis: "Creative quality" }
+        ]
+      }, PIN);
+      const payload = JSON.parse(res.body);
+      assert.strictEqual(res.statusCode, 409);
+      assert.match(payload.error, /cannot be added or removed while a feedback cycle is open/i);
+      assert.strictEqual(calls.deletedServices.length, beforeDeleted);
+    } finally {
+      store._hasOpenFeedbackCycle = false;
+    }
   });
 
   await scenario("service write without the PIN is rejected", async () => {

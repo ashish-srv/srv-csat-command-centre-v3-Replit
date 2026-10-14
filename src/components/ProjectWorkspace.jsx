@@ -9,6 +9,7 @@ import {
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill, TonePill } from "./Ui.jsx";
 import ReportDownloads from "./ReportDownloads.jsx";
+import ProjectConfiguration from "./ProjectConfiguration.jsx";
 import { hasPermission } from "../permissions";
 
 const COMPLETION_OPTIONS = [
@@ -1104,6 +1105,14 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
           No cycle on this project matches these filters. Clear them to see the full history.
         </div>
       ) : null}
+
+      <ProjectConfiguration
+        workspace={workspace}
+        currentUser={currentUser}
+        onRefresh={() => loadWorkspace(project.key)}
+        onReload={onReload}
+        showToast={showToast}
+      />
 
       <section className="project-automation-controls" aria-labelledby="project-automation-title">
         <div className="project-automation-heading">
