@@ -855,6 +855,7 @@ function finalSweepPromptMessage(session, messages = []) {
  * against a client reply or normal completion arriving between scans.
  */
 function inactiveFinalSweepEligibility(session, messages = [], nowValue = new Date()) {
+  messages = conversationRelevantMessages(messages);
   const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
   if (Number.isNaN(now.getTime())) return { eligible: false, reason: "invalid_now" };
   if (!session || session.sessionType === "quick_checkin") {
@@ -2022,6 +2023,90 @@ async function pausedMessagingResponse(store) {
   });
 }
 
+/**
+ * WhatsApp Business greeting/away messages arrive through Meta as ordinary
+ * inbound text.  They are not client feedback, but without this guard they can
+ * advance a full-feedback questionnaire or complete a quick check-in.
+ *
+ * Keep this deliberately conservative: require either an explicit automated
+ * message label, or two strong template signals. A real client saying only
+ * "I am busy" must continue through the normal deferral flow.
+ */
+function automatedWhatsappReplyReason(text) {
+  const normalized = String(text || "")
+    .toLowerCase()
+    .replace(/[’]/g, "'")
+    .replace(/[^a-z0-9'\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return null;
+
+  if (/\b(?:automated|automatic|auto)\s+(?:reply|response|message)\b|\baway\s+message\b/.test(normalized)) {
+    return "explicit_automated_reply";
+  }
+
+  const contactGreeting = /\b(?:thank you|thanks)\s+for\s+(?:contacting|reaching out(?: to us)?|your message|messaging us|getting in touch)\b/.test(normalized);
+  const helpPrompt = /\b(?:please|pls|kindly)?\s*let us know\s+(?:how|what)\b.{0,45}\b(?:help|assist)\b|\bhow\s+(?:can|may)\s+we\s+(?:help|assist)\b/.test(normalized);
+  const unavailable = /\b(?:i am|i'm|we are|we're)\s+(?:currently\s+|temporarily\s+)?(?:unavailable|away|out of (?:the )?office)\b/.test(normalized);
+  const futureResponse = /\b(?:will|shall)\s+(?:respond|reply|get back(?: to you)?|contact you)\b.{0,45}\b(?:soon|shortly|as soon as possible|at the earliest)\b/.test(normalized);
+  const hoursNotice = /\b(?:business|office|working)\s+hours?\b/.test(normalized)
+    && /\b(?:respond|reply|get back|contact)\b/.test(normalized);
+
+  if (contactGreeting && helpPrompt) return "business_greeting";
+  if (contactGreeting && unavailable && futureResponse) return "away_reply";
+  if (contactGreeting && hoursNotice) return "outside_business_hours";
+  return null;
+}
+
+function conversationRelevantMessages(messages = []) {
+  return messages.filter((message) => message?.metadata?.ignoredForConversation !== true);
+}
+
+async function recordAutomatedWhatsappReply(store, session, poc, body, text, reason) {
+  const providerMessageId = body.providerMessageId || null;
+  if (
+    providerMessageId
+    && typeof store.hasProviderMessage === "function"
+    && await store.hasProviderMessage(providerMessageId)
+  ) {
+    return json(200, {
+      duplicate: true,
+      automatedReply: true,
+      sendToWhatsapp: false,
+      sessionId: session.id
+    });
+  }
+
+  const inbound = {
+    speaker: body.fromName || poc?.salutation || poc?.name || "Client",
+    side: "client",
+    body: text,
+    providerMessageId,
+    metadata: {
+      source: "whatsapp",
+      from: body.from || null,
+      buttonPayload: body.buttonPayload || body.buttonId || null,
+      automatedReply: true,
+      automatedReplyReason: reason,
+      ignoredForConversation: true
+    }
+  };
+  const message = providerMessageId && typeof store.addInboundMessage === "function"
+    ? await store.addInboundMessage(session.id, inbound)
+    : await store.addMessage(session.id, inbound);
+
+  return json(200, {
+    duplicate: !message,
+    automatedReply: true,
+    automatedReplyReason: reason,
+    ignored: true,
+    sendToWhatsapp: false,
+    sessionId: session.id,
+    session,
+    receivedMessage: message || null
+  });
+}
+
 async function recordPausedInbound(store, session, poc, body, text, channel = "whatsapp") {
   const providerMessageId = body.providerMessageId || null;
   if (providerMessageId && typeof store.hasProviderMessage === "function" && await store.hasProviderMessage(providerMessageId)) {
@@ -2241,7 +2326,7 @@ async function analyzeTimedOutPartialSession({
   closureReason = "partial_after_three_reminders"
 }) {
   if (typeof store.getMessagesForSession !== "function") return null;
-  const messages = await store.getMessagesForSession(session.id);
+  const messages = conversationRelevantMessages(await store.getMessagesForSession(session.id));
   const clientMessages = messages.filter((message) => message.side === "client");
   if (!clientMessages.length) {
     // A manual Stop must also remove any stale/interim score that predates the
@@ -2446,6 +2531,7 @@ async function patchSession(store, sessionId, body) {
 // ---------------------------------------------------------------------
 
 function clientBurstContext(messages = [], currentMessage = null) {
+  messages = conversationRelevantMessages(messages);
   if (!currentMessage) return { superseded: false, text: "", previousMessages: messages };
   const currentIndex = messages.findIndex((message) => message.id === currentMessage.id);
   if (currentIndex < 0) {
@@ -2505,7 +2591,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   }
 
   let previousMessages = typeof store.getMessagesForSession === "function"
-    ? await store.getMessagesForSession(session.id)
+    ? conversationRelevantMessages(await store.getMessagesForSession(session.id))
     : [];
 
   const inbound = {
@@ -2537,7 +2623,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   // older invocation is suppressed. Refreshing the session also prevents a
   // queued invocation from starting with state another invocation advanced.
   if (channel === "whatsapp" && providerMessageId && typeof store.getMessagesForSession === "function") {
-    const liveMessages = await store.getMessagesForSession(session.id);
+    const liveMessages = conversationRelevantMessages(await store.getMessagesForSession(session.id));
     const burst = clientBurstContext(liveMessages, clientMessage);
     if (burst.superseded) return supersededTurnResponse(session, clientMessage);
     text = burst.text || text;
@@ -3040,7 +3126,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   // one. Do not persist stale state or emit a second reply; the newer request
   // sees the complete consecutive-message burst and will answer it once.
   if (channel === "whatsapp" && providerMessageId && typeof store.getMessagesForSession === "function") {
-    const liveMessages = await store.getMessagesForSession(session.id);
+    const liveMessages = conversationRelevantMessages(await store.getMessagesForSession(session.id));
     if (clientBurstContext(liveMessages, clientMessage).superseded) {
       return supersededTurnResponse(session, clientMessage);
     }
@@ -3278,7 +3364,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       && turn.conversationState.overallRatingAsked
       && typeof store.getMessagesForSession === "function"
     ) {
-      const liveMessages = await store.getMessagesForSession(session.id);
+      const liveMessages = conversationRelevantMessages(await store.getMessagesForSession(session.id));
       const latestRating = latestExplicitOverallRating(liveMessages, true);
       const sync = syncTurnToLatestRating(turn, latestRating, project, poc, text);
       if (sync.changed && sync.closed) {
@@ -4670,7 +4756,7 @@ async function handleApiRequest(request) {
     }
 
     const messages = typeof store.getMessagesForSession === "function"
-      ? await store.getMessagesForSession(sessionId)
+      ? conversationRelevantMessages(await store.getMessagesForSession(sessionId))
       : [];
     if (!messages.some((message) => message.side === "client")) {
       return error(409, "Nothing to score", "The client has not replied to this session.");
@@ -4959,6 +5045,10 @@ async function handleApiRequest(request) {
     if (!session) return error(404, `No feedback session found for POC ${poc.name}`);
 
     const project = await store.getProjectById(session.projectId);
+    const automatedReplyReason = automatedWhatsappReplyReason(text);
+    if (automatedReplyReason) {
+      return recordAutomatedWhatsappReply(store, session, poc, body, text, automatedReplyReason);
+    }
     if (!await whatsappMessagingEnabled(store)) {
       return recordPausedInbound(store, session, poc, body, text);
     }
@@ -4986,6 +5076,10 @@ async function handleApiRequest(request) {
 
     const project = await store.getProjectById(session.projectId);
     const poc = await store.getClientPocById(session.clientPocId);
+    const automatedReplyReason = automatedWhatsappReplyReason(text);
+    if (automatedReplyReason) {
+      return recordAutomatedWhatsappReply(store, session, poc, body, text, automatedReplyReason);
+    }
     if (!await whatsappMessagingEnabled(store)) {
       return recordPausedInbound(store, session, poc, body, text);
     }
@@ -5031,7 +5125,7 @@ async function handleApiRequest(request) {
 
     for (const initialSession of candidates) {
       const initialMessages = typeof store.getMessagesForSession === "function"
-        ? await store.getMessagesForSession(initialSession.id)
+        ? conversationRelevantMessages(await store.getMessagesForSession(initialSession.id))
         : [];
       let assessment = inactiveFinalSweepEligibility(initialSession, initialMessages, now);
       if (!assessment.eligible && !assessment.closeWithoutMessage) {
@@ -5066,7 +5160,7 @@ async function handleApiRequest(request) {
       // normal flow may have completed while this scheduler was selecting rows.
       const session = await store.getSession(initialSession.id);
       const messages = typeof store.getMessagesForSession === "function"
-        ? await store.getMessagesForSession(initialSession.id)
+        ? conversationRelevantMessages(await store.getMessagesForSession(initialSession.id))
         : [];
       assessment = inactiveFinalSweepEligibility(session, messages, now);
       if (!assessment.eligible && !assessment.closeWithoutMessage) {
@@ -7069,6 +7163,19 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   } else if (state.state === "quick_checkin_choice" && /^(?:yes|no|ok|okay)$/i.test(normalized)) {
     result = { session };
     replyText = "Please choose All good if everything is going well, or Share feedback if anything needs improvement or should be brought to management's attention.";
+  } else if (state.state === "quick_checkin_choice") {
+    const interpretation = await interpretDetail();
+    const decision = quickCheckinDetailDecision(text, interpretation);
+    if (decision === "feedback") {
+      result = await recordDetail(interpretation);
+      replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+    } else if (decision === "defer") {
+      result = { session };
+      replyText = `No problem, ${poc.salutation || poc.name}. Please respond whenever convenient by choosing All good or Share feedback.`;
+    } else {
+      result = { session };
+      replyText = "Please choose All good if everything is going well, or Share feedback if anything needs improvement or should be brought to management's attention.";
+    }
   } else if (state.state === "quick_checkin_detail") {
     let decision = quickCheckinDetailDecision(text, null);
     let interpretation = null;
@@ -7103,8 +7210,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       replyText = "I want to make sure your feedback is recorded accurately. Please share what needs improvement, any issue you are facing, or anything you would like management to be aware of.";
     }
   } else {
-    result = await interpretAndRecord();
-    replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+    result = { session };
+    replyText = "Please choose All good if everything is going well, or Share feedback if anything needs improvement or should be brought to management's attention.";
   }
 
   if (alertText) {

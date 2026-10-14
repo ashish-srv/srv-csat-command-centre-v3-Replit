@@ -2429,6 +2429,203 @@ async function scenario(name, fn) {
     assert.strictEqual(res.statusCode, 404);
   });
 
+  await scenario("WhatsApp Business greetings do not advance full-feedback sessions or promise a handoff", async () => {
+    const priorSession = store._session;
+    const priorMessages = [...calls.messages];
+    const analysesBefore = calls.analyses.length;
+    const automationsBefore = calls.automation.length;
+    store._session = {
+      ...priorSession,
+      status: "pending",
+      completionStatus: "not_started",
+      sessionType: "project_end",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: { state: "waiting_for_project_end_review", turnCount: 0 }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        providerMessageId: "wamid_business_greeting",
+        fromName: "University Admissions",
+        text: "Thank you for contacting Chanakya University Admissions Department! Please let us know how we can help you."
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(payload.automatedReply, true);
+      assert.strictEqual(payload.automatedReplyReason, "business_greeting");
+      assert.strictEqual(payload.sendToWhatsapp, false);
+      assert.strictEqual(calls.analyses.length, analysesBefore);
+      assert.strictEqual(calls.automation.length, automationsBefore);
+      assert.strictEqual(store._session.conversationState.state, "waiting_for_project_end_review");
+      assert.strictEqual(calls.messages.at(-1).metadata.ignoredForConversation, true);
+      assert.strictEqual(calls.messages.at(-1).side, "client");
+    } finally {
+      store._session = priorSession;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+    }
+  });
+
+  await scenario("WhatsApp Business greetings do not advance 30-day feedback sessions", async () => {
+    const priorSession = store._session;
+    const priorMessages = [...calls.messages];
+    const analysesBefore = calls.analyses.length;
+    const automationsBefore = calls.automation.length;
+    store._session = {
+      ...priorSession,
+      status: "pending",
+      completionStatus: "not_started",
+      sessionType: "pulse",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: { state: "waiting_for_service_feedback", turnCount: 0 }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        providerMessageId: "wamid_monthly_business_greeting",
+        fromName: "MIT Vishwaprayag University",
+        text: "Thanks for Contacting MIT VISHWAPRAYAG UNIVERSITY SOLAPUR !!! Pls let us know how can we help you"
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(payload.automatedReply, true);
+      assert.strictEqual(payload.automatedReplyReason, "business_greeting");
+      assert.strictEqual(payload.sendToWhatsapp, false);
+      assert.strictEqual(calls.analyses.length, analysesBefore);
+      assert.strictEqual(calls.automation.length, automationsBefore);
+      assert.strictEqual(store._session.status, "pending");
+      assert.strictEqual(store._session.conversationState.state, "waiting_for_service_feedback");
+      assert.strictEqual(store._session.reminderDueAt, "2099-01-02T00:00:00.000Z");
+    } finally {
+      store._session = priorSession;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+    }
+  });
+
+  await scenario("WhatsApp away replies do not complete quick check-ins or open the ten-minute window", async () => {
+    const priorSession = store._session;
+    const priorMessages = [...calls.messages];
+    const responsesBefore = calls.quickCheckinResponses.length;
+    const automationsBefore = calls.automation.length;
+    store._session = {
+      ...priorSession,
+      status: "pending",
+      completionStatus: "not_started",
+      sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: {
+        state: "quick_checkin_choice",
+        quickCheckinOutcome: "awaiting_response",
+        quickCheckinWindowExpiresAt: null
+      }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        providerMessageId: "wamid_away_reply",
+        fromName: "Sri",
+        text: "Hello Sriparna this side. Thank you for your message. I am unavailable right now, but will respond as soon as possible."
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(payload.automatedReply, true);
+      assert.strictEqual(payload.automatedReplyReason, "away_reply");
+      assert.strictEqual(payload.sendToWhatsapp, false);
+      assert.strictEqual(calls.quickCheckinResponses.length, responsesBefore);
+      assert.strictEqual(calls.automation.length, automationsBefore);
+      assert.strictEqual(store._session.conversationState.state, "quick_checkin_choice");
+      assert.strictEqual(store._session.conversationState.quickCheckinWindowExpiresAt, null);
+      assert.strictEqual(calls.messages.at(-1).metadata.ignoredForConversation, true);
+    } finally {
+      store._session = priorSession;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+    }
+  });
+
+  await scenario("a genuine quick check-in postponement stays open and is not mistaken for an automated reply", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorSession = store._session;
+    const priorMessages = [...calls.messages];
+    const responsesBefore = calls.quickCheckinResponses.length;
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output_text: JSON.stringify({
+          intent: "defer", deferRequested: true, serviceScope: "none", sentiment: "neutral", rating: null,
+          serviceHint: null, serviceHints: [], explainsProblem: false, isObservation: false,
+          serviceFeedback: [], observations: [], appreciations: []
+        })
+      })
+    });
+    store._session = {
+      ...priorSession,
+      status: "pending",
+      completionStatus: "not_started",
+      sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: {
+        state: "quick_checkin_choice",
+        quickCheckinOutcome: "awaiting_response",
+        quickCheckinWindowExpiresAt: null
+      }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        providerMessageId: "wamid_real_postponement",
+        fromName: "Client",
+        text: "I am unavailable right now. I will reply later."
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(response.statusCode, 201);
+      assert.notStrictEqual(payload.automatedReply, true);
+      assert.strictEqual(payload.state, "quick_checkin_choice");
+      assert.match(payload.whatsappReplyText, /whenever convenient/i);
+      assert.doesNotMatch(payload.whatsappReplyText, /next 10 minutes/i);
+      assert.strictEqual(calls.quickCheckinResponses.length, responsesBefore);
+      assert.strictEqual(store._session.conversationState.quickCheckinWindowExpiresAt, null);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+      store._session = priorSession;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+    }
+  });
+
+  await scenario("automated replies after completion do not create human-handoff emails", async () => {
+    const priorSession = store._session;
+    const priorMessages = [...calls.messages];
+    const automationsBefore = calls.automation.length;
+    store._session = {
+      ...priorSession,
+      status: "completed",
+      completionStatus: "completed",
+      sessionType: "project_end",
+      reminderDueAt: null,
+      conversationState: { state: "completed" }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        providerMessageId: "wamid_closed_auto_reply",
+        fromName: "Admissions",
+        text: "Thank you for contacting us. Please let us know how we can help you."
+      });
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(payload.automatedReply, true);
+      assert.strictEqual(payload.sendToWhatsapp, false);
+      assert.strictEqual(calls.automation.length, automationsBefore);
+      assert.strictEqual(store._session.status, "completed");
+    } finally {
+      store._session = priorSession;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+    }
+  });
+
   await scenario("G2 opt-out stops reminders and skips Gemini", async () => {
     calls.automation.length = 0;
     const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "STOP" });
@@ -3263,6 +3460,10 @@ async function scenario(name, fn) {
       if (table === "messages") {
         assert.match(options.query, /side=eq\.client/);
         return [
+          {
+            session_id: "sess_awaiting", body: "Thank you for contacting us. Please let us know how we can help you.",
+            created_at: "2026-09-02T10:30:00.000Z", metadata: { automatedReply: true, ignoredForConversation: true }
+          },
           { session_id: "sess_partial", body: "PPC lead quality is poor", created_at: "2026-09-02T11:00:00.000Z" },
           { session_id: "sess_completed", body: "8", created_at: "2026-09-02T12:00:00.000Z" },
           { session_id: "sess_stopped", body: "That is all", created_at: "2026-09-02T12:30:00.000Z" }
@@ -3276,6 +3477,8 @@ async function scenario(name, fn) {
       dashboard.responseTracker.map((session) => session.responseStatus),
       ["awaiting", "partial", "completed", "stopped", "awaiting"]
     );
+    assert.strictEqual(dashboard.responseTracker[0].latestClientReply, null,
+      "an ignored automated greeting must not turn an awaiting session into a response");
     assert.strictEqual(dashboard.responseTracker[1].latestClientReply, "PPC lead quality is poor");
     assert.strictEqual(dashboard.responseTracker[3].stoppedByAdmin, true);
     assert.strictEqual(dashboard.responseTracker[3].closureReason, "stopped_by_admin");
@@ -6565,6 +6768,22 @@ async function scenario(name, fn) {
     assert.strictEqual(eligible.eligible, true);
     assert.strictEqual(eligible.reason, "due");
     assert.strictEqual(eligible.dueAt, "2026-10-01T06:00:05.000Z");
+
+    const ignoredAutoReply = conversationFlow.inactiveFinalSweepEligibility(
+      session,
+      [
+        ...messages,
+        {
+          side: "client",
+          body: "Thank you for contacting us. Please let us know how we can help you.",
+          createdAt: "2026-10-01T01:00:00.000Z",
+          metadata: { automatedReply: true, ignoredForConversation: true }
+        }
+      ],
+      "2026-10-01T06:01:00.000Z"
+    );
+    assert.strictEqual(ignoredAutoReply.eligible, true,
+      "an ignored automated greeting must not block the normal six-hour completion rule");
 
     const legacyQuestion = "Is there any specific team or department you would like to appreciate for their work?";
     const legacyAppreciation = conversationFlow.inactiveFinalSweepEligibility({

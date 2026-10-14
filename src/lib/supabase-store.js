@@ -3387,9 +3387,10 @@ class SupabaseStore {
       const ids = responseSessionIds.slice(index, index + 100).map((id) => encodeURIComponent(id));
       for (let offset = 0; ; offset += 1000) {
         const rows = await this.request("messages", {
-          query: `session_id=in.(${ids.join(",")})&side=eq.client&select=session_id,body,created_at&order=created_at.desc&limit=1000&offset=${offset}`
+          query: `session_id=in.(${ids.join(",")})&side=eq.client&select=session_id,body,created_at,metadata&order=created_at.desc&limit=1000&offset=${offset}`
         });
         for (const row of rows) {
+          if (row.metadata?.ignoredForConversation === true) continue;
           if (!latestClientMessage.has(row.session_id)) latestClientMessage.set(row.session_id, row);
         }
         if (rows.length < 1000) break;
