@@ -2872,6 +2872,54 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("quick check-in preserves long mixed feedback when Gemini times out", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    const priorClaims = new Map(calls.automationClaims);
+    const responsesBefore = calls.quickCheckinResponses.length;
+    const automationBefore = calls.automation.length;
+    calls.automationClaims.clear();
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async () => { throw new Error("simulated Gemini timeout"); };
+    store._session = {
+      id: "sess_1", cycleId: "cyc_quick", projectId: "prj_1", clientPocId: "poc_1",
+      status: "partial", completionStatus: "partial", sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: { state: "quick_checkin_detail", quickCheckinOutcome: "needs_improvement" }
+    };
+    const text = "Across several design assets, agreed changes were applied inconsistently, so our team had to repeat the same feedback and go through avoidable rework. Better internal alignment would make delivery smoother. The POCs, Aisha and Dev, were always responsive and made coordination easy.";
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text });
+      await new Promise((resolve) => setImmediate(resolve));
+      const payload = JSON.parse(response.body);
+      const recorded = calls.quickCheckinResponses[responsesBefore]?.input?.interpretation;
+      const newAlerts = calls.automation.slice(automationBefore)
+        .filter((item) => item.eventType === "manager_alert");
+
+      assert.strictEqual(payload.state, "quick_checkin_window");
+      assert.strictEqual(recorded.source, "deterministic_fallback");
+      assert.strictEqual(recorded.concerns.length, 1, "the timeout fallback must preserve the process concern");
+      assert.match(recorded.concerns[0].title, /inconsistent implementation.*creative feedback/i);
+      assert.strictEqual(recorded.appreciations[0].subject, "Aisha and Dev");
+      assert.match(payload.whatsappReplyText, /inconsistent implementation.*creative feedback/i);
+      assert.match(payload.whatsappReplyText, /Aisha and Dev/i);
+      assert.match(payload.whatsappReplyText, /next 10 minutes/i);
+      assert.strictEqual(newAlerts.length, 1, "the timeout fallback must trigger one consolidated manager alert");
+      assert.strictEqual(newAlerts[0].payload.analysis.issueCount, 1);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+      calls.automationClaims.clear();
+      for (const [key, value] of priorClaims) calls.automationClaims.set(key, value);
+    }
+  });
+
   await scenario("quick check-in fails safe when feedback meaning cannot be confirmed", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorFetch = global.fetch;
@@ -5603,14 +5651,15 @@ async function scenario(name, fn) {
   await scenario("A number is accepted overall only after the overall question", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     assert.strictEqual(
-      conversationFlow.acceptedOverallRating({ overallRatingAsked: false }, { overallRating: 5 }),
+      conversationFlow.acceptedOverallRating({ overallRatingAsked: false }, { overallRating: 5 }, "5"),
       null,
       "a bare number during service follow-up must not become the overall score"
     );
     assert.strictEqual(
       conversationFlow.acceptedOverallRating(
         { overallRatingAsked: true, state: "waiting_for_overall_rating" },
-        { overallRating: 0 }
+        { overallRating: 0 },
+        "0"
       ),
       0,
       "a real zero must still be preserved after the question"
@@ -5618,7 +5667,8 @@ async function scenario(name, fn) {
     assert.strictEqual(
       conversationFlow.acceptedOverallRating(
         { overallRatingAsked: true, state: "waiting_for_nps", pendingQuestionType: "nps" },
-        { overallRating: 5 }
+        { overallRating: 5 },
+        "5"
       ),
       null,
       "a number answering NPS must never overwrite the earlier overall score"
@@ -5631,7 +5681,7 @@ async function scenario(name, fn) {
       overallRatingAsked: true,
       pendingQuestionType: "observation_followup",
       pendingObservation: { topic: "Senior Involvement", stage: "followup" }
-    }, { overallRating: 7 });
+    }, { overallRating: 7 }, "7");
     assert.strictEqual(rating, 7,
       "the already-requested rating must not be discarded just because an observation is still being closed");
   });
@@ -5680,6 +5730,31 @@ async function scenario(name, fn) {
     ], true);
     assert.strictEqual(rating, 4,
       "the recommendation answer and its correction must not replace overall CSAT");
+  });
+
+  await scenario("scale-first recommendation wording cannot replace project-end CSAT", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const rating = conversationFlow.latestExplicitOverallRating([
+      { side: "srv", body: "Overall, how would you rate the work SRV Media delivered on this project, out of 10?" },
+      { side: "client", body: "9" },
+      { side: "srv", body: "Thank you for the 9 out of 10 rating! On a scale of 0 to 10, how likely are you to recommend SRV Media to a colleague or peer?" },
+      { side: "client", body: "10" },
+      { side: "srv", body: "Is there anything else you would like our Directors to know?" },
+      { side: "client", body: "The delivery process needs better internal alignment." },
+      { side: "srv", body: "Is there anything else you would like to add?" },
+      { side: "client", body: "No, that is all." }
+    ], true);
+    assert.strictEqual(rating, 9,
+      "recommendation questions that state the scale before 'recommend' must still switch to NPS context");
+    assert.strictEqual(
+      conversationFlow.acceptedOverallRating({
+        overallRatingAsked: true,
+        pendingQuestionType: "final_sweep",
+        overallRating: 9
+      }, { overallRating: 10 }, "No, that is all."),
+      null,
+      "a stale transcript number returned by Gemini must not become the latest CSAT"
+    );
   });
 
   await scenario("a spoken rating followed by no take 5 is corrected to 5", async () => {
@@ -6654,6 +6729,44 @@ async function scenario(name, fn) {
     assert.match(reply, /social media is working well/i);
     assert.match(reply, /meeting request.*senior management/i);
     assert.ok(!/PPC/i.test(reply));
+  });
+
+  await scenario("long mixed process feedback receives a specific safe reply during Gemini timeout", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const mixedText = "Across several design assets, agreed changes were applied inconsistently, so our team had to repeat the same feedback and go through avoidable rework. Better internal alignment would make delivery smoother. The POCs, Aisha and Dev, were always responsive and made coordination easy.";
+    const scopedProject = {
+      ...project,
+      services: [
+        { serviceKey: "account", name: "Account Management" },
+        { serviceKey: "campaign", name: "Campaign Management" }
+      ]
+    };
+    const observation = conversationFlow.fallbackDeliveryObservation(mixedText);
+    const appreciations = conversationFlow.fallbackRoleAppreciations(mixedText, scopedProject);
+    assert.ok(observation, "repeated and inconsistently applied changes must survive a model timeout");
+    assert.strictEqual(observation.topic, "Creative Process");
+    assert.strictEqual(observation.needsFollowUp, false);
+    assert.strictEqual(appreciations[0].subject, "Aisha and Dev");
+    assert.strictEqual(appreciations[0].serviceKey, "account");
+
+    const state = {
+      pendingObservation: {
+        topic: "Creative Process", stage: "followup", acknowledged: false,
+        responseKind: "feedback"
+      }
+    };
+    const reply = conversationFlow.fallbackForAction(
+      { type: "observation_followup", topic: "Creative Process" },
+      state,
+      scopedProject,
+      { observations: [observation], appreciations }
+    );
+    assert.match(reply, /sorry.*creative process.*back-and-forth/i);
+    assert.match(reply, /agreed feedback was not implemented consistently/i);
+    assert.match(reply, /internal alignment and communication/i);
+    assert.match(reply, /Aisha and Dev/i);
+    assert.match(reply, /anything else.*Directors/i);
+    assert.ok(!/Glad to hear that about Account Management/i.test(reply));
   });
 
   await scenario("polite meeting requests are not recorded as appreciations", async () => {

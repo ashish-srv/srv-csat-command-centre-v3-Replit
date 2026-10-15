@@ -785,6 +785,20 @@ function baseFallbackForAction(action, conversationState, project, context = {})
 
 function fallbackForAction(action, conversationState, project, context = {}) {
   const acknowledgement = appreciationAcknowledgement(context, project, conversationState);
+  const processConcern = (context.observations || []).find((item) =>
+    item.fallbackKind === "delivery_process"
+    && item.sentiment === "negative"
+  );
+  if (processConcern && ["observation_reason", "observation_followup"].includes(action.type)) {
+    const processName = processConcern.topic === "Creative Process"
+      ? "the creative process"
+      : "the delivery process";
+    const appreciation = acknowledgement ? ` ${acknowledgement}` : "";
+    const question = processConcern.needsFollowUp
+      ? ` Could you please share a little more about what happened with ${processConcern.topic}?`
+      : " Is there anything else you would like the Directors to know?";
+    return `I am sorry that ${processName} involved avoidable back-and-forth and that agreed feedback was not implemented consistently. We have recorded this concern and will ask the relevant teams to strengthen internal alignment and communication so delivery is smoother.${appreciation}${question}`;
+  }
   const next = acknowledgement
     && action.type === "service_followup"
     && !conversationState.awaitingAppreciationPersonName
@@ -1044,16 +1058,32 @@ function applyTurnServiceScope(conversationState, project, text, interpretation,
   });
 }
 
-function acceptedOverallRating(conversationState, conducted) {
+function acceptedOverallRating(conversationState, conducted, text = "") {
   // The client may interrupt the rating question with a new management point,
   // then give the score while we are closing that point. Once the overall
-  // question has genuinely been asked, retain an explicit model-read rating
-  // instead of asking for the same number again.
+  // question has genuinely been asked, retain an explicit rating from the
+  // latest client reply instead of asking for the same number again.
   const answeringNps = conversationState.state === STATES.WAITING_FOR_NPS
     || pendingQuestionTypeFor(conversationState) === "nps";
-  return conversationState.overallRatingAsked && !answeringNps
-    ? conducted.overallRating
-    : null;
+  if (!conversationState.overallRatingAsked || answeringNps) return null;
+
+  // The conductor sees the transcript and can occasionally repeat an older
+  // number while handling a later non-rating reply. Only the latest client's
+  // own words may update CSAT. This also keeps a project-end NPS answer wholly
+  // separate from the earlier overall score.
+  const source = String(text || "").trim();
+  const read = detectors.detectRatingCorrection(source);
+  const answeringOverall = conversationState.state === STATES.WAITING_FOR_OVERALL_RATING
+    || pendingQuestionTypeFor(conversationState) === "overall_rating";
+  const startsWithRating = /^\s*(?:\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(source)
+    && !/^\s*(?:\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:day|days|week|weeks|month|months|meeting|meetings|lead|leads|report|reports)\b/i.test(source);
+  const latestReplyIsRating = detectors.looksLikeRatingAnswer(source)
+    || (answeringOverall && startsWithRating)
+    || /\b(?:overall|rating|raiting|score|csat|rate|give|take|record|use|make that|change|correct|revise|update|set|actually|instead|rather than|i said|i meant|should be)\b/i.test(source);
+  if (!read || !latestReplyIsRating) return null;
+  const normalized = read.scale === 5 ? read.value * 2 : read.value;
+  if (normalized < 0 || normalized > 10 || (read.scale && ![5, 10].includes(read.scale))) return null;
+  return normalized;
 }
 
 function latestExplicitOverallRating(messages, overallRatingAsked) {
@@ -1071,9 +1101,14 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
   for (const message of candidates) {
     const body = String(message.body || "").trim();
     if (message.side === "srv") {
-      if (/\b(?:recommend|recommendation|nps)\w*\b.{0,140}\b(?:out of 10|0 to 10)\b/i.test(body)) {
+      const asksNps = /\b(?:recommend|recommendation|nps|likely)\w*\b/i.test(body)
+        && /(?:\b0\s*(?:to|-)\s*10\b|\bout of 10\b)/i.test(body);
+      const asksOverall = /\boverall\b/i.test(body)
+        && (/\b(?:rating|rate|score)\b/i.test(body)
+          || /(?:\b0\s*(?:to|-)\s*10\b|\bout of 10\b)/i.test(body));
+      if (asksNps) {
         ratingContext = "nps";
-      } else if (/\boverall\b.{0,140}\b(?:rating|rate|score|out of 10|0 to 10)\b/i.test(body)) {
+      } else if (asksOverall) {
         ratingContext = "overall";
       }
       continue;
@@ -1363,6 +1398,58 @@ function observationFromInterpretation(interpretation, text) {
   };
 }
 
+/**
+ * Preserve an actionable process concern when the language models are
+ * unavailable. This is deliberately meaning-based and broad: it recognises
+ * repetition, rework, missed changes and internal-alignment failures without
+ * depending on one client's exact wording.
+ */
+function fallbackDeliveryObservation(text) {
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  if (!source) return null;
+  const processFriction = /\b(?:back[- ]and[- ]forth|rework|reiterat\w*|repeat(?:ed|edly)?|multiple rounds?|not (?:consistently )?(?:applied|implemented|incorporated|carried out)|miss(?:ed|ing) changes?|inconsisten\w*|same (?:feedback|change|changes)|common (?:feedback|change|changes)|internal (?:alignment|communication)|coordination gap|communication gap|handoff gap)\b/i.test(source);
+  if (!processFriction) return null;
+  const creativeProcess = /\b(?:creative process|creatives?|design(?:s|ed|ing)?|designers?|design assets?|design process|artwork|landing pages?)\b/i.test(source);
+  return {
+    topic: creativeProcess ? "Creative Process" : "Delivery Process",
+    detail: source.slice(0, 600),
+    sentiment: "negative",
+    severity: "watch",
+    needsFollowUp: source.split(/\s+/).filter(Boolean).length < 14,
+    kind: "feedback",
+    fallbackKind: "delivery_process"
+  };
+}
+
+function fallbackRoleAppreciations(text, project = {}) {
+  const source = String(text || "").trim();
+  const roleCue = /\b(?:pocs?|account managers?|project managers?|relationship managers?)\b/i;
+  const praiseCue = /\b(?:approachable|responsive|supportive|helpful|patient|understanding|cooperative|available|smooth(?:ly)?|easy coordination|great support|excellent support)\b/i;
+  if (!roleCue.test(source) || !praiseCue.test(source)) return [];
+
+  const segment = source.split(/(?<=[.!?])\s+|\n+/).find((part) => roleCue.test(part) && praiseCue.test(part)) || source;
+  const afterRole = segment.match(/\b(?:pocs?|account managers?|project managers?|relationship managers?)\b\s*[,;:-]?\s*([^.!?]{0,180})/i)?.[1] || "";
+  const ignored = new Set([
+    "The", "Our", "Your", "Their", "And", "But", "Or", "Initially", "Now", "Always",
+    "Were", "Was", "Are", "Have", "Has", "Being", "Made", "Making", "Especially",
+    "Approachable", "Responsive", "Supportive", "Helpful", "Patient", "Understanding",
+    "Cooperative", "Coordination", "Smooth", "Easy", "Team", "POC", "POCs"
+  ]);
+  const names = [...afterRole.matchAll(/\b[A-Z][a-z][A-Za-z.'-]{1,30}\b/g)]
+    .map((match) => match[0])
+    .filter((name) => !ignored.has(name))
+    .filter((name, index, values) => values.indexOf(name) === index)
+    .slice(0, 3);
+  const accountService = (project.services || []).find((service) =>
+    /\baccount\b/i.test(`${service.serviceKey || ""} ${service.name || ""}`)
+  );
+  return [{
+    subject: names.length ? names.join(names.length === 2 ? " and " : ", ") : "Project POC Team",
+    detail: segment.trim().slice(0, 600),
+    serviceKey: accountService?.serviceKey || null
+  }];
+}
+
 function canonicalObservationTopic(observation, text = "") {
   const classify = (value) => {
     const source = String(value || "").toLowerCase();
@@ -1523,7 +1610,7 @@ function applyDeferredInterpretation(turn, stateBefore, interpretation, text, pr
     turn.conversationState,
     project,
     conducted.captured,
-    acceptedOverallRating(stateBefore, conducted),
+    acceptedOverallRating(stateBefore, conducted, text),
     false
   );
   applyTurnServiceScope(
@@ -2769,7 +2856,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       services: deferredFacts.captured.map((item) => item.serviceKey),
       observations: deferredFacts.observations.length,
       appreciations: deferredFacts.appreciations.length,
-      rating: acceptedOverallRating(stateBefore, deferredFacts)
+      rating: acceptedOverallRating(stateBefore, deferredFacts, text)
     };
     replyProvider = "state_machine";
     replyError = null;
@@ -2834,7 +2921,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         services: deferredFacts.captured.map((item) => item.serviceKey),
         observations: deferredFacts.observations.length,
         appreciations: deferredFacts.appreciations.length,
-        rating: acceptedOverallRating(stateBefore, deferredFacts)
+        rating: acceptedOverallRating(stateBefore, deferredFacts, text)
       };
       replyText = DEFERRAL_REPLY;
       replyProvider = "state_machine";
@@ -2917,7 +3004,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       applyCaptured(
         turn.conversationState, project,
         conducted.captured,
-        acceptedOverallRating(stateBefore, conducted),
+        acceptedOverallRating(stateBefore, conducted, text),
         conducted.corrects
       );
       openAppreciationFollowUp(turn.conversationState, stateBefore, conducted, text);
@@ -3057,8 +3144,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // something it read perfectly is the worst of both worlds. Ask whatever
       // is still outstanding, plainly.
       const interpretedObservation = observationFromInterpretation(interpretation, text);
-      if (interpretedObservation) {
-        interpretedObservation.topic = canonicalObservationTopic(interpretedObservation, text);
+      const deterministicObservation = interpretedObservation || fallbackDeliveryObservation(text);
+      if (deterministicObservation) {
+        deterministicObservation.topic = canonicalObservationTopic(deterministicObservation, text);
       }
       const serviceList = (project.services || []).map((service) => ({
         serviceKey: service.serviceKey,
@@ -3066,8 +3154,11 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       }));
       const fallbackConducted = {
         captured: groundMultiServiceCaptures([], text, project, stateBefore),
-        observations: interpretedObservation ? [interpretedObservation] : [],
-        appreciations: extractExplicitAppreciations(text, serviceList)
+        observations: deterministicObservation ? [deterministicObservation] : [],
+        appreciations: [
+          ...extractExplicitAppreciations(text, serviceList),
+          ...fallbackRoleAppreciations(text, project)
+        ]
       };
       ensureClientAppreciations(fallbackConducted, stateBefore, text, project);
       separateAppreciations(fallbackConducted);
@@ -3075,7 +3166,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // An observation must not mutate a nearby service merely because the
       // preliminary keyword pass saw "creative" or "meeting". Restore the
       // pre-turn service state, then apply only grounded deterministic facts.
-      if (interpretedObservation) {
+      if (deterministicObservation) {
         turn.conversationState.mentionedServices = JSON.parse(JSON.stringify(
           stateBefore.mentionedServices || {}
         ));
@@ -7031,6 +7122,8 @@ module.exports = {
     normalizeLegacyServiceFollowups,
     applyConversationInterruption,
     observationFromInterpretation,
+    fallbackDeliveryObservation,
+    fallbackRoleAppreciations,
     canonicalObservationTopic,
     applyDeferredInterpretation,
     isExplicitActionRequest,
@@ -7160,14 +7253,127 @@ function quickCheckinConcernPoints(interpretation, { includeSummary = true } = {
   return points.slice(0, 3);
 }
 
-function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText) {
+function fallbackQuickCheckinConcerns(text) {
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  if (!source) return [];
+  const segments = source
+    .split(/(?<=[.!?])\s+|\s*;\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const concerns = [];
+  const add = (title, matches, severity = "watch") => {
+    const summary = segments.filter(matches).join(" ") || (matches(source) ? source : "");
+    if (!summary) return;
+    concerns.push({
+      title,
+      summary: summary.slice(0, 600),
+      sentiment: "negative",
+      severity,
+      serviceKey: null,
+      needsFollowUp: false
+    });
+  };
+
+  const processObservation = fallbackDeliveryObservation(source);
+  if (processObservation) {
+    add(
+      processObservation.topic === "Creative Process"
+        ? "Inconsistent implementation of agreed creative feedback"
+        : "Repeated rework and delivery-process gaps",
+      (part) => /\b(?:back[- ]and[- ]forth|rework|reiterat\w*|repeat(?:ed|edly)?|not (?:consistently )?(?:applied|implemented|incorporated)|miss(?:ed|ing) changes?|inconsisten\w*|same (?:feedback|change|changes)|common (?:feedback|change|changes)|internal (?:alignment|communication))\b/i.test(part)
+    );
+  }
+  add(
+    "Campaign outcomes below expectations",
+    (part) => /\b(?:campaign|outcomes?|results?|traction|attention|applicants?|leads?)\b/i.test(part)
+      && /\b(?:disappoint\w*|poor|weak|low|below|lacking|not (?:attracting|working|performing|enough)|could be achieved without|no (?:traction|results?))\b/i.test(part),
+    "high"
+  );
+  add(
+    "Reporting visibility is insufficient",
+    (part) => /\b(?:data|report\w*|information|profile|visibility|insight\w*)\b/i.test(part)
+      && /\b(?:no|not|missing|lack\w*|without|unclear|incomplete|insufficient|doesn'?t|does not|fails? to)\b/i.test(part)
+  );
+  add(
+    "More proactive ownership is needed",
+    (part) => /\b(?:ownership|proactiv\w*|initiative|interest|course correction|change course|analyse|analyze)\b/i.test(part)
+      && /\b(?:need|needs|needed|expect\w*|lack\w*|lacking|more|not|insufficient)\b/i.test(part)
+  );
+  add(
+    "Delays or slow turnaround",
+    (part) => /\b(?:delay\w*|late|slow|turnaround|deadline|overdue|pending)\b/i.test(part)
+      && /\b(?:delay\w*|late|slow|miss\w*|overdue|too long|not on time|still pending)\b/i.test(part)
+  );
+  add(
+    "Communication or coordination gaps",
+    (part) => /\b(?:communication|coordination|updates?|responses?|follow[- ]?up|alignment)\b/i.test(part)
+      && /\b(?:poor|weak|lack\w*|missing|delay\w*|slow|gap|not|inconsisten\w*)\b/i.test(part)
+  );
+
+  return concerns.filter((item, index, values) => values.findIndex((candidate) => {
+    const overlap = contentOverlap(
+      `${candidate.title} ${candidate.summary}`,
+      `${item.title} ${item.summary}`
+    );
+    return overlap.shared >= 4 && overlap.ratio >= 0.72;
+  }) === index).slice(0, 6);
+}
+
+function enrichQuickCheckinInterpretation(text, project, interpretation = {}) {
+  const modelUnavailable = interpretation.source === "fallback"
+    || Boolean(interpretation.error)
+    || !interpretation.intent;
+  const deterministicConcerns = modelUnavailable ? fallbackQuickCheckinConcerns(text) : [];
+  const processObservation = modelUnavailable ? fallbackDeliveryObservation(text) : null;
+  const roleAppreciations = fallbackRoleAppreciations(text, project);
+  const appreciations = [...(interpretation.appreciations || [])];
+  for (const item of roleAppreciations) {
+    const duplicateIndex = appreciations.findIndex((existing) => {
+      if (item.serviceKey && existing.serviceKey === item.serviceKey) return true;
+      const overlap = contentOverlap(existing.detail, item.detail);
+      return overlap.shared >= 3 && overlap.ratio >= 0.55;
+    });
+    if (duplicateIndex < 0) appreciations.push(item);
+    else if (/\band\b|,/.test(item.subject)) appreciations[duplicateIndex] = item;
+  }
+  if (!deterministicConcerns.length && !processObservation && !appreciations.length) return interpretation;
+
+  return {
+    ...interpretation,
+    intent: modelUnavailable && (deterministicConcerns.length || appreciations.length)
+      ? "feedback"
+      : interpretation.intent,
+    sentiment: deterministicConcerns.length
+      ? "negative"
+      : interpretation.sentiment || (appreciations.length ? "positive" : null),
+    explainsProblem: interpretation.explainsProblem === true || deterministicConcerns.length > 0,
+    isObservation: interpretation.isObservation === true
+      || Boolean(processObservation && !(interpretation.captured || []).length),
+    observations: processObservation
+      ? [...(interpretation.observations || []), processObservation]
+      : (interpretation.observations || []),
+    concerns: deterministicConcerns.length
+      ? deterministicConcerns
+      : (interpretation.concerns || []),
+    appreciations,
+    source: modelUnavailable && (deterministicConcerns.length || appreciations.length)
+      ? "deterministic_fallback"
+      : interpretation.source
+  };
+}
+
+function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText, project = {}) {
   const name = poc.salutation || poc.name;
   const concernPoints = quickCheckinConcernPoints(interpretation, { includeSummary: false });
+  const appreciation = appreciationAcknowledgement({
+    appreciations: interpretation?.appreciations || []
+  }, project, {});
+  const appreciationText = appreciation ? ` ${appreciation}` : "";
   if (!concernPoints.length) {
-    return `Thank you, ${name}. Your feedback has been recorded for confidential management review. ${windowText}`;
+    return `Thank you, ${name}.${appreciationText} Your feedback has been recorded for confidential management review. ${windowText}`;
   }
   const numbered = concernPoints.map((point, index) => `${index + 1}) ${point}`).join(" ");
-  return `Thank you for sharing this candidly, ${name}. I’m sorry that the experience has been disappointing. I have specifically noted: ${numbered}. Your feedback has been recorded for confidential management review. ${windowText}`;
+  return `Thank you for sharing this candidly, ${name}. I’m sorry that the experience has been disappointing. I have specifically noted: ${numbered}.${appreciationText} Your feedback has been recorded for confidential management review. ${windowText}`;
 }
 
 async function handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil }) {
@@ -7206,11 +7412,12 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   let postCompletionHandoff = false;
   let postCompletionHandoffEvent = null;
 
-  const interpretDetail = async () => interpretReply({
+  const interpretDetail = async () => enrichQuickCheckinInterpretation(text, project, await interpretReply({
       project,
       question: `What needs improvement, what is going well, or what should management know about ${project.name}?`,
-      text
-    });
+      text,
+      longForm: true
+    }));
   const recordDetail = async (inputInterpretation) => {
     let interpretation = inputInterpretation;
     if (!interpretation.sentiment) {
@@ -7266,7 +7473,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       replyText = quickCheckinFeedbackAcknowledgement(
         poc,
         recordedInterpretation,
-        "The original 10-minute window remains open if you would like to add or correct anything else."
+        "The original 10-minute window remains open if you would like to add or correct anything else.",
+        project
       );
     }
   } else if (allGood) {
@@ -7286,7 +7494,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       replyText = quickCheckinFeedbackAcknowledgement(
         poc,
         interpretation,
-        "This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response."
+        "This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.",
+        project
       );
     } else if (decision === "defer") {
       result = { session };
@@ -7320,7 +7529,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       replyText = quickCheckinFeedbackAcknowledgement(
         poc,
         interpretation,
-        "This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response."
+        "This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.",
+        project
       );
     } else if (decision === "off_topic") {
       result = { session };

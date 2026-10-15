@@ -22,9 +22,12 @@ const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const TIMEOUT_MS = 12000;
 // n8n allows 45 seconds for the CSAT engine. A free-form reply can require an
 // interpretation call and a conductor call before the terminal reads begin.
-// Bounded single attempts preserve time for a deterministic reply instead of
-// retrying Gemini until n8n returns Bad Gateway and the client hears nothing.
+// Keep lightweight classification bounded at eight seconds, but allow the
+// conductor longer for a nuanced multi-point reply. The worst sequential path
+// remains comfortably below n8n's limit: 8s interpretation + 14s conductor +
+// one parallel terminal-analysis window.
 const WHATSAPP_CALL = { maxAttempts: 1, timeoutMs: 8000 };
+const CONVERSATION_CALL = { maxAttempts: 1, timeoutMs: 14000 };
 const TERMINAL_CALL = { maxAttempts: 1, timeoutMs: 6000 };
 // Satisfaction scoring is the one terminal read exposed through an explicit
 // dashboard retry. Give a slow model a second bounded attempt; this still fits
@@ -952,7 +955,7 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
   };
 }
 
-async function interpretReply({ project, question, text }) {
+async function interpretReply({ project, question, text, longForm = false }) {
   const fallback = {
     intent: null, deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
     serviceHint: null, serviceKeys: [], explainsProblem: false,
@@ -1099,7 +1102,11 @@ async function interpretReply({ project, question, text }) {
     fence("client_message", text)
   ].join("\n");
 
-  const result = await callGemini(input, THINKING_MINIMAL, WHATSAPP_CALL);
+  const result = await callGemini(
+    input,
+    THINKING_MINIMAL,
+    longForm ? CONVERSATION_CALL : WHATSAPP_CALL
+  );
   if (!result.ok) return { ...fallback, error: result.error };
 
   const parsed = parseJson(result.text);
@@ -1248,7 +1255,10 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "not praise. Put it in observations and never in appreciations.",
     "Do not put the same appreciation in observations or captured.",
     "",
-    "overallRating: the number 0-10 if they just gave an overall score, else null.",
+    "overallRating: the number 0-10 only if the LATEST client reply just gave",
+    "or explicitly corrected the overall CSAT score, else null. Never copy an",
+    "older number from the transcript. A recommendation/NPS answer is separate",
+    "and must never be returned as overallRating.",
     "",
     "deferRequested: true whenever the latest client reply asks to pause and",
     "continue later, however they phrase it. Still extract every service fact,",
@@ -1394,7 +1404,7 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     fence("conversation", transcript)
   ].join("\n");
 
-  const result = await callGemini(input, THINKING_LOW, WHATSAPP_CALL);
+  const result = await callGemini(input, THINKING_LOW, CONVERSATION_CALL);
   if (!result.ok) return { ...fallback, error: result.error };
 
   const parsed = parseJson(result.text);
