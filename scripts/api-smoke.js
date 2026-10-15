@@ -7016,6 +7016,124 @@ async function scenario(name, fn) {
       "positive feedback must not be converted into a concern by the fail-safe");
   });
 
+  await scenario("rating and move-on replies cannot inherit fabricated observations", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const fabricated = () => ({
+      text: "I am sorry to hear about the lack of senior involvement. What happened?",
+      captured: [{
+        serviceKey: "account", sentiment: "negative", summary: "Senior leader did not attend.",
+        declined: false, needsFollowUp: true
+      }],
+      observations: [{
+        topic: "Senior Involvement", detail: "A senior leader was absent from meetings.",
+        sentiment: "negative", severity: "watch", needsFollowUp: true, kind: "feedback"
+      }],
+      appreciations: [{ subject: "Senior Leader", detail: "Helpful leadership.", serviceKey: null }],
+      readyToClose: false
+    });
+    const hallucinatedInterpretation = {
+      source: "gemini", intent: "rating", sentiment: "negative", rating: 10,
+      captured: [{
+        serviceKey: "account", sentiment: "negative", summary: "Leader was absent.",
+        declined: false, needsFollowUp: true
+      }],
+      observations: [{
+        topic: "Senior Involvement", detail: "Leader was absent.", sentiment: "negative",
+        severity: "watch", needsFollowUp: true, kind: "feedback"
+      }],
+      concerns: [{
+        title: "Senior Involvement", summary: "Leader was absent.", sentiment: "negative",
+        severity: "watch", serviceKey: null, needsFollowUp: true
+      }],
+      appreciations: [{ subject: "Senior Leader", detail: "Helpful leadership.", serviceKey: null }]
+    };
+
+    for (const text of ["10", "10/10", "I would give 10 out of 10", "nothing", "nothing happened. Move on"]) {
+      const conducted = fabricated();
+      conversationFlow.enrichConductedWithDeterministicFacts(
+        conducted, text, project, hallucinatedInterpretation,
+        { protectSubstantiveConcern: true, allowLanguageOnly: true }
+      );
+      assert.deepStrictEqual(conducted.captured, [], `${text}: fabricated service fact survived`);
+      assert.deepStrictEqual(conducted.observations, [], `${text}: fabricated observation survived`);
+      assert.deepStrictEqual(conducted.appreciations, [], `${text}: fabricated appreciation survived`);
+    }
+
+    const semanticMoveOn = fabricated();
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      semanticMoveOn, "Let's leave that subject and carry on with the survey", project,
+      { ...hallucinatedInterpretation, intent: "negative", rating: null },
+      { protectSubstantiveConcern: true, allowLanguageOnly: true }
+    );
+    assert.deepStrictEqual(semanticMoveOn.observations, [],
+      "a semantically declined follow-up must not depend on an exact phrase list");
+
+    const positiveNarrative = fabricated();
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      positiveNarrative,
+      "The engagement has gone smoothly and the team has been consistently responsive.",
+      project,
+      { ...hallucinatedInterpretation, intent: "feedback", rating: null },
+      { protectSubstantiveConcern: true, allowLanguageOnly: true }
+    );
+    assert.deepStrictEqual(positiveNarrative.captured, [],
+      "an ungrounded service fact from model JSON must not survive a narrative reply");
+    assert.deepStrictEqual(positiveNarrative.observations, [],
+      "an ungrounded observation from model JSON must not survive a narrative reply");
+    assert.deepStrictEqual(positiveNarrative.appreciations, [],
+      "an ungrounded appreciation from model JSON must not survive a narrative reply");
+
+    const afterNps = fabricated();
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      afterNps, "10", project, hallucinatedInterpretation,
+      { protectSubstantiveConcern: true, allowLanguageOnly: true }
+    );
+    const nextAfterNps = conversationFlow.requiredConversationAction({
+      servicesWhereWeStillDoNotKnowWhatIsWrongWithKeys: [],
+      servicesWaitingForAnythingElseAnswer: [],
+      servicesNotYetDiscussedWithKeys: [],
+      projectEndReviewStillNeeded: false,
+      serviceScopeChoiceStillNeeded: false,
+      overallRatingStillNeeded: false,
+      npsStillNeeded: false
+    }, { pendingObservation: null, anythingElseAnswered: false });
+    assert.strictEqual(nextAfterNps.type, "final_sweep",
+      "after project-end NPS, the bot must ask the inclusive Directors question—not invent an issue");
+
+    for (const text of ["nothing", "nothing happened. Move on", "no concerns for now"]) {
+      const stateBefore = {
+        pendingQuestionType: "observation_reason",
+        pendingObservation: {
+          topic: "Senior Involvement", stage: "reason", acknowledged: false,
+          responseKind: "feedback"
+        }
+      };
+      const state = JSON.parse(JSON.stringify(stateBefore));
+      conversationFlow.applyConversationInterruption(
+        state, stateBefore, { intent: "negative" },
+        { captured: [], observations: [], appreciations: [] }, text
+      );
+      assert.strictEqual(state.pendingObservation, null,
+        `${text}: explicit refusal must dismiss the detail question`);
+    }
+
+    const semanticStateBefore = {
+      pendingQuestionType: "observation_reason",
+      pendingObservation: {
+        topic: "Senior Involvement", stage: "reason", acknowledged: false,
+        responseKind: "feedback"
+      }
+    };
+    const semanticState = JSON.parse(JSON.stringify(semanticStateBefore));
+    conversationFlow.applyConversationInterruption(
+      semanticState, semanticStateBefore, { intent: "negative" },
+      { captured: [], observations: [], appreciations: [] },
+      "Let's leave that subject and carry on with the survey"
+    );
+    assert.strictEqual(semanticState.pendingObservation, null,
+      "Gemini's semantic decline must dismiss a follow-up without exact phrase matching");
+  });
+
   await scenario("quick check-in supplements successful Gemini output with omitted concerns", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const text = "The campaign outcomes are below expectations, the report lacks useful profile information, and we need more proactive ownership.";

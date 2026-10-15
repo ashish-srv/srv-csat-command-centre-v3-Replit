@@ -654,6 +654,8 @@ function isMoveOnReply(text) {
   // keeps the same answers working during a timeout without listing each typo.
   const unstretched = value.replace(/([a-z])\1{2,}/gi, "$1");
   return /\b(nothing else|nothing more|nothing to (?:share|sahre|add)|that'?s all|that'?s it(?: from my side)?|that is it(?: from my side)?|apart from (this|that) nothing|no other|working well|well overall|all good|good overall|fine overall|going well)\b/i.test(unstretched) ||
+    /^\s*(?:nothing happened[.!\s]*)?(?:please\s+)?(?:move on|move ahead|skip(?: this)?|next|proceed)(?:\s+(?:please|now))?\s*[.!]*\s*$/i.test(unstretched) ||
+    /^\s*(?:no|nothing)\s+(?:issues?|concerns?|problems?)(?:\s+(?:here|now|at present|for now))?\s*[.!]*\s*$/i.test(unstretched) ||
     /^\s*(no+|nope|nothing|none|nah|np|nk|mo|not)\s*[.!]*\s*$/i.test(unstretched);
 }
 

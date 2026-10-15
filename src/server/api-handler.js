@@ -1231,8 +1231,12 @@ function applyConversationInterruption(conversationState, stateBefore, interpret
     || soundsLikeFarewell(text)
     || interpretation?.intent === "negative";
 
-  if (pendingType === "observation_followup" && explicitlyFinished) {
+  if (["observation_reason", "observation_followup"].includes(pendingType) && explicitlyFinished) {
     conversationState.pendingObservation = null;
+  }
+
+  if (pendingType === "general_issue_detail" && explicitlyFinished) {
+    conversationState.pendingGeneralIssue = false;
   }
 
   const suppliedFeedback = (conducted.captured || []).length || (conducted.observations || []).length;
@@ -1448,6 +1452,10 @@ function fallbackGeneralConcernObservation(
     ...(interpretation.observations || []).filter((item) => item?.sentiment === "negative")
   ][0] || null;
   const negativeLanguage = /\b(?:concern\w*|issue\w*|problem\w*|disappoint\w*|frustrat\w*|unhappy|poor|weak|difficult\w*|delay\w*|late|slow|lack\w*|lacking|miss(?:ed|ing)|error\w*|wrong|failed?|failure|inconsisten\w*|avoidable|rework|below expectations?|could (?:be|have been) better|need(?:s|ed)? (?:more|better|stronger)|not (?:good|working|performing|implemented|applied|addressed|resolved|consistent|smooth))\b/i.test(source);
+  // A model apology cannot turn clearly positive client language into a
+  // concern. Structured facts and response wording are hypotheses; the
+  // client's latest message remains the evidence.
+  if (detectors.detectSentiment(source) === "positive" && !negativeLanguage) return null;
   const semanticConcern = interpretation.sentiment === "negative"
     || Boolean(structured)
     || modelAcknowledgedConcern;
@@ -1478,6 +1486,58 @@ function responseAcknowledgesAppreciation(message) {
   const source = String(message || "");
   return /\b(?:thank(?:s| you)?(?: for)?|appreciat(?:e|ed|ing|ion)|kind words|special mention|glad to hear)\b/i.test(source)
     && /\b(?:share|pass|convey|team|person|people|them|him|her|support|work|words|mention|feedback)\b/i.test(source);
+}
+
+function factFreeControlReply(text, interpretation = null) {
+  const source = String(text || "").trim();
+  if (!source) return true;
+  const ratingOnly = detectors.looksLikeRatingAnswer(source)
+    && Boolean(detectors.detectRatingCorrection(source));
+  // Gemini's `negative` intent is deliberately defined as declining further
+  // detail / being done / asking to move on (not negative service sentiment).
+  // Use that semantic read first; isMoveOnReply remains the deterministic
+  // timeout fallback for short, common mobile answers.
+  return ratingOnly || interpretation?.intent === "negative" || isMoveOnReply(source);
+}
+
+function phraseAppearsInReply(text, phrase) {
+  const source = String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const needle = String(phrase || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return Boolean(source && needle && (` ${source} `).includes(` ${needle} `));
+}
+
+/**
+ * Model JSON is a hypothesis, not evidence. A structured fact may influence
+ * the session only when the latest client message supports it. This prevents
+ * prompt examples or older transcript details from being copied into a new
+ * turn while still allowing natural paraphrases and short service answers.
+ */
+function modelFactGroundedInReply(kind, item, text, project = {}) {
+  if (!item) return false;
+  const source = String(text || "").trim();
+  if (!source) return false;
+
+  const factText = kind === "captured"
+    ? item.summary
+    : kind === "appreciation"
+      ? `${item.subject || ""} ${item.detail || ""}`
+      : `${item.topic || item.title || ""} ${item.detail || item.summary || ""}`;
+  const overlap = contentOverlap(source, factText);
+  const sourceTokenCount = contentTokens(source).size;
+  if (overlap.shared >= 2 || overlap.ratio >= 0.5) return true;
+  if (sourceTokenCount <= 4 && overlap.shared >= 1) return true;
+
+  if (kind === "captured" && item.serviceKey) {
+    if (detectors.detectServices(source, project).includes(item.serviceKey)) return true;
+    // A short answer such as "great" or "not up to mark" refers to the
+    // service in the pending question even when it does not repeat its name.
+    const sourceSentiment = detectors.detectSentiment(source);
+    if (sourceTokenCount <= 6 && sourceSentiment !== "neutral"
+      && sourceSentiment === item.sentiment) return true;
+  }
+
+  if (kind === "appreciation" && phraseAppearsInReply(source, item.subject)) return true;
+  return false;
 }
 
 function fallbackRoleAppreciations(text, project = {}) {
@@ -1528,12 +1588,36 @@ function enrichConductedWithDeterministicFacts(
   conducted.observations = Array.isArray(conducted.observations) ? conducted.observations : [];
   conducted.appreciations = Array.isArray(conducted.appreciations) ? conducted.appreciations : [];
 
+  // A score or an explicit "nothing / move on" response contains no new
+  // narrative facts. Neither model is allowed to attach an observation,
+  // service complaint or appreciation to it from older transcript context.
+  // This is what allowed an NPS answer of "10" to manufacture a Senior
+  // Involvement concern.
+  if (factFreeControlReply(text, interpretation)) {
+    conducted.captured = [];
+    conducted.observations = [];
+    conducted.appreciations = [];
+    return conducted;
+  }
+
+  // Do not let the response-writing pass originate an ungrounded fact either.
+  // It sees transcript and prompt examples, both of which are useful context
+  // for wording but are not evidence that the latest client reply said it.
+  conducted.captured = conducted.captured.filter((item) =>
+    modelFactGroundedInReply("captured", item, text, project));
+  conducted.observations = conducted.observations.filter((item) =>
+    modelFactGroundedInReply("observation", item, text, project));
+  conducted.appreciations = conducted.appreciations.filter((item) =>
+    modelFactGroundedInReply("appreciation", item, text, project));
+
   // A normal turn has two model reads: one interprets the client's meaning and
   // one writes the response. Facts found by the first read must not disappear
   // merely because the second read omitted them from its JSON arrays. Merge
   // them before the checklist decides what remains open. This works by
   // semantic type and service key, not by a list of issue-specific phrases.
+  // Every merged item must also be grounded in the latest client reply.
   for (const item of interpretation.captured || []) {
+    if (!modelFactGroundedInReply("captured", item, text, project)) continue;
     const existing = conducted.captured.find((candidate) => candidate.serviceKey === item.serviceKey);
     if (!existing) {
       conducted.captured.push({ ...item });
@@ -1563,9 +1647,12 @@ function enrichConductedWithDeterministicFacts(
     if (!String(existing.topic || "").trim()) existing.topic = candidate.topic;
   };
 
-  for (const item of interpretation.observations || []) mergeObservation(item);
+  for (const item of interpretation.observations || []) {
+    if (modelFactGroundedInReply("observation", item, text, project)) mergeObservation(item);
+  }
   for (const concern of interpretation.concerns || []) {
     if (concern?.sentiment !== "negative") continue;
+    if (!modelFactGroundedInReply("concern", concern, text, project)) continue;
     if (concern.serviceKey) {
       const existing = conducted.captured.find((item) => item.serviceKey === concern.serviceKey);
       if (existing) {
@@ -1594,6 +1681,7 @@ function enrichConductedWithDeterministicFacts(
   }
 
   for (const item of interpretation.appreciations || []) {
+    if (!modelFactGroundedInReply("appreciation", item, text, project)) continue;
     const existing = conducted.appreciations.find((candidate) => {
       const overlap = contentOverlap(candidate.detail, item.detail);
       return (candidate.subject === item.subject && overlap.shared >= 2)
@@ -1606,9 +1694,17 @@ function enrichConductedWithDeterministicFacts(
   const alreadyTracksConcern = conducted.captured.some((item) => item.sentiment === "negative")
     || conducted.observations.some((item) => item.kind !== "appreciation" && item.sentiment === "negative");
 
+  const groundedInterpretation = {
+    ...interpretation,
+    observations: (interpretation.observations || []).filter((item) =>
+      modelFactGroundedInReply("observation", item, text, project)),
+    concerns: (interpretation.concerns || []).filter((item) =>
+      modelFactGroundedInReply("concern", item, text, project))
+  };
+
   const deterministicObservation = fallbackDeliveryObservation(text)
     || (protectSubstantiveConcern
-      ? fallbackGeneralConcernObservation(text, interpretation, {
+      ? fallbackGeneralConcernObservation(text, groundedInterpretation, {
           allowLanguageOnly,
           modelAcknowledgedConcern: !alreadyTracksConcern && responseAcknowledgesConcern(conducted.text)
         })
