@@ -3148,6 +3148,24 @@ button.metric-card {
   background: var(--panel);
 }
 
+.manage-client-pocs-scroll,
+.manage-services-scroll {
+  max-height: min(500px, 58vh);
+  overflow: auto;
+  overscroll-behavior: auto;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--soft-line);
+  border-radius: 10px;
+}
+
+.manage-client-pocs-scroll .dtable-head,
+.manage-services-scroll .dtable-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+}
+
 .manage-section-search {
   display: flex;
   align-items: flex-end;

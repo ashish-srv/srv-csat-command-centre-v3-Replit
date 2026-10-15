@@ -128,6 +128,13 @@ function serviceIdentifier(value) {
   return standard.get(normalized) || slugIdentifier(value).replace(/-/g, "_");
 }
 
+function compareManageText(left, right) {
+  return String(left || "").localeCompare(String(right || ""), undefined, {
+    sensitivity: "base",
+    numeric: true
+  });
+}
+
 function PinGate({ onUnlock }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
@@ -156,7 +163,7 @@ function PinGate({ onUnlock }) {
   return (
     <div className="pin-gate">
       <Lock size={22} aria-hidden="true" />
-      <h3>Enter the admin PIN</h3>
+      <h3>Enter the Admin PIN</h3>
       <p>Editing writes directly to the database. The PIN is held for this tab only and is never stored.</p>
       <input
         type="password"
@@ -219,7 +226,7 @@ function ServiceCatalogBatchForm({ rows, onChange, onSave, onCancel, saving }) {
   return (
     <div className="edit-form">
       <div className="edit-form-head">
-        <strong>Add standard services together</strong>
+        <strong>Add Standard Services Together</strong>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
       </div>
       <div className="batch-editor compact-batch-editor">
@@ -357,7 +364,7 @@ function CleanupPinModal({ confirmation, pin, error, busy, onPinChange, onCancel
       if (event.target === event.currentTarget && !busy) onCancel();
     }}>
       <div className="modal-panel cleanup-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="cleanup-confirm-title">
-        <h3 id="cleanup-confirm-title">Confirm permanent cleanup</h3>
+        <h3 id="cleanup-confirm-title">Confirm Permanent Cleanup</h3>
         <p>
           You are about to {isChatCleanup ? "clear chat transcripts from" : "permanently delete"} {noun}{isClusterDeletion ? ": " : " for "}<strong>{targetName}</strong>.
           {consequence}
@@ -405,7 +412,7 @@ function ClientBatchForm({ rows, clusters, onChange, onSave, onCancel, saving })
   return (
     <div className="edit-form">
       <div className="edit-form-head">
-        <strong>Edit all displayed clients in one save</strong>
+        <strong>Edit All Displayed Clients in One Save</strong>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
       </div>
       <div className="batch-editor">
@@ -616,6 +623,10 @@ function PocControlCentre({ rows, levels, clusters, onChange, onSave, saving }) 
     && (!selectedProjectIds.length || selectedProjectIds.includes(row.projectId))
     && (!needle || [row.name, row.salutation, row.contactWhatsapp, row.clientName, row.projectName, clusterNames.get(row.clusterId)]
       .some((value) => String(value || "").toLowerCase().includes(needle)))
+  )).sort((left, right) => (
+    compareManageText(left.projectName || left.projectKey, right.projectName || right.projectKey)
+    || compareManageText(left.clientName, right.clientName)
+    || compareManageText(left.name, right.name)
   ));
   const visibleIds = visible.map((row) => row.id);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.includes(id));
@@ -764,7 +775,7 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
   return (
     <div className="edit-form">
       <div className="edit-form-head">
-        <strong>Add, edit or remove project POCs in one save</strong>
+        <strong>Add, Edit or Remove Project POCs in One Save</strong>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
       </div>
       <div className="form-grid service-project-picker">
@@ -901,7 +912,7 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
   return (
     <div className="edit-form">
       <div className="edit-form-head">
-        <strong>Add, edit or remove services in one save</strong>
+        <strong>Add, Edit or Remove Services in One Save</strong>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
       </div>
       <div className="form-grid service-project-picker">
@@ -945,7 +956,7 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
                       serviceKey: selected?.serviceKey || ""
                     });
                   }}>
-                    <option value="">Select from service catalogue</option>
+                    <option value="">Select from Standard Service Catalogue</option>
                     {serviceCatalog.filter((item) => item.active || item.id === row.serviceCatalogId).map((item) => (
                       <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
                     ))}
@@ -1165,7 +1176,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
   return (
     <div className="edit-form complete-project-setup">
       <div className="edit-form-head">
-        <strong>Complete project setup — one save</strong>
+        <strong>Complete Project Setup — One Save</strong>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Cancel"><X size={15} aria-hidden="true" /></button>
       </div>
       <p className="form-note">
@@ -1292,7 +1303,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
       <p className="form-note">Normal and Important are tags only. Set each POC's direct influence so the project total is exactly 100%.</p>
 
       <div className="setup-subhead">
-        <h4>3. Services and owners</h4>
+        <h4>3. Services and Owners</h4>
         <Button icon={Plus} onClick={() => onChange({ ...value, services: [...services, { ...EMPTY_SETUP_SERVICE }] })}>Add another service</Button>
       </div>
       <div className="batch-editor">
@@ -1304,7 +1315,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
                   const selected = serviceCatalog.find((item) => item.id === event.target.value);
                   updateService(index, { serviceCatalogId: event.target.value, name: selected?.name || "" });
                 }}>
-                  <option value="">Select from service catalogue</option>
+                  <option value="">Select from Standard Service Catalogue</option>
                   {serviceCatalog.filter((item) => item.active || item.id === service.serviceCatalogId).map((item) => (
                     <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
                   ))}
@@ -1388,6 +1399,8 @@ export default function Manage({ onReload, currentUser = null }) {
   const [importing, setImporting] = useState(false);
   const [downloadingImportTemplate, setDownloadingImportTemplate] = useState(false);
   const [importErrors, setImportErrors] = useState([]);
+  const [cleanupClusterId, setCleanupClusterId] = useState("");
+  const [cleanupClientId, setCleanupClientId] = useState("");
   const [cleanupProjectId, setCleanupProjectId] = useState("");
   const [cleanupWorkspace, setCleanupWorkspace] = useState(null);
   const [cleanupLoading, setCleanupLoading] = useState(false);
@@ -1414,6 +1427,8 @@ export default function Manage({ onReload, currentUser = null }) {
   const [bulkProjectStatus, setBulkProjectStatus] = useState("paused");
   const [projectStatusPreview, setProjectStatusPreview] = useState(null);
   const [serviceCatalogSearch, setServiceCatalogSearch] = useState("");
+  const [clientPocSearch, setClientPocSearch] = useState("");
+  const [projectServiceSearch, setProjectServiceSearch] = useState("");
   const [internalPocSearch, setInternalPocSearch] = useState("");
   const [projectTeamRows, setProjectTeamRows] = useState([]);
   const [dirtyProjectTeamIds, setDirtyProjectTeamIds] = useState([]);
@@ -1481,11 +1496,9 @@ export default function Manage({ onReload, currentUser = null }) {
       setClientId(target);
       const clientDetail = target ? await apiGet(`/api/admin/clients/${encodeURIComponent(target)}`) : null;
       setDetail(clientDetail);
-      setCleanupProjectId((current) => (
-        clientDetail?.projects?.some((project) => project.id === current)
-          ? current
-          : (clientDetail?.projects?.[0]?.id || "")
-      ));
+      setCleanupClusterId((current) => current && (data.clusters || []).some((cluster) => cluster.id === current) ? current : "");
+      setCleanupClientId((current) => current && (data.clients || []).some((client) => client.id === current) ? current : "");
+      setCleanupProjectId((current) => current && (data.projects || []).some((project) => project.id === current) ? current : "");
       const optionalFailure = optionalResults.find((result) => result.status === "rejected");
       if (optionalFailure) showToast(`Manage loaded, but one optional section could not load: ${optionalFailure.reason?.message || "request failed"}`);
     } catch (loadError) {
@@ -1851,7 +1864,7 @@ export default function Manage({ onReload, currentUser = null }) {
   useEffect(() => { if (unlocked) loadAll(); }, [unlocked]);
 
   useEffect(() => {
-    const project = (detail?.projects || []).find((item) => item.id === cleanupProjectId);
+    const project = (directory?.projects || []).find((item) => item.id === cleanupProjectId);
     setSelectedCleanupCycleIds([]);
     setSelectedCleanupIssueIds([]);
     setCleanupConfirmation(null);
@@ -1882,7 +1895,7 @@ export default function Manage({ onReload, currentUser = null }) {
         if (active) setCleanupLoading(false);
       });
     return () => { active = false; };
-  }, [unlocked, cleanupProjectId, detail]);
+  }, [unlocked, cleanupProjectId, directory]);
 
   useEffect(() => {
     if (!projectForm && !clientForm && !clusterForm && !internalForm && !internalBatch && !clientBatch && !pocBatch && !serviceBatch && !serviceCatalogForm && !serviceCatalogBatch && !setupForm) return;
@@ -1904,9 +1917,25 @@ export default function Manage({ onReload, currentUser = null }) {
     setBulkSelectedProjectIds([]);
     const clientDetail = id ? await apiGet(`/api/admin/clients/${encodeURIComponent(id)}`) : null;
     setDetail(clientDetail);
+  }
+
+  function selectCleanupCluster(id) {
+    setCleanupClusterId(id);
+    setCleanupClientId("");
+    setCleanupProjectId("");
     setSelectedDeletePocIds([]);
     setSelectedDeleteProjectIds([]);
-    setCleanupProjectId(clientDetail?.projects?.[0]?.id || "");
+  }
+
+  function selectCleanupClient(id) {
+    setCleanupClientId(id);
+    setCleanupProjectId("");
+    setSelectedDeletePocIds([]);
+    setSelectedDeleteProjectIds([]);
+  }
+
+  function selectCleanupProject(id) {
+    setCleanupProjectId(id);
   }
 
   async function loadSetupCopySource(id) {
@@ -1961,7 +1990,7 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   function openCleanupConfirmation(kind) {
-    const project = (detail?.projects || []).find((item) => item.id === cleanupProjectId);
+    const project = (directory?.projects || []).find((item) => item.id === cleanupProjectId);
     if (!project) {
       showToast("Select a project first.");
       return;
@@ -1985,7 +2014,7 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   function openRecordDeleteConfirmation(kind) {
-    const client = (directory?.clients || []).find((item) => item.id === clientId) || null;
+    const client = (directory?.clients || []).find((item) => item.id === cleanupClientId) || null;
     if (!client) {
       showToast("Select a client first.");
       return;
@@ -2061,7 +2090,17 @@ export default function Manage({ onReload, currentUser = null }) {
       setSelectedDeletePocIds([]);
       setSelectedDeleteProjectIds([]);
       if (kind === "clusters" && clusterFilterId === cluster.id) setClusterFilterId("");
-      await loadAll(kind === "clients" ? "" : clientId);
+      if (kind === "clusters" && cleanupClusterId === cluster.id) {
+        setCleanupClusterId("");
+        setCleanupClientId("");
+        setCleanupProjectId("");
+      }
+      if (kind === "clients" && clientIds.includes(cleanupClientId)) {
+        setCleanupClientId("");
+        setCleanupProjectId("");
+      }
+      if (kind === "projects" && projectIds.includes(cleanupProjectId)) setCleanupProjectId("");
+      await loadAll(kind === "clients" && clientIds.includes(clientId) ? "" : clientId);
       onReload();
       showToast(kind === "clusters"
         ? `${result.clustersDeleted} cluster${result.clustersDeleted === 1 ? "" : "s"} permanently deleted. Assigned clients and internal POCs were kept without a cluster.`
@@ -2172,7 +2211,7 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function removeServiceCatalog(item) {
-    if (!window.confirm(`Remove ${item.name} from the service catalogue?\n\nIf a project already uses it, the service will be archived instead so historical records remain valid.`)) return;
+    if (!window.confirm(`Remove ${item.name} from the Standard Service Catalogue?\n\nIf a project already uses it, the service will be archived instead so historical records remain valid.`)) return;
     setSaving(true);
     try {
       const result = await apiWrite(`/api/admin/service-catalog/${encodeURIComponent(item.id)}`, {}, "DELETE");
@@ -2765,10 +2804,53 @@ export default function Manage({ onReload, currentUser = null }) {
   const visibleProjectIds = new Set(visibleProjects.map((project) => project.id));
   const scopedClientPocs = (directory?.clientPocs || []).filter((poc) => visibleProjectIds.has(poc.projectId));
   const scopedProjectServices = (directory?.projectServices || []).filter((service) => visibleProjectIds.has(service.projectId));
+  const visibleProjectsById = new Map(visibleProjects.map((project) => [project.id, project]));
+  const sortedScopedClientPocs = [...scopedClientPocs].sort((left, right) => (
+    compareManageText(visibleProjectsById.get(left.projectId)?.name, visibleProjectsById.get(right.projectId)?.name)
+    || compareManageText(left.name, right.name)
+  ));
+  const sortedScopedProjectServices = [...scopedProjectServices].sort((left, right) => (
+    compareManageText(visibleProjectsById.get(left.projectId)?.name, visibleProjectsById.get(right.projectId)?.name)
+    || compareManageText(left.name, right.name)
+  ));
+  const clientPocNeedle = clientPocSearch.trim().toLowerCase();
+  const displayedScopedClientPocs = clientPocNeedle
+    ? sortedScopedClientPocs.filter((poc) => {
+      const project = visibleProjectsById.get(poc.projectId);
+      return [poc.name, poc.designation, poc.contactWhatsapp, poc.contactEmail, poc.levelName, project?.name, project?.key]
+        .some((value) => String(value || "").toLowerCase().includes(clientPocNeedle));
+    })
+    : sortedScopedClientPocs;
+  const projectServiceNeedle = projectServiceSearch.trim().toLowerCase();
+  const displayedScopedProjectServices = projectServiceNeedle
+    ? sortedScopedProjectServices.filter((service) => {
+      const project = visibleProjectsById.get(service.projectId);
+      const owner = (directory?.internalPocs || []).find((person) => person.id === service.internalPocId);
+      const manager = owner ? (directory?.internalPocs || []).find((person) => person.id === owner.reportingManagerId) : null;
+      return [service.name, service.serviceKey, project?.name, project?.key, owner?.name, manager?.name]
+        .some((value) => String(value || "").toLowerCase().includes(projectServiceNeedle));
+    })
+    : sortedScopedProjectServices;
   const scopedPocControlRows = pocControlRows.filter((poc) => visibleProjectIds.has(poc.projectId));
   const scopedServiceChangeRequests = serviceChangeRequests.filter((request) => visibleProjectIds.has(request.projectId));
   const pocs = detail?.pocs || [];
   const services = detail?.services || [];
+  const cleanupClients = clients
+    .filter((client) => !cleanupClusterId || client.clusterId === cleanupClusterId)
+    .sort((left, right) => compareManageText(left.name, right.name));
+  const cleanupSelectedClient = clients.find((client) => client.id === cleanupClientId) || null;
+  const cleanupProjects = (cleanupClientId
+    ? allProjects.filter((project) => project.clientId === cleanupClientId)
+    : [])
+    .sort((left, right) => compareManageText(left.name || left.key, right.name || right.key));
+  const cleanupProjectIds = new Set(cleanupProjects.map((project) => project.id));
+  const cleanupProjectsById = new Map(cleanupProjects.map((project) => [project.id, project]));
+  const cleanupPocs = (directory?.clientPocs || [])
+    .filter((poc) => cleanupProjectIds.has(poc.projectId))
+    .sort((left, right) => (
+      compareManageText(cleanupProjectsById.get(left.projectId)?.name, cleanupProjectsById.get(right.projectId)?.name)
+      || compareManageText(left.name, right.name)
+    ));
   const people = directory?.internalPocs || [];
   const savedLinkedInternalPocIds = new Set(
     appUsers.map((user) => user.internalPocId).filter(Boolean)
@@ -2920,7 +3002,7 @@ export default function Manage({ onReload, currentUser = null }) {
     <div className={`manage-page ${manageAccessClasses}`}>
       <div className="topbar">
         <div>
-          <h2>Manage records</h2>
+          <h2>Manage Records</h2>
           <p className="topbar-sub">
             Insert and edit clusters, clients, projects, POCs, services and internal owners
             {selectedClient ? ` · viewing ${selectedClient.name}` : ""}
@@ -2949,8 +3031,8 @@ export default function Manage({ onReload, currentUser = null }) {
         />
       </FilterBar>
       <p className="manage-scope-note">
-        The Cluster and Client selections scope every project-linked section below. Application Users, Excel onboarding,
-        organization standards, standard services and performance standards remain agency-wide master data.
+        The Cluster and Client selections scope every project-linked section below except Project Data Cleanup, which has independent filters.
+        Application Users, Excel onboarding, organization standards, standard services and performance standards remain agency-wide master data.
       </p>
 
       <nav className="manage-section-nav" aria-label="Manage sections">
@@ -2960,12 +3042,12 @@ export default function Manage({ onReload, currentUser = null }) {
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-workbook")?.scrollIntoView({ behavior: "smooth" })}>Excel Onboarding</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-clients")?.scrollIntoView({ behavior: "smooth" })}>Clients &amp; Clusters</button> : null}
-        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Services</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-project-status")?.scrollIntoView({ behavior: "smooth" })}>Project Status</button> : null}
         {canManageProjectTeams ? <button type="button" onClick={() => document.getElementById("manage-project-teams")?.scrollIntoView({ behavior: "smooth" })}>Project Teams</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Project Services</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Services &amp; Owners</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Service Catalogue</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
         {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
@@ -3365,7 +3447,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <Panel
         id="manage-poc-influence"
-        title="POC scoring influence"
+        title="POC Scoring Influence"
         badge="Per project"
         className="span-12"
       >
@@ -3391,7 +3473,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <Panel
         id="manage-workbook"
-        title="Bulk Excel onboarding and updates"
+        title="Bulk Excel Onboarding and Updates"
         badge="Multiple clients in one upload"
         className="span-12"
         action={
@@ -3436,7 +3518,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <Panel
         id="manage-clients"
-        title="Clients and clusters"
+        title="Clients and Clusters"
         badge={`${displayedClients.length} client${displayedClients.length === 1 ? "" : "s"} · ${displayedClusters.length} cluster${displayedClusters.length === 1 ? "" : "s"} displayed`}
         className="span-12"
         action={
@@ -3559,70 +3641,6 @@ export default function Manage({ onReload, currentUser = null }) {
             ))}
           </div>
         ) : null}
-      </Panel>
-
-      <Panel
-        id="manage-service-catalog"
-        title="Service catalogue"
-        badge={`${displayedServiceCatalog.length} displayed · ${serviceCatalog.filter((item) => item.active).length} active · ${serviceCatalog.length} total`}
-        className="span-12"
-        action={<Button icon={Plus} onClick={() => { closeForms(); setServiceCatalogBatch([{ name: "" }]); }}>Add standard services</Button>}
-      >
-        <p className="form-note">
-          Projects select services from this controlled list. Renaming a service updates its name on every linked project. Services already used in history are archived instead of being deleted.
-        </p>
-        {serviceCatalogForm ? (
-          <div ref={formRef}>
-            <ServiceCatalogForm
-              value={serviceCatalogForm}
-              onChange={setServiceCatalogForm}
-              onSave={saveServiceCatalog}
-              onCancel={() => setServiceCatalogForm(null)}
-              saving={saving}
-            />
-          </div>
-        ) : null}
-        {serviceCatalogBatch ? (
-          <div ref={formRef}>
-            <ServiceCatalogBatchForm
-              rows={serviceCatalogBatch}
-              onChange={setServiceCatalogBatch}
-              onSave={saveServiceCatalogBatch}
-              onCancel={() => setServiceCatalogBatch(null)}
-              saving={saving}
-            />
-          </div>
-        ) : null}
-        <div className="manage-section-search">
-          <Field label="Search services"><input value={serviceCatalogSearch} onChange={(event) => setServiceCatalogSearch(event.target.value)} placeholder="Service name, key or status" /></Field>
-          {serviceCatalogSearch ? <Button onClick={() => setServiceCatalogSearch("")}>Clear search</Button> : null}
-        </div>
-        <div className="manage-service-catalog-scroll">
-        <div className="dtable manage-service-catalog">
-          <div className="dtable-head">
-            <span>Standard service</span>
-            <span>Service key</span>
-            <span>Status</span>
-            <span />
-          </div>
-          {displayedServiceCatalog.map((item) => (
-            <div className="dtable-row" key={item.id}>
-              <strong>{item.name}</strong>
-              <span className="mono">{item.serviceKey}</span>
-              <span className={item.active ? "" : "missing"}>{item.active ? "Active" : "Archived"}</span>
-              <span className="button-row">
-                <button type="button" className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => {
-                  closeForms();
-                  setServiceCatalogForm({ ...item });
-                }}><Pencil size={14} aria-hidden="true" /></button>
-                <button type="button" className="icon-button danger" aria-label={`Delete or archive ${item.name}`} disabled={saving}
-                  onClick={() => removeServiceCatalog(item)}><Trash2 size={14} aria-hidden="true" /></button>
-              </span>
-            </div>
-          ))}
-          {!displayedServiceCatalog.length ? <EmptyState title={serviceCatalog.length ? "No services match this search" : "No standard services"} text={serviceCatalog.length ? "Clear the search to see every standard service." : "Add the services that projects can use."} /> : null}
-        </div>
-        </div>
       </Panel>
 
       <Panel
@@ -3807,7 +3825,7 @@ export default function Manage({ onReload, currentUser = null }) {
       <Panel
         id="manage-client-pocs"
         title="Client POCs"
-        badge={`${scopedClientPocs.length} in current scope`}
+        badge={`${displayedScopedClientPocs.length} displayed · ${scopedClientPocs.length} in current scope`}
         className="span-12"
         action={
           <div className="button-row">
@@ -3841,6 +3859,11 @@ export default function Manage({ onReload, currentUser = null }) {
             />
           </div>
         ) : null}
+        <div className="manage-section-search">
+          <Field label="Search Client POCs"><input value={clientPocSearch} onChange={(event) => setClientPocSearch(event.target.value)} placeholder="POC, project, designation, WhatsApp, email or tag" /></Field>
+          {clientPocSearch ? <Button onClick={() => setClientPocSearch("")}>Clear Search</Button> : null}
+        </div>
+        <div className="manage-client-pocs-scroll">
         <div className="dtable manage-pocs">
           <div className="dtable-head">
             <span>Name</span>
@@ -3848,11 +3871,11 @@ export default function Manage({ onReload, currentUser = null }) {
             <span>Designation</span>
             <span>WhatsApp</span>
             <span>Birthday</span>
-            <span>Tag & influence</span>
+            <span>Tag &amp; Influence</span>
             <span>Active</span>
             <span />
           </div>
-          {scopedClientPocs.map((poc) => {
+          {displayedScopedClientPocs.map((poc) => {
             const project = visibleProjects.find((item) => item.id === poc.projectId);
             return (
               <div key={poc.id} className="dtable-row">
@@ -3881,16 +3904,20 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
             );
           })}
-          {!scopedClientPocs.length ? (
-            <EmptyState title="No POCs in the current scope" text="POCs may be stored without a WhatsApp number. Add a valid number before sending feedback." />
+          {!displayedScopedClientPocs.length ? (
+            <EmptyState
+              title={scopedClientPocs.length ? "No Client POCs Match This Search" : "No POCs in the Current Scope"}
+              text={scopedClientPocs.length ? "Clear the search to see all project-sorted Client POCs." : "POCs may be stored without a WhatsApp number. Add a valid number before sending feedback."}
+            />
           ) : null}
+        </div>
         </div>
       </Panel>
 
       <Panel
         id="manage-services"
-        title="Services and owners"
-        badge={`${scopedProjectServices.length} in current scope`}
+        title="Services and Owners"
+        badge={`${displayedScopedProjectServices.length} displayed · ${scopedProjectServices.length} in current scope`}
         className="span-12"
         action={
           <Button
@@ -3922,16 +3949,21 @@ export default function Manage({ onReload, currentUser = null }) {
             />
           </div>
         ) : null}
+        <div className="manage-section-search">
+          <Field label="Search Services and Owners"><input value={projectServiceSearch} onChange={(event) => setProjectServiceSearch(event.target.value)} placeholder="Project, service, key, owner or reporting manager" /></Field>
+          {projectServiceSearch ? <Button onClick={() => setProjectServiceSearch("")}>Clear Search</Button> : null}
+        </div>
+        <div className="manage-services-scroll">
         <div className="dtable manage-services">
           <div className="dtable-head">
             <span>Service</span>
             <span>Project</span>
             <span>Key</span>
             <span>Owner</span>
-            <span>Reporting manager</span>
+            <span>Reporting Manager</span>
             <span />
           </div>
-          {scopedProjectServices.map((service) => {
+          {displayedScopedProjectServices.map((service) => {
             const project = visibleProjects.find((item) => item.id === service.projectId);
             const owner = peopleById.get(service.internalPocId);
             const manager = owner ? peopleById.get(owner.reportingManagerId) : null;
@@ -3959,9 +3991,77 @@ export default function Manage({ onReload, currentUser = null }) {
               </div>
             );
           })}
-          {!scopedProjectServices.length ? (
-            <EmptyState title="No services in the current scope" text="Feedback cannot be routed to an owner until services exist." />
+          {!displayedScopedProjectServices.length ? (
+            <EmptyState
+              title={scopedProjectServices.length ? "No Services or Owners Match This Search" : "No Services in the Current Scope"}
+              text={scopedProjectServices.length ? "Clear the search to see all project-sorted services and owners." : "Feedback cannot be routed to an owner until services exist."}
+            />
           ) : null}
+        </div>
+        </div>
+      </Panel>
+
+      <Panel
+        id="manage-service-catalog"
+        title="Standard Service Catalogue"
+        badge={`${displayedServiceCatalog.length} displayed · ${serviceCatalog.filter((item) => item.active).length} active · ${serviceCatalog.length} total`}
+        className="span-12"
+        action={<Button icon={Plus} onClick={() => { closeForms(); setServiceCatalogBatch([{ name: "" }]); }}>Add Standard Services</Button>}
+      >
+        <p className="form-note">
+          Projects select services from this controlled list. Renaming a service updates its name on every linked project. Services already used in history are archived instead of being deleted.
+        </p>
+        {serviceCatalogForm ? (
+          <div ref={formRef}>
+            <ServiceCatalogForm
+              value={serviceCatalogForm}
+              onChange={setServiceCatalogForm}
+              onSave={saveServiceCatalog}
+              onCancel={() => setServiceCatalogForm(null)}
+              saving={saving}
+            />
+          </div>
+        ) : null}
+        {serviceCatalogBatch ? (
+          <div ref={formRef}>
+            <ServiceCatalogBatchForm
+              rows={serviceCatalogBatch}
+              onChange={setServiceCatalogBatch}
+              onSave={saveServiceCatalogBatch}
+              onCancel={() => setServiceCatalogBatch(null)}
+              saving={saving}
+            />
+          </div>
+        ) : null}
+        <div className="manage-section-search">
+          <Field label="Search Services"><input value={serviceCatalogSearch} onChange={(event) => setServiceCatalogSearch(event.target.value)} placeholder="Service name, key or status" /></Field>
+          {serviceCatalogSearch ? <Button onClick={() => setServiceCatalogSearch("")}>Clear Search</Button> : null}
+        </div>
+        <div className="manage-service-catalog-scroll">
+          <div className="dtable manage-service-catalog">
+            <div className="dtable-head">
+              <span>Standard Service</span>
+              <span>Service Key</span>
+              <span>Status</span>
+              <span />
+            </div>
+            {displayedServiceCatalog.map((item) => (
+              <div className="dtable-row" key={item.id}>
+                <strong>{item.name}</strong>
+                <span className="mono">{item.serviceKey}</span>
+                <span className={item.active ? "" : "missing"}>{item.active ? "Active" : "Archived"}</span>
+                <span className="button-row">
+                  <button type="button" className="icon-button" aria-label={`Edit ${item.name}`} onClick={() => {
+                    closeForms();
+                    setServiceCatalogForm({ ...item });
+                  }}><Pencil size={14} aria-hidden="true" /></button>
+                  <button type="button" className="icon-button danger" aria-label={`Delete or archive ${item.name}`} disabled={saving}
+                    onClick={() => removeServiceCatalog(item)}><Trash2 size={14} aria-hidden="true" /></button>
+                </span>
+              </div>
+            ))}
+            {!displayedServiceCatalog.length ? <EmptyState title={serviceCatalog.length ? "No Services Match This Search" : "No Standard Services"} text={serviceCatalog.length ? "Clear the search to see every standard service." : "Add the services that projects can use."} /> : null}
+          </div>
         </div>
       </Panel>
 
@@ -4045,7 +4145,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <details className="internal-department-group" key={group.id} defaultOpen={group.people.length <= 8}>
               <summary><span><strong>{group.name}</strong><small>{group.people.length} Internal POC{group.people.length === 1 ? "" : "s"}</small></span></summary>
               <div className="dtable manage-internal">
-                <div className="dtable-head"><span>Name</span><span>Email</span><span>Sub-department</span><span>Reports to</span><span>Active</span><span>Actions</span></div>
+                <div className="dtable-head"><span>Name</span><span>Email</span><span>Sub-Department</span><span>Reports To</span><span>Active</span><span>Actions</span></div>
                 {group.people.map((person) => {
                   const subDepartment = subDepartments.find((item) => item.id === person.subDepartmentId);
                   const manager = peopleById.get(person.reportingManagerId);
@@ -4086,22 +4186,46 @@ export default function Manage({ onReload, currentUser = null }) {
 
       <Panel
         id="manage-cleanup"
-        title="Project data cleanup"
+        title="Project Data Cleanup"
         badge="Permanent"
         className="span-12 manage-cleanup-section"
       >
         <p className="form-note warning-note">
-          Choose one project from the selected client, then select one or more feedback cycles. Cleanup removes
-          only the records selected in sections 1–3. Section 4 separately provides permanent POC, project and client deletion.
+          This section has its own Cluster, Client and Project filters; the Manage filters at the top do not change this cleanup scope.
+          Cleanup removes only the records selected in sections 1–3. Section 4 separately provides permanent POC, project and client deletion.
         </p>
-        <div className="form-grid service-project-picker">
-          <Field label="Project to clean" hint="only cycles and issues belonging to this project can be selected">
-            <select value={cleanupProjectId} onChange={(event) => setCleanupProjectId(event.target.value)}>
-              <option value="">Select a project</option>
-              {projects.map((project) => <option key={project.id} value={project.id}>{project.name} · {project.key}</option>)}
-            </select>
-          </Field>
-        </div>
+        <FilterBar
+          showReset={Boolean(cleanupClusterId || cleanupClientId || cleanupProjectId)}
+          onReset={() => {
+            setCleanupClusterId("");
+            setCleanupClientId("");
+            setCleanupProjectId("");
+            setSelectedDeletePocIds([]);
+            setSelectedDeleteProjectIds([]);
+          }}
+        >
+          <SingleSelect
+            label="Cleanup Cluster"
+            value={cleanupClusterId}
+            onChange={selectCleanupCluster}
+            placeholder="All clusters"
+            options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
+          />
+          <SingleSelect
+            label="Cleanup Client"
+            value={cleanupClientId}
+            onChange={selectCleanupClient}
+            placeholder="Select a client"
+            options={cleanupClients.map((client) => ({ value: client.id, label: client.name }))}
+          />
+          <SingleSelect
+            label="Project to Clean"
+            value={cleanupProjectId}
+            onChange={selectCleanupProject}
+            placeholder={cleanupClientId ? "Select a project" : "Select a client first"}
+            options={cleanupProjects.map((project) => ({ value: project.id, label: `${project.name} · ${project.key}` }))}
+          />
+        </FilterBar>
         {cleanupLoading ? <LoadingBlock label="Loading project cycles and issues" /> : null}
         {!cleanupLoading && cleanupProjectId && cleanupLoadError ? (
           <EmptyState title="Could not load cleanup data" text={cleanupLoadError} />
@@ -4111,7 +4235,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <div className="cleanup-action">
               <div className="cleanup-action-head">
                 <div>
-                  <strong>1. Select feedback cycles</strong>
+                  <strong>1. Select Feedback Cycles</strong>
                   <p>Choose one or more cycles. The same selection can clear chats, filter issues, or delete the complete cycle.</p>
                 </div>
                 {cleanupCycles.length ? (
@@ -4153,7 +4277,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <div className="cleanup-action">
               <div className="cleanup-action-head">
                 <div>
-                  <strong>2. Select issues in those cycles</strong>
+                  <strong>2. Select Issues in Those Cycles</strong>
                   <p>Issues appear after you select cycles on the left. Select only the issues you want removed.</p>
                 </div>
                 {cleanupIssues.length ? (
@@ -4203,7 +4327,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <div className="cleanup-action cleanup-action-cycles">
               <div className="cleanup-action-head">
                 <div>
-                  <strong>3. Delete selected cycles completely</strong>
+                  <strong>3. Delete Selected Cycles Completely</strong>
                   <p>
                     {selectedCleanupCycleIds.length
                       ? `${selectedCleanupCycleIds.length} cycle${selectedCleanupCycleIds.length === 1 ? " is" : "s are"} selected above.`
@@ -4232,7 +4356,7 @@ export default function Manage({ onReload, currentUser = null }) {
         <div className="cleanup-action cleanup-action-records">
           <div className="cleanup-action-head">
             <div>
-              <strong>4. Delete POCs, projects or the whole client</strong>
+              <strong>4. Delete POCs, Projects or the Whole Client</strong>
               <p>Select individual POCs or projects below. Deleting the client removes every project and all related records under it.</p>
             </div>
           </div>
@@ -4240,16 +4364,16 @@ export default function Manage({ onReload, currentUser = null }) {
             <div>
               <div className="cleanup-action-head">
                 <strong>Client POCs</strong>
-                {pocs.length ? (
+                {cleanupPocs.length ? (
                   <div className="cleanup-select-actions">
-                    <button type="button" onClick={() => setSelectedDeletePocIds(pocs.map((poc) => poc.id))}>Select all</button>
+                    <button type="button" onClick={() => setSelectedDeletePocIds(cleanupPocs.map((poc) => poc.id))}>Select all</button>
                     <button type="button" onClick={() => setSelectedDeletePocIds([])}>Clear</button>
                   </div>
                 ) : null}
               </div>
               <div className="cleanup-list" role="group" aria-label="Client POCs to delete permanently">
-                {pocs.map((poc) => {
-                  const project = projects.find((item) => item.id === poc.projectId);
+                {cleanupPocs.map((poc) => {
+                  const project = cleanupProjectsById.get(poc.projectId);
                   return (
                     <label className="cleanup-check-row" key={poc.id}>
                       <input
@@ -4263,7 +4387,7 @@ export default function Manage({ onReload, currentUser = null }) {
                     </label>
                   );
                 })}
-                {!pocs.length ? <small>No POCs exist for this client.</small> : null}
+                {!cleanupPocs.length ? <small>{cleanupClientId ? "No POCs exist for this client." : "Select a client to see its POCs."}</small> : null}
               </div>
               <Button icon={Trash2} variant="danger" disabled={!selectedDeletePocIds.length || Boolean(cleaning)} onClick={() => openRecordDeleteConfirmation("pocs")}>
                 Delete {selectedDeletePocIds.length || 0} selected POC{selectedDeletePocIds.length === 1 ? "" : "s"}
@@ -4272,15 +4396,15 @@ export default function Manage({ onReload, currentUser = null }) {
             <div>
               <div className="cleanup-action-head">
                 <strong>Projects</strong>
-                {projects.length ? (
+                {cleanupProjects.length ? (
                   <div className="cleanup-select-actions">
-                    <button type="button" onClick={() => setSelectedDeleteProjectIds(projects.map((project) => project.id))}>Select all</button>
+                    <button type="button" onClick={() => setSelectedDeleteProjectIds(cleanupProjects.map((project) => project.id))}>Select all</button>
                     <button type="button" onClick={() => setSelectedDeleteProjectIds([])}>Clear</button>
                   </div>
                 ) : null}
               </div>
               <div className="cleanup-list" role="group" aria-label="Projects to delete permanently">
-                {projects.map((project) => (
+                {cleanupProjects.map((project) => (
                   <label className="cleanup-check-row" key={project.id}>
                     <input
                       type="checkbox"
@@ -4292,7 +4416,7 @@ export default function Manage({ onReload, currentUser = null }) {
                     <span><strong>{project.name}</strong><small>{project.key} · {project.activeStatus}</small></span>
                   </label>
                 ))}
-                {!projects.length ? <small>No projects exist for this client.</small> : null}
+                {!cleanupProjects.length ? <small>{cleanupClientId ? "No projects exist for this client." : "Select a client to see its projects."}</small> : null}
               </div>
               <Button icon={Trash2} variant="danger" disabled={!selectedDeleteProjectIds.length || Boolean(cleaning)} onClick={() => openRecordDeleteConfirmation("projects")}>
                 Delete {selectedDeleteProjectIds.length || 0} selected project{selectedDeleteProjectIds.length === 1 ? "" : "s"}
@@ -4301,10 +4425,10 @@ export default function Manage({ onReload, currentUser = null }) {
           </div>
           <div className="delete-client-row">
             <div>
-              <strong>Whole client: {selectedClient?.name || "none selected"}</strong>
+              <strong>Whole client: {cleanupSelectedClient?.name || "none selected"}</strong>
               <small>This includes all its projects, contacts, services, schedules and feedback history.</small>
             </div>
-            <Button icon={Trash2} variant="danger" disabled={!selectedClient || Boolean(cleaning)} onClick={() => openRecordDeleteConfirmation("clients")}>
+            <Button icon={Trash2} variant="danger" disabled={!cleanupSelectedClient || Boolean(cleaning)} onClick={() => openRecordDeleteConfirmation("clients")}>
               Delete whole client
             </Button>
           </div>
