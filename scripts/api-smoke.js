@@ -332,6 +332,18 @@ const store = {
     return store._session;
   },
   finalizeExpiredInactiveFinalSweeps: async () => store._expiredInactiveFinalSweeps,
+  expireDueQuickCheckins: async () => store._expiredQuickCheckins,
+  quickCheckinSessionSummary: async (sessionId) => ({
+    cycle: { id: "cyc_quick_summary", projectId: project.id, cycleType: "quick_checkin", status: "closed", csatScore: null },
+    project,
+    poc,
+    sessions: [{ ...store._session, id: sessionId, sessionType: "quick_checkin" }],
+    messages: calls.messages.filter((message) => message.sessionId === sessionId),
+    issues: [],
+    appreciations: [],
+    observations: [],
+    recipients: []
+  }),
   getDueReminderTargets: async () => [{
     session: store._session,
     poc,
@@ -591,6 +603,7 @@ const store = {
   _cycleSummary: null,
   _inactiveFinalSweepCandidates: [],
   _expiredInactiveFinalSweeps: [],
+  _expiredQuickCheckins: { expired: 0, sessions: [] },
   _messagingStatus: { enabled: true, updatedAt: null, updatedBy: null },
   _appUserRole: "super_admin",
   _internalPocs: [],
@@ -3714,6 +3727,89 @@ async function scenario(name, fn) {
     const res = await req("POST", "/api/automation/create-due-sessions", {});
     assert.strictEqual(res.statusCode, 201);
     assert.strictEqual(JSON.parse(res.body).cycles.length, 1);
+  });
+
+  await scenario("each completed quick-check-in POC sends one Directors summary", async () => {
+    const previousSession = store._session;
+    const previousExpired = store._expiredQuickCheckins;
+    const quickSession = {
+      id: "sess_quick_summary", cycleId: "cyc_quick_summary", projectId: project.id,
+      clientPocId: poc.id, status: "completed", completionStatus: "completed",
+      sessionType: "quick_checkin", lastClientResponseAt: "2026-10-15T06:00:00.000Z",
+      conversationState: {
+        state: "completed",
+        closureReason: "quick_checkin_window_elapsed",
+        quickCheckinOutcome: "feedback_shared",
+        quickCheckinDetail: "Campaign ownership needs improvement."
+      }
+    };
+    store._session = {
+      ...quickSession,
+      id: "sess_skip_reminder",
+      conversationState: { state: "opted_out", optedOut: true }
+    };
+    store._expiredQuickCheckins = { expired: 1, sessions: [quickSession] };
+    calls.automationClaims.delete("cycle_completed:quick_checkin:session:sess_quick_summary");
+    const before = calls.automation.filter((event) =>
+      event.eventType === "cycle_completed" && event.payload?.summaryType === "quick_checkin_poc"
+    ).length;
+    try {
+      const first = await req("POST", "/api/automation/process-due-reminders", {});
+      assert.strictEqual(first.statusCode, 200);
+      const summaryEvents = calls.automation.filter((event) =>
+        event.eventType === "cycle_completed" && event.payload?.summaryType === "quick_checkin_poc"
+      );
+      assert.strictEqual(summaryEvents.length, before + 1);
+      assert.strictEqual(summaryEvents.at(-1).payload.poc.id, poc.id);
+      assert.strictEqual(summaryEvents.at(-1).payload.quickCheckinDetail, "Campaign ownership needs improvement.");
+
+      await req("POST", "/api/automation/process-due-reminders", {});
+      assert.strictEqual(calls.automation.filter((event) =>
+        event.eventType === "cycle_completed" && event.payload?.summaryType === "quick_checkin_poc"
+      ).length, before + 1, "the same POC window must not email twice");
+    } finally {
+      store._session = previousSession;
+      store._expiredQuickCheckins = previousExpired;
+    }
+  });
+
+  await scenario("Dashboard keeps closed-project project-end delivery and stopped POC history visible", async () => {
+    const previousDashboard = store.getDashboard;
+    store.getDashboard = async () => ({
+      projects: [{
+        ...project,
+        activeStatus: "closed",
+        clientName: "Test Client",
+        clusterName: "Orion",
+        endDate: "2026-10-31",
+        endFeedbackRequestedAt: "2026-10-14T10:00:00.000Z"
+      }],
+      clusters: [], clients: [], openIssues: [], openCycles: [], scheduleEvents: [],
+      projectPocCounts: { [project.id]: 0 },
+      cycles: [{
+        id: "cyc_project_end_history", projectId: project.id, cycleType: "project_end",
+        status: "closed", startedAt: "2026-10-14T10:00:00.000Z",
+        closedAt: "2026-10-15T10:00:00.000Z", pocTotal: 1
+      }],
+      responseTracker: [{
+        id: "sess_stopped_history", cycleId: "cyc_project_end_history", projectId: project.id,
+        projectKey: project.key, projectName: project.name, pocName: poc.name,
+        cycleType: "project_end", responseStatus: "stopped", stoppedByAdmin: true,
+        cycleStartedAt: "2026-10-14T10:00:00.000Z"
+      }]
+    });
+    try {
+      const response = await req("GET", "/api/dashboard");
+      const payload = JSON.parse(response.body);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(payload.feedbackSchedule.length, 1);
+      assert.strictEqual(payload.feedbackSchedule[0].cycleType, "project_end");
+      assert.strictEqual(payload.feedbackSchedule[0].status, "completed");
+      assert.strictEqual(payload.feedbackSchedule[0].cycleId, "cyc_project_end_history");
+      assert.strictEqual(payload.responseTracker[0].responseStatus, "stopped");
+    } finally {
+      store.getDashboard = previousDashboard;
+    }
   });
 
   await scenario("project-end feedback defaults to manual-only without blocking monthly or manual cycles", async () => {

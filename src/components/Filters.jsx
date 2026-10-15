@@ -220,6 +220,18 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
  */
 export function DateRange({ range, onChange }) {
   const active = range.from || range.to;
+  const [inputRevision, setInputRevision] = useState(0);
+  const [inputTouched, setInputTouched] = useState(false);
+
+  function resetDates() {
+    onChange({ from: "", to: "", basis: range.basis });
+    // Chromium date controls can retain partially typed dd/mm/yyyy segments
+    // even while their DOM value is empty. Remounting both inputs is the only
+    // reliable way to clear that visible draft.
+    setInputRevision((value) => value + 1);
+    setInputTouched(false);
+  }
+
   return (
     <div className="filter-field date-range">
       <span className="filter-label">
@@ -227,26 +239,31 @@ export function DateRange({ range, onChange }) {
       </span>
       <div className={`date-range-inputs ${active ? "active" : ""}`}>
         <input
+          key={`from-${inputRevision}`}
           type="date"
           value={range.from || ""}
           max={range.to || undefined}
+          onInput={() => setInputTouched(true)}
           onChange={(event) => onChange({ ...range, from: event.target.value })}
           aria-label="From date"
         />
         <span className="date-dash">to</span>
         <input
+          key={`to-${inputRevision}`}
           type="date"
           value={range.to || ""}
           min={range.from || undefined}
+          onInput={() => setInputTouched(true)}
           onChange={(event) => onChange({ ...range, to: event.target.value })}
           aria-label="To date"
         />
-        {active ? (
+        {active || inputTouched ? (
           <button
             type="button"
             className="date-clear"
-            onClick={() => onChange({ from: "", to: "", basis: range.basis })}
-            aria-label="Clear date range"
+            onClick={resetDates}
+            aria-label="Reset date range"
+            title="Reset date range"
           >
             <X size={13} aria-hidden="true" />
           </button>

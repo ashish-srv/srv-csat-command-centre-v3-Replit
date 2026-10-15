@@ -2312,6 +2312,44 @@ function cycleCompletedPayload(summary, resumeUrl, fallbackQuestions = []) {
   };
 }
 
+async function notifyExpiredQuickCheckinSummaries(store, expiration, baseUrl) {
+  const notifications = [];
+  for (const session of expiration?.sessions || []) {
+    const state = session.conversationState || {};
+    if (state.closureReason !== "quick_checkin_window_elapsed") continue;
+    if (typeof store.quickCheckinSessionSummary !== "function") continue;
+    const summary = await store.quickCheckinSessionSummary(session.id);
+    if (!summary?.project || !summary.poc) continue;
+    const payload = {
+      ...cycleCompletedPayload(
+        summary,
+        buildResumeUrl(baseUrl, summary.project, session)
+      ),
+      summaryType: "quick_checkin_poc",
+      poc: summary.poc,
+      messages: summary.messages || [],
+      quickCheckinOutcome: state.quickCheckinOutcome || null,
+      quickCheckinDetail: state.quickCheckinDetail || null
+    };
+    notifications.push(await notifyAutomation(
+      store,
+      "cycle_completed",
+      payload,
+      `cycle_completed:quick_checkin:session:${session.id}`
+    ));
+  }
+  return notifications;
+}
+
+async function expireQuickCheckinsAndNotify(store, nowIso, baseUrl) {
+  if (typeof store.expireDueQuickCheckins !== "function") {
+    return { expired: 0, sessions: [], notifications: [] };
+  }
+  const expiration = await store.expireDueQuickCheckins(nowIso);
+  const notifications = await notifyExpiredQuickCheckinSummaries(store, expiration, baseUrl);
+  return { ...expiration, notifications };
+}
+
 /**
  * A client can leave after giving useful feedback but before reaching the
  * rating question. When the third-reminder grace period expires, run the same
@@ -3968,6 +4006,14 @@ async function handleApiRequest(request) {
       };
     };
     const cycles = (dashboard.cycles || []).map(attachProject);
+    const latestCycleByProjectType = new Map();
+    for (const cycle of cycles) {
+      const key = `${cycle.projectId}|${cycle.cycleType}`;
+      const current = latestCycleByProjectType.get(key);
+      if (!current || Date.parse(cycle.startedAt || "") > Date.parse(current.startedAt || "")) {
+        latestCycleByProjectType.set(key, cycle);
+      }
+    }
     const projectEndProjectIds = new Set(
       cycles.filter((cycle) => cycle.cycleType === "project_end").map((cycle) => cycle.projectId)
     );
@@ -3989,9 +4035,8 @@ async function handleApiRequest(request) {
     }
     const feedbackSchedule = [];
     for (const project of dashboard.projects || []) {
-      if (project.activeStatus !== "active") continue;
       const activePocCount = Number(dashboard.projectPocCounts?.[project.id]) || 0;
-      const addScheduleRow = (cycleType, dueAt, baseStatus, statusReason = null) => {
+      const addScheduleRow = (cycleType, dueAt, baseStatus, statusReason = null, cycle = null) => {
         if (!dueAt && baseStatus !== "automatic_off") return;
         const open = openCycleKeys.has(`${project.id}|${cycleType}`);
         const skipped = latestSkippedByProjectType.get(`${project.key}|${cycleType}`) || null;
@@ -4006,14 +4051,24 @@ async function handleApiRequest(request) {
           clusterName: project.clusterName,
           cycleType,
           dueAt,
-          activePocCount,
+          activePocCount: Number(cycle?.pocTotal) || activePocCount,
           status: open ? "open" : skipStillRelevant ? "blocked" : baseStatus,
           blockedReason: skipStillRelevant ? skipped.reason : statusReason,
-          attemptedAt: skipStillRelevant ? skipped.attemptedAt : null
+          attemptedAt: skipStillRelevant ? skipped.attemptedAt : null,
+          cycleId: cycle?.id || null
         });
       };
 
-      if (project.endDate) {
+      const latestProjectEnd = latestCycleByProjectType.get(`${project.id}|project_end`) || null;
+      if (latestProjectEnd) {
+        addScheduleRow(
+          "project_end",
+          latestProjectEnd.startedAt || latestProjectEnd.closedAt || project.endFeedbackRequestedAt,
+          latestProjectEnd.status === "closed" ? "completed" : "requested",
+          null,
+          latestProjectEnd
+        );
+      } else if (project.activeStatus === "active" && project.endDate) {
         const due = new Date(project.endDate).getTime() <= nowMs;
         const status = project.endFeedbackRequestedAt
           ? "requested"
@@ -4025,7 +4080,7 @@ async function handleApiRequest(request) {
       const ended = project.endDate && new Date(project.endDate).getTime() <= nowMs;
       const projectEndStarted = Boolean(project.endFeedbackRequestedAt)
         || projectEndProjectIds.has(project.id);
-      if (!ended && !projectEndStarted) {
+      if (project.activeStatus === "active" && !ended && !projectEndStarted) {
         if (project.automaticFeedbackEnabled === false) {
           addScheduleRow("pulse", project.nextCycleDueAt, "automatic_off", "Automatic sending off");
         } else if (project.nextCycleDueAt) {
@@ -5368,7 +5423,7 @@ async function handleApiRequest(request) {
     if (!await whatsappMessagingEnabled(store)) {
       return json(200, { paused: true, scheduleKey: null, cycles: [], skipped: [], expired: 0 });
     }
-    const expired = await store.expireDueQuickCheckins(body.now);
+    const expired = await expireQuickCheckinsAndNotify(store, body.now, baseUrl);
     const due = await store.getDueQuickCheckinTargets(body.now);
     const cycles = [];
     const skipped = [];
@@ -5420,9 +5475,7 @@ async function handleApiRequest(request) {
     if (!await whatsappMessagingEnabled(store)) {
       return json(200, { paused: true, reminders: [], closed: [], deferredClosures: [], failed: [] });
     }
-    const expiredQuickCheckins = typeof store.expireDueQuickCheckins === "function"
-      ? await store.expireDueQuickCheckins(body.now)
-      : { expired: 0 };
+    const expiredQuickCheckins = await expireQuickCheckinsAndNotify(store, body.now, baseUrl);
     const targets = await store.getDueReminderTargets(body.now);
     const reminders = [];
     const closed = [];
@@ -7190,7 +7243,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
 
   if (session.status === "completed" || state.state === "completed" || responseDeadlineExpired) {
     if (responseDeadlineExpired && session.status !== "completed" && state.state !== "completed") {
-      await store.expireDueQuickCheckins(new Date().toISOString());
+      await expireQuickCheckinsAndNotify(store, new Date().toISOString(), baseUrl);
     }
     result = { session: await store.getSession(session.id) || session };
     const closedAcknowledgement = /^(?:ok|okay|thanks|thank you|all good|fine|good|no problem|no|nothing else|that(?:'s| is) all|👍(?:🏻|🏼|🏽|🏾|🏿)?)$/i.test(normalized);

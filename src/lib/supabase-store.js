@@ -2942,6 +2942,7 @@ class SupabaseStore {
       const poc = pocById.get(row.client_poc_id);
       return {
         id: row.id,
+        sessionId: row.session_id,
         serviceKey: row.service_key,
         serviceName: service?.name || row.service_name,
         title: row.title,
@@ -2960,7 +2961,7 @@ class SupabaseStore {
       ...observationRows
         .filter((row) => row.sentiment === "positive"
           && readsAsExplicitAppreciation(`${row.topic || ""} ${row.detail || ""}`))
-        .map((row) => ({ subject: row.topic, detail: row.detail, owner: null })),
+        .map((row) => ({ sessionId: row.session_id, subject: row.topic, detail: row.detail, owner: null })),
       ...serviceRows
         .filter((row) => row.sentiment === "positive" && row.reason_text
           && readsAsExplicitAppreciation(row.reason_text))
@@ -2968,6 +2969,7 @@ class SupabaseStore {
           const service = serviceByKey.get(row.service_key);
           const owner = service && service.internalPocId ? ownersById.get(service.internalPocId) : null;
           return {
+            sessionId: row.session_id,
             subject: row.service_name,
             detail: row.reason_text,
             owner: owner ? { name: owner.name, email: owner.email } : null
@@ -2984,6 +2986,7 @@ class SupabaseStore {
       observations: observationRows
         .filter((row) => row.sentiment !== "positive")
         .map((row) => ({
+          sessionId: row.session_id,
           topic: row.topic, detail: row.detail, severity: row.severity
         })),
       // Every internal address this cycle should reach, de-duplicated.
@@ -2992,6 +2995,25 @@ class SupabaseStore {
         ...issues.map((issue) => issue.manager && issue.manager.email),
         ...appreciations.map((item) => item.owner && item.owner.email)
       ].filter(Boolean))]
+    };
+  }
+
+  /** One Directors' Office summary for one completed quick-check-in POC. */
+  async quickCheckinSessionSummary(sessionId) {
+    const detail = await this.getSessionDetail(sessionId);
+    if (!detail?.session || detail.session.sessionType !== "quick_checkin") return null;
+    const full = await this.cycleSummary(detail.session.cycleId);
+    if (!full) return null;
+    const belongsToSession = (item) => item.sessionId === detail.session.id;
+    return {
+      ...full,
+      sessions: [detail.session],
+      poc: detail.poc,
+      messages: detail.messages || [],
+      issues: (full.issues || []).filter(belongsToSession),
+      appreciations: (full.appreciations || []).filter(belongsToSession),
+      observations: (full.observations || []).filter(belongsToSession),
+      recipients: []
     };
   }
 
@@ -4324,10 +4346,11 @@ class SupabaseStore {
     });
     const due = rows.filter((row) => row.feedback_cycles?.cycle_type === "quick_checkin");
     const cycleIds = new Set();
+    const expiredSessions = [];
     for (const row of due) {
       const state = row.conversation_state || {};
       const completedWindow = state.state === "quick_checkin_window";
-      await this.request("feedback_sessions", {
+      const updatedRows = await this.request("feedback_sessions", {
         method: "PATCH",
         query: `id=eq.${encodeURIComponent(row.id)}`,
         body: {
@@ -4349,13 +4372,16 @@ class SupabaseStore {
           }
         }
       });
+      expiredSessions.push(toSession(updatedRows[0], {
+        cycleType: "quick_checkin"
+      }));
       cycleIds.add(row.cycle_id);
     }
     for (const cycleId of cycleIds) {
       const session = due.find((row) => row.cycle_id === cycleId);
       await this.recomputeCycle(cycleId, session.project_id);
     }
-    return { expired: due.length };
+    return { expired: due.length, sessions: expiredSessions };
   }
 }
 

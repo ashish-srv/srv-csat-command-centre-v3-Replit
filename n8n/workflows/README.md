@@ -55,6 +55,18 @@ session's final 24-hour grace period. Set
 The workflow waits for Meta to accept the template; only then does the app close
 the session. **Stop Feedback** does not invoke this workflow.
 
+Workflow 10 now accepts two summary contracts through the existing
+`N8N_CYCLE_COMPLETED_WEBHOOK` URL:
+
+- 30-day and project-end feedback: one consolidated email after the complete
+  cycle closes.
+- Quick check-in: one Directors' Office email for each POC after that POC's
+  10-minute response window closes. It does not wait for the other POCs.
+
+Import `10 - CSAT v5 - Cycle and Quick Check-in Summary.json`, retain its
+existing SMTP credential and `CSAT_HANDOFF_EMAIL`, deactivate the older
+Workflow 10, then activate this version. No new Replit secret is required.
+
 
 ## Quick Check-in setup
 

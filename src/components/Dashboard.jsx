@@ -26,7 +26,8 @@ const SCHEDULE_STATUS_LABELS = {
   blocked: "Blocked / skipped",
   automatic_off: "Automatic sending off",
   open: "Cycle open",
-  requested: "Already requested"
+  requested: "Sent / in progress",
+  completed: "Completed"
 };
 
 function scheduleStatusLabel(value) {
@@ -36,7 +37,7 @@ function scheduleStatusLabel(value) {
 function scheduleStatusTone(value) {
   if (["blocked", "manual_required", "automatic_off"].includes(value)) return "weak";
   if (["due", "upcoming_manual"].includes(value)) return "watch";
-  if (["open", "requested"].includes(value)) return "strong";
+  if (["open", "requested", "completed"].includes(value)) return "strong";
   return "neutral";
 }
 
@@ -164,10 +165,10 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
   const [clients, setClients] = useState([]);
   const [projectNames, setProjectNames] = useState([]);
   const [risks, setRisks] = useState([]);
-  // Defaults to active: a project closed four months ago should not drag the
-  // current average. It is a normal multi-select, so any combination can be
-  // chosen, or cleared to see everything.
-  const [statuses, setStatuses] = useState(["active"]);
+  // An empty selection means every project status. Historical project-end and
+  // stopped-session activity must not disappear behind an implicit "active"
+  // filter when a user selects the correct client and project.
+  const [statuses, setStatuses] = useState([]);
   const [range, setRange] = useState({ from: "", to: "", basis: "started" });
   const [expanded, setExpanded] = useState({});
   const [responseFilter, setResponseFilter] = useState("all");
@@ -391,14 +392,13 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
     ? scopedResponseTracker
     : scopedResponseTracker.filter((session) => session.responseStatus === responseFilter);
 
-  const statusIsDefault = statuses.length === 1 && statuses[0] === "active";
   const filtersActive = Boolean(
     clusters.length || clients.length || projectNames.length || risks.length
-    || !statusIsDefault || range.from || range.to
+    || statuses.length || range.from || range.to
   );
 
   function resetFilters() {
-    setClusters([]); setClients([]); setProjectNames([]); setRisks([]); setStatuses(["active"]);
+    setClusters([]); setClients([]); setProjectNames([]); setRisks([]); setStatuses([]);
     setRange({ from: "", to: "", basis: "started" });
   }
 
@@ -753,7 +753,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
           options={projectOptions}
         />
         <MultiSelect label="Risk" allLabel="All risk" selected={risks} onChange={setRisks} options={RISK_OPTIONS} />
-        <MultiSelect label="Status" allLabel="All statuses" selected={statuses} onChange={setStatuses} options={statusOptions} />
+        <MultiSelect label="Project Status" allLabel="All project statuses" selected={statuses} onChange={setStatuses} options={statusOptions} />
         <DateRange range={range} onChange={setRange} />
       </FilterBar>
 
@@ -786,7 +786,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
           {statuses.map((name) => (
             <button key={`st-${name}`} type="button" className="filter-chip"
               onClick={() => setStatuses(statuses.filter((item) => item !== name))}>
-              Status: {name} <X size={11} aria-hidden="true" />
+              Project Status: {name} <X size={11} aria-hidden="true" />
             </button>
           ))}
           {range.from || range.to ? (
@@ -957,7 +957,7 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
           <div className="schedule-table-head">
             <span>Client & project</span>
             <span>Feedback cycle</span>
-            <span>Due date</span>
+            <span>Due / sent date</span>
             <span>POCs</span>
             <span>Delivery status</span>
             <span />
@@ -972,7 +972,13 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
                 <StatusPill value={scheduleStatusLabel(item.status)} tone={scheduleStatusTone(item.status)} />
                 {item.blockedReason ? <small title={item.blockedReason}>{item.blockedReason}</small> : null}
               </span>
-              <button type="button" className="row-link" onClick={() => onOpenProject(item.projectKey)}>Open</button>
+              <button
+                type="button"
+                className="row-link"
+                onClick={() => onOpenProject(item.projectKey, item.cycleId ? { cycleId: item.cycleId } : undefined)}
+              >
+                Open
+              </button>
             </div>
           ))}
           {!feedbackSchedule.length ? <EmptyState title="No scheduled feedback matches" text="Adjust the dashboard or schedule filters." /> : null}
