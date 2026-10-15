@@ -2657,17 +2657,34 @@ async function scenario(name, fn) {
   });
 
   await scenario("G3 message after completion does not rewrite the session", async () => {
-    store._session = { ...store._session, status: "completed", conversationState: { state: "completed", mentionedServices: {}, turnCount: 4 } };
-    const analysesBefore = calls.analyses.length;
-    calls.automation.length = 0;
-    const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "Account management has issue" });
-    const payload = JSON.parse(res.body);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(payload.guardrail, "G3_post_completion");
-    assert.strictEqual(calls.analyses.length, analysesBefore, "applyAnalysis must not run on a closed session");
-    assert.strictEqual(calls.automation.filter((e) => e.eventType === "manager_alert").length, 1);
-    assert.ok(!calls.automation.some((e) => e.eventType === "post_completion_message"));
-    assert.ok(/already closed/i.test(payload.whatsappReplyText));
+    const priorWebhook = process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+    const priorFetch = global.fetch;
+    const outbound = [];
+    process.env.N8N_HUMAN_HANDOFF_WEBHOOK = "https://n8n.example/webhook/csat-human-handoff";
+    global.fetch = async (url, options) => {
+      outbound.push({ url, options });
+      return { ok: true, status: 200 };
+    };
+    try {
+      store._session = { ...store._session, status: "completed", conversationState: { state: "completed", mentionedServices: {}, turnCount: 4 } };
+      const analysesBefore = calls.analyses.length;
+      calls.automation.length = 0;
+      const res = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "Account management has issue" });
+      const payload = JSON.parse(res.body);
+      const handoff = calls.automation.find((event) => event.eventType === "post_completion_message");
+      assert.strictEqual(payload.guardrail, "G3_post_completion");
+      assert.strictEqual(calls.analyses.length, analysesBefore, "applyAnalysis must not run on a closed session");
+      assert.strictEqual(handoff.status, "sent");
+      assert.strictEqual(handoff.webhookUrlConfigured, true);
+      assert.strictEqual(outbound[0].url, process.env.N8N_HUMAN_HANDOFF_WEBHOOK);
+      assert.strictEqual(payload.postCompletionHandoffEvent.status, "sent");
+      assert.ok(!calls.automation.some((event) => event.eventType === "manager_alert"));
+      assert.ok(/already closed/i.test(payload.whatsappReplyText));
+    } finally {
+      if (priorWebhook === undefined) delete process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+      else process.env.N8N_HUMAN_HANDOFF_WEBHOOK = priorWebhook;
+      global.fetch = priorFetch;
+    }
   });
 
   await scenario("quick check-in acknowledgements and meeting references keep waiting for feedback", async () => {
@@ -6767,6 +6784,266 @@ async function scenario(name, fn) {
     assert.match(reply, /Aisha and Dev/i);
     assert.match(reply, /anything else.*Directors/i);
     assert.ok(!/Glad to hear that about Account Management/i.test(reply));
+  });
+
+  await scenario("successful Gemini output cannot omit a detailed process concern or named POC praise", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const mixedText = "We agreed one set of amendments across several visual assets, but some changes were implemented inconsistently and had to be reiterated. Better internal alignment would make the process smoother. Our POCs, Aisha initially and now Dev, were approachable and responsive throughout.";
+    const scopedProject = {
+      ...project,
+      services: [
+        { serviceKey: "account", name: "Account Management" },
+        { serviceKey: "campaign", name: "Campaign Management" }
+      ]
+    };
+    // Reproduce a successful conductor response whose prose is usable but
+    // whose structured arrays accidentally omit everything the client raised.
+    const conducted = {
+      text: "Thank you for sharing your feedback.",
+      captured: [],
+      observations: [],
+      appreciations: [],
+      answeredAnythingElse: true,
+      readyToClose: true
+    };
+    conversationFlow.enrichConductedWithDeterministicFacts(conducted, mixedText, scopedProject);
+    assert.strictEqual(conducted.observations.length, 1);
+    assert.strictEqual(conducted.observations[0].topic, "Creative Process");
+    assert.strictEqual(conducted.observations[0].fallbackKind, "delivery_process");
+    assert.strictEqual(conducted.appreciations[0].subject, "Aisha and Dev");
+
+    const state = {
+      pendingQuestionType: "final_sweep",
+      pendingObservation: null,
+      overallRatingAsked: true,
+      overallRating: 9,
+      npsAsked: true,
+      npsScore: 10
+    };
+    conversationFlow.applyConversationInterruption(
+      state,
+      { ...state },
+      { intent: "feedback" },
+      conducted,
+      mixedText
+    );
+    const action = conversationFlow.requiredConversationAction({
+      servicesWhereWeStillDoNotKnowWhatIsWrongWithKeys: [],
+      servicesWaitingForAnythingElseAnswer: [],
+      servicesNotYetDiscussedWithKeys: [],
+      overallRatingStillNeeded: false,
+      npsStillNeeded: false
+    }, state);
+    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Creative Process" });
+    const reply = conversationFlow.fallbackForAction(action, state, scopedProject, conducted);
+    assert.match(reply, /sorry.*creative process.*back-and-forth/i);
+    assert.match(reply, /Aisha and Dev/i);
+    assert.match(reply, /anything else.*Directors/i);
+    assert.ok(!/remain active for the next 10 minutes/i.test(reply));
+  });
+
+  await scenario("successful Gemini output cannot omit other substantial concerns", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const text = "The campaign results are below expectations, the reporting does not provide the profiles we need, and we need much stronger ownership from the team.";
+    const interpretation = {
+      source: "gemini",
+      intent: "feedback",
+      sentiment: "negative",
+      explainsProblem: true,
+      concerns: [{
+        title: "Campaign performance and reporting",
+        summary: text,
+        sentiment: "negative",
+        severity: "high"
+      }]
+    };
+    const conducted = {
+      text: "Thank you for sharing your feedback.",
+      captured: [],
+      observations: [],
+      appreciations: [],
+      readyToClose: true
+    };
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      conducted,
+      text,
+      project,
+      interpretation,
+      { protectSubstantiveConcern: true }
+    );
+    assert.strictEqual(conducted.observations.length, 1);
+    assert.strictEqual(conducted.observations[0].sentiment, "negative");
+    assert.strictEqual(conducted.observations[0].fallbackKind, "general_concern");
+    assert.strictEqual(conducted.observations[0].needsFollowUp, false);
+  });
+
+  await scenario("facts from either successful Gemini read survive across unrelated topics", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const cases = [
+      {
+        name: "commercial scope",
+        text: "The delivered scope does not match the signed commercial proposal.",
+        interpretation: {
+          intent: "feedback", sentiment: "negative", explainsProblem: true,
+          concerns: [{
+            title: "Commercial scope mismatch", summary: "Delivered scope differs from the signed proposal.",
+            sentiment: "negative", severity: "high", serviceKey: null, needsFollowUp: false
+          }]
+        },
+        expectedTopic: "Commercial scope mismatch"
+      },
+      {
+        name: "data quality",
+        text: "The attribution model assigns webinar conversions to the preceding source.",
+        interpretation: {
+          intent: "feedback", sentiment: "negative", explainsProblem: true,
+          observations: [{
+            topic: "Attribution Data", detail: "Webinar conversions are assigned to the preceding source.",
+            sentiment: "negative", severity: "watch", needsFollowUp: false, kind: "feedback"
+          }]
+        },
+        expectedTopic: "Attribution Data"
+      },
+      {
+        name: "service delivery",
+        text: "Organic search recommendations arrive after our publishing decisions.",
+        interpretation: {
+          intent: "feedback", sentiment: "negative", explainsProblem: true,
+          captured: [{
+            serviceKey: "seo", sentiment: "negative",
+            summary: "Recommendations arrive after publishing decisions.", declined: false, needsFollowUp: false
+          }]
+        },
+        expectedService: "seo"
+      },
+      {
+        name: "action request",
+        text: "Please arrange a review with the project director before the next launch.",
+        interpretation: {
+          intent: "feedback", sentiment: "neutral", explainsProblem: true,
+          observations: [{
+            topic: "Leadership Review", detail: "Arrange a project-director review before launch.",
+            sentiment: "neutral", severity: "info", needsFollowUp: false, kind: "request"
+          }]
+        },
+        expectedTopic: "Leadership Review"
+      },
+      {
+        name: "person appreciation",
+        text: "Riya kept every stakeholder aligned and made coordination effortless.",
+        interpretation: {
+          intent: "feedback", sentiment: "positive", explainsProblem: true,
+          appreciations: [{ subject: "Riya", detail: "Kept stakeholders aligned.", serviceKey: null }]
+        },
+        expectedAppreciation: "Riya"
+      }
+    ];
+
+    for (const item of cases) {
+      const conducted = {
+        text: "Thank you for sharing this. Is there anything else you would like the Directors to know?",
+        captured: [], observations: [], appreciations: [], readyToClose: true
+      };
+      conversationFlow.enrichConductedWithDeterministicFacts(
+        conducted, item.text, project, item.interpretation,
+        { protectSubstantiveConcern: true }
+      );
+      if (item.expectedService) {
+        assert.ok(conducted.captured.some((fact) => (
+          fact.serviceKey === item.expectedService && fact.sentiment === "negative"
+        )), `${item.name}: service concern disappeared`);
+      }
+      if (item.expectedTopic) {
+        assert.ok(conducted.observations.some((fact) => fact.topic === item.expectedTopic),
+          `${item.name}: observation disappeared`);
+      }
+      if (item.expectedAppreciation) {
+        assert.ok(conducted.appreciations.some((fact) => fact.subject === item.expectedAppreciation),
+          `${item.name}: appreciation disappeared`);
+      }
+    }
+  });
+
+  await scenario("a usable Gemini acknowledgement cannot close over an unstructured concern", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const text = "The cohort model assigns converted leads to the preceding source, so the report leads us toward the opposite channel decision.";
+    const conducted = {
+      text: "I’m sorry this affected your decisions. We will review it carefully. Is there anything else you would like the Directors to know?",
+      captured: [], observations: [], appreciations: [], answeredAnythingElse: true, readyToClose: true
+    };
+    const interpretation = {
+      source: "gemini", intent: "feedback", sentiment: "neutral", explainsProblem: false,
+      captured: [], observations: [], concerns: [], appreciations: []
+    };
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      conducted, text, project, interpretation,
+      { protectSubstantiveConcern: true }
+    );
+    assert.strictEqual(conducted.observations.length, 1,
+      "the model's own concern acknowledgement must create an open fact even for an unfamiliar topic");
+
+    for (const pendingQuestionType of ["project_end_review", "service_scope", "overall_rating", "nps", "final_sweep"]) {
+      const state = { pendingQuestionType, pendingObservation: null };
+      conversationFlow.applyConversationInterruption(
+        state, { ...state }, interpretation, conducted, text
+      );
+      const action = conversationFlow.requiredConversationAction({
+        servicesWhereWeStillDoNotKnowWhatIsWrongWithKeys: [],
+        servicesWaitingForAnythingElseAnswer: [],
+        servicesNotYetDiscussedWithKeys: [],
+        projectEndReviewStillNeeded: false,
+        serviceScopeChoiceStillNeeded: false,
+        overallRatingStillNeeded: false,
+        npsStillNeeded: false
+      }, state);
+      assert.notStrictEqual(action.type, "close",
+        `${pendingQuestionType}: checklist closed over a concern`);
+      assert.strictEqual(action.type, "observation_followup");
+    }
+
+    const positive = {
+      text: "Thank you for the kind words. We will share them with the team.",
+      captured: [], observations: [], appreciations: [], readyToClose: true
+    };
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      positive,
+      "Everything has progressed smoothly and the team has been excellent.",
+      project,
+      { intent: "feedback", sentiment: "positive", explainsProblem: true },
+      { protectSubstantiveConcern: true, allowLanguageOnly: true }
+    );
+    assert.strictEqual(positive.observations.length, 0,
+      "positive feedback must not be converted into a concern by the fail-safe");
+  });
+
+  await scenario("quick check-in supplements successful Gemini output with omitted concerns", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const text = "The campaign outcomes are below expectations, the report lacks useful profile information, and we need more proactive ownership.";
+    const enriched = conversationFlow.enrichQuickCheckinInterpretation(text, project, {
+      source: "gemini",
+      intent: "feedback",
+      sentiment: "negative",
+      explainsProblem: true,
+      concerns: [],
+      observations: [],
+      appreciations: []
+    });
+    assert.ok(enriched.concerns.length >= 3, "all independently detectable concern categories should be preserved");
+    assert.ok(enriched.concerns.some((item) => /outcomes/i.test(item.title)));
+    assert.ok(enriched.concerns.some((item) => /reporting/i.test(item.title)));
+    assert.ok(enriched.concerns.some((item) => /ownership/i.test(item.title)));
+
+    const unfamiliar = conversationFlow.enrichQuickCheckinInterpretation(
+      "The cohort logic attributes converted enquiries to the preceding touchpoint and sends our planning in the wrong direction.",
+      project,
+      {
+        source: "gemini", intent: "feedback", sentiment: "negative", explainsProblem: true,
+        concerns: [], captured: [], observations: [], appreciations: []
+      }
+    );
+    assert.strictEqual(unfamiliar.concerns.length, 1,
+      "an unfamiliar explained concern must not produce an empty quick-check-in record");
+    assert.strictEqual(unfamiliar.concerns[0].title, "Concern requiring management review");
   });
 
   await scenario("polite meeting requests are not recorded as appreciations", async () => {

@@ -943,8 +943,9 @@ scenario("A handed-off session stays terminal and routes substantive follow-up",
   assert.strictEqual(turn.conversationState.state, STATES.HANDED_OFF);
   assert.strictEqual(turn.conversationState.handoffReason, "turn_cap");
   assert.strictEqual(turn.control.skipAnalysisWrite, true);
-  assert.strictEqual(turn.control.forceManagerAlert, true,
-    "new complaint is routed without reopening the survey");
+  assert.strictEqual(turn.control.notify, "post_completion_message",
+    "new complaint is routed to human handoff without reopening the survey");
+  assert.strictEqual(turn.control.forceManagerAlert, false);
 });
 
 scenario("A completed session still says its feedback is recorded", () => {
@@ -1134,9 +1135,9 @@ scenario("G3 post-completion complaint is answered honestly and notified", () =>
   });
   assert.strictEqual(after.control.guardrail, GUARDRAILS.POST_COMPLETION);
   assert.strictEqual(after.control.skipAnalysisWrite, true, "must not rewrite a closed session");
-  assert.strictEqual(after.control.notify, null);
-  assert.strictEqual(after.control.forceManagerAlert, true,
-    "a late complaint should use the single manager-alert path");
+  assert.strictEqual(after.control.notify, "post_completion_message");
+  assert.strictEqual(after.control.forceManagerAlert, false,
+    "a late complaint should reach the human-handoff workflow");
   assert.ok(/already closed/i.test(after.nextMessage.body), after.nextMessage.body);
   assert.ok(!/I have noted the issue/i.test(after.nextMessage.body));
   assert.strictEqual(after.control.allowAiRephrase, false, "Gemini must not improvise here");
@@ -1551,7 +1552,30 @@ scenario("A serious post-completion message reaches G7", () => {
     project, poc, text: "This is unacceptable, our lawyer will contact you"
   });
   assert.strictEqual(turn.control.guardrail, GUARDRAILS.ESCALATION);
-  assert.strictEqual(turn.control.forceManagerAlert, true);
+  assert.strictEqual(turn.control.notify, "post_completion_message",
+    "serious late messages must reach the Human Handoff workflow");
+  assert.strictEqual(turn.control.forceManagerAlert, false,
+    "a closed session must not route its new message only to manager alerts");
+  assert.strictEqual(turn.control.skipAnalysisWrite, true);
+});
+
+scenario("A serious message after an expired correction window reaches Human Handoff", () => {
+  const turn = processWhatsAppReply({
+    session: {
+      ...newSession(),
+      conversationState: {
+        state: STATES.CLOSING_GRACE,
+        closingGraceExpiresAt: new Date(Date.now() - 1000).toISOString(),
+        mentionedServices: {},
+        overallRating: 7
+      }
+    },
+    project, poc, text: "This is unacceptable, our lawyer will contact you"
+  });
+  assert.strictEqual(turn.conversationState.state, STATES.COMPLETED);
+  assert.strictEqual(turn.control.guardrail, GUARDRAILS.ESCALATION);
+  assert.strictEqual(turn.control.notify, "post_completion_message");
+  assert.strictEqual(turn.control.forceManagerAlert, false);
   assert.strictEqual(turn.control.skipAnalysisWrite, true);
 });
 

@@ -1817,11 +1817,24 @@ function processWhatsAppReply({
     });
   }
 
-  // --- G7 escalation / abuse. It must run before G3 so a serious message sent
-  // after completion is not downgraded to an ordinary late message.
+  // --- G7 escalation / abuse. During an active survey it alerts the service
+  // manager immediately. After the survey (including an expired correction
+  // window), the same words are a NEW message outside the feedback record and
+  // must reach the general Human Handoff workflow instead. Previously every
+  // serious late message was still sent to manager_alert, which is why
+  // Workflow 3 had no execution even though the client was told a person would
+  // respond.
   if (isEscalation(text)) {
     guardrails.push(GUARDRAILS.ESCALATION);
-    const wasTerminal = [STATES.COMPLETED, STATES.HANDED_OFF, STATES.OPTED_OUT].includes(priorState);
+    const graceExpiry = priorState === STATES.CLOSING_GRACE
+      ? Date.parse(conversationState.closingGraceExpiresAt || "")
+      : NaN;
+    const expiredClosingGrace = priorState === STATES.CLOSING_GRACE
+      && (!Number.isFinite(graceExpiry) || graceExpiry <= Date.now());
+    const wasTerminal = expiredClosingGrace
+      || [STATES.COMPLETED, STATES.HANDED_OFF, STATES.OPTED_OUT].includes(priorState);
+    const terminalState = expiredClosingGrace ? STATES.COMPLETED : priorState;
+    if (expiredClosingGrace) conversationState.state = STATES.COMPLETED;
     if (!wasTerminal) {
       for (const signal of extractServiceSignals(text, project)) {
         const service = ensureServiceState(conversationState, project, signal.serviceKey);
@@ -1831,13 +1844,17 @@ function processWhatsAppReply({
     }
     return terminalTurn({
       conversationState, project, poc, text,
-      state: wasTerminal ? priorState : STATES.HANDED_OFF,
+      state: wasTerminal ? terminalState : STATES.HANDED_OFF,
       guardrail: GUARDRAILS.ESCALATION,
-      reply: `I am sorry, ${salutation}. This needs a person, not a form — I have flagged it to the SRV leadership team right away and someone will contact you directly.`,
+      reply: wasTerminal
+        ? `I am sorry, ${salutation}. This feedback cycle is already closed, so I cannot add this to the completed record — but I have passed your message to the SRV team and someone will contact you directly.`
+        : `I am sorry, ${salutation}. This needs a person, not a form — I have flagged it to the SRV leadership team right away and someone will contact you directly.`,
       control: {
         stopReminders: true,
         handoff: !wasTerminal,
-        forceManagerAlert: true,
+        notify: wasTerminal ? "post_completion_message" : null,
+        notifyText: wasTerminal ? text : null,
+        forceManagerAlert: !wasTerminal,
         skipAnalysisWrite: wasTerminal,
         suppressTerminalNotifications: true
       }
@@ -1989,10 +2006,15 @@ function processWhatsAppReply({
           : `Thank you, ${salutation}. Your feedback for this cycle is already recorded. If anything else comes up, the SRV team is a message away.`,
       control: {
         stopReminders: true,
-        notify: noActionNeeded || isNewComplaint ? null : "post_completion_message",
+        // Every substantive message after the correction window belongs to a
+        // human, including a fresh complaint. Previously complaints were sent
+        // only to the service-manager alert workflow, so the Human Handoff
+        // workflow never executed even though the client-facing reply claimed
+        // that the message had been passed to the team.
+        notify: noActionNeeded ? null : "post_completion_message",
         notifyText: text,
         skipAnalysisWrite: true, // do not touch scores on a closed session
-        forceManagerAlert: isNewComplaint,
+        forceManagerAlert: false,
         suppressTerminalNotifications: true
       }
     });

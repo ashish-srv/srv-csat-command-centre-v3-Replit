@@ -799,6 +799,17 @@ function fallbackForAction(action, conversationState, project, context = {}) {
       : " Is there anything else you would like the Directors to know?";
     return `I am sorry that ${processName} involved avoidable back-and-forth and that agreed feedback was not implemented consistently. We have recorded this concern and will ask the relevant teams to strengthen internal alignment and communication so delivery is smoother.${appreciation}${question}`;
   }
+  const generalConcern = (context.observations || []).find((item) =>
+    item.fallbackKind === "general_concern"
+    && item.sentiment === "negative"
+  );
+  if (generalConcern && ["observation_reason", "observation_followup"].includes(action.type)) {
+    const appreciation = acknowledgement ? ` ${acknowledgement}` : "";
+    const question = generalConcern.needsFollowUp
+      ? ` Could you please share a little more about what happened with ${generalConcern.topic}?`
+      : " Is there anything else you would like the Directors to know?";
+    return `I am sorry that this part of your experience did not meet expectations. We have recorded the concerns you shared and will ask the relevant teams to review them carefully and take the necessary action.${appreciation}${question}`;
+  }
   const next = acknowledgement
     && action.type === "service_followup"
     && !conversationState.awaitingAppreciationPersonName
@@ -1409,7 +1420,7 @@ function fallbackDeliveryObservation(text) {
   if (!source) return null;
   const processFriction = /\b(?:back[- ]and[- ]forth|rework|reiterat\w*|repeat(?:ed|edly)?|multiple rounds?|not (?:consistently )?(?:applied|implemented|incorporated|carried out)|miss(?:ed|ing) changes?|inconsisten\w*|same (?:feedback|change|changes)|common (?:feedback|change|changes)|internal (?:alignment|communication)|coordination gap|communication gap|handoff gap)\b/i.test(source);
   if (!processFriction) return null;
-  const creativeProcess = /\b(?:creative process|creatives?|design(?:s|ed|ing)?|designers?|design assets?|design process|artwork|landing pages?)\b/i.test(source);
+  const creativeProcess = /\b(?:creative process|creatives?|design(?:s|ed|ing)?|designers?|design assets?|visual assets?|design process|artwork|landing pages?)\b/i.test(source);
   return {
     topic: creativeProcess ? "Creative Process" : "Delivery Process",
     detail: source.slice(0, 600),
@@ -1419,6 +1430,54 @@ function fallbackDeliveryObservation(text) {
     kind: "feedback",
     fallbackKind: "delivery_process"
   };
+}
+
+function fallbackGeneralConcernObservation(
+  text,
+  interpretation = {},
+  { allowLanguageOnly = false, modelAcknowledgedConcern = false } = {}
+) {
+  interpretation = interpretation || {};
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  if (!source) return null;
+  const explicitlyNoConcern = /^(?:no|none|nothing|all good|everything(?: is|'s)? (?:good|fine)|no issues?|nothing to improve|that(?:'s| is) all)(?:[.!\s]*)$/i.test(source);
+  if (explicitlyNoConcern) return null;
+
+  const structured = [
+    ...(interpretation.concerns || []).filter((item) => item?.sentiment === "negative" && !item.serviceKey),
+    ...(interpretation.observations || []).filter((item) => item?.sentiment === "negative")
+  ][0] || null;
+  const negativeLanguage = /\b(?:concern\w*|issue\w*|problem\w*|disappoint\w*|frustrat\w*|unhappy|poor|weak|difficult\w*|delay\w*|late|slow|lack\w*|lacking|miss(?:ed|ing)|error\w*|wrong|failed?|failure|inconsisten\w*|avoidable|rework|below expectations?|could (?:be|have been) better|need(?:s|ed)? (?:more|better|stronger)|not (?:good|working|performing|implemented|applied|addressed|resolved|consistent|smooth))\b/i.test(source);
+  const semanticConcern = interpretation.sentiment === "negative"
+    || Boolean(structured)
+    || modelAcknowledgedConcern;
+  if (!semanticConcern && !(allowLanguageOnly && negativeLanguage)) return null;
+
+  const topic = String(structured?.title || structured?.topic || "Management Feedback").trim()
+    || "Management Feedback";
+  const wordCount = source.split(/\s+/).filter(Boolean).length;
+  return {
+    topic,
+    detail: source.slice(0, 600),
+    sentiment: "negative",
+    severity: structured?.severity || "watch",
+    needsFollowUp: interpretation.explainsProblem === true || wordCount >= 14
+      ? false
+      : structured?.needsFollowUp !== false,
+    kind: structured?.kind === "request" ? "request" : "feedback",
+    fallbackKind: "general_concern"
+  };
+}
+
+function responseAcknowledgesConcern(message) {
+  const source = String(message || "");
+  return /\b(?:sorry|concern(?:s)?|issue(?:s)?|area(?:s)? for improvement|did not meet expectations?|has not met expectations?|look into (?:this|it|the matter)|review (?:this|it|these concerns?|the matter)|take (?:this|it) forward|address (?:this|it|these concerns?)|necessary action)\b/i.test(source);
+}
+
+function responseAcknowledgesAppreciation(message) {
+  const source = String(message || "");
+  return /\b(?:thank(?:s| you)?(?: for)?|appreciat(?:e|ed|ing|ion)|kind words|special mention|glad to hear)\b/i.test(source)
+    && /\b(?:share|pass|convey|team|person|people|them|him|her|support|work|words|mention|feedback)\b/i.test(source);
 }
 
 function fallbackRoleAppreciations(text, project = {}) {
@@ -1448,6 +1507,156 @@ function fallbackRoleAppreciations(text, project = {}) {
     detail: segment.trim().slice(0, 600),
     serviceKey: accountService?.serviceKey || null
   }];
+}
+
+/**
+ * Gemini can return a perfectly usable client-facing reply while omitting a
+ * concern or named appreciation from its structured arrays. The conversation
+ * machine relies on those arrays to decide whether it may close, so supplement
+ * (rather than replace) the model's interpretation with a few high-confidence
+ * facts that we can establish from the client's own words.
+ */
+function enrichConductedWithDeterministicFacts(
+  conducted,
+  text,
+  project = {},
+  interpretation = {},
+  { protectSubstantiveConcern = false, allowLanguageOnly = false } = {}
+) {
+  interpretation = interpretation || {};
+  conducted.captured = Array.isArray(conducted.captured) ? conducted.captured : [];
+  conducted.observations = Array.isArray(conducted.observations) ? conducted.observations : [];
+  conducted.appreciations = Array.isArray(conducted.appreciations) ? conducted.appreciations : [];
+
+  // A normal turn has two model reads: one interprets the client's meaning and
+  // one writes the response. Facts found by the first read must not disappear
+  // merely because the second read omitted them from its JSON arrays. Merge
+  // them before the checklist decides what remains open. This works by
+  // semantic type and service key, not by a list of issue-specific phrases.
+  for (const item of interpretation.captured || []) {
+    const existing = conducted.captured.find((candidate) => candidate.serviceKey === item.serviceKey);
+    if (!existing) {
+      conducted.captured.push({ ...item });
+      continue;
+    }
+    if (item.sentiment === "negative") existing.sentiment = "negative";
+    if (!String(existing.summary || "").trim()) existing.summary = item.summary;
+    if (item.needsFollowUp === true) existing.needsFollowUp = true;
+    if (item.declined === true) existing.declined = true;
+  }
+
+  const mergeObservation = (candidate) => {
+    if (!candidate || !String(candidate.detail || "").trim()) return;
+    const existing = conducted.observations.find((item) => {
+      const overlap = contentOverlap(item.detail, candidate.detail);
+      return (item.topic === candidate.topic && overlap.shared >= 2)
+        || overlap.shared >= 5
+        || overlap.ratio >= 0.6;
+    });
+    if (!existing) {
+      conducted.observations.push({ ...candidate });
+      return;
+    }
+    if (candidate.sentiment === "negative") existing.sentiment = "negative";
+    if (candidate.kind === "request") existing.kind = "request";
+    if (candidate.needsFollowUp === false) existing.needsFollowUp = false;
+    if (!String(existing.topic || "").trim()) existing.topic = candidate.topic;
+  };
+
+  for (const item of interpretation.observations || []) mergeObservation(item);
+  for (const concern of interpretation.concerns || []) {
+    if (concern?.sentiment !== "negative") continue;
+    if (concern.serviceKey) {
+      const existing = conducted.captured.find((item) => item.serviceKey === concern.serviceKey);
+      if (existing) {
+        existing.sentiment = "negative";
+        if (!String(existing.summary || "").trim()) existing.summary = concern.summary;
+        if (concern.needsFollowUp === true) existing.needsFollowUp = true;
+      } else {
+        conducted.captured.push({
+          serviceKey: concern.serviceKey,
+          sentiment: "negative",
+          summary: concern.summary,
+          declined: false,
+          needsFollowUp: concern.needsFollowUp === true
+        });
+      }
+    } else {
+      mergeObservation({
+        topic: concern.title || "Management Feedback",
+        detail: concern.summary,
+        sentiment: "negative",
+        severity: concern.severity || "watch",
+        needsFollowUp: concern.needsFollowUp === true,
+        kind: "feedback"
+      });
+    }
+  }
+
+  for (const item of interpretation.appreciations || []) {
+    const existing = conducted.appreciations.find((candidate) => {
+      const overlap = contentOverlap(candidate.detail, item.detail);
+      return (candidate.subject === item.subject && overlap.shared >= 2)
+        || overlap.shared >= 4
+        || overlap.ratio >= 0.6;
+    });
+    if (!existing) conducted.appreciations.push({ ...item });
+  }
+
+  const alreadyTracksConcern = conducted.captured.some((item) => item.sentiment === "negative")
+    || conducted.observations.some((item) => item.kind !== "appreciation" && item.sentiment === "negative");
+
+  const deterministicObservation = fallbackDeliveryObservation(text)
+    || (protectSubstantiveConcern
+      ? fallbackGeneralConcernObservation(text, interpretation, {
+          allowLanguageOnly,
+          modelAcknowledgedConcern: !alreadyTracksConcern && responseAcknowledgesConcern(conducted.text)
+        })
+      : null);
+  if (deterministicObservation) {
+    const existing = conducted.observations.find((item) => {
+      if (item.kind === "appreciation" || item.sentiment === "positive") return false;
+      const overlap = contentOverlap(item.detail, deterministicObservation.detail);
+      return item.fallbackKind === deterministicObservation.fallbackKind
+        || (item.topic === deterministicObservation.topic && overlap.shared >= 2)
+        || overlap.shared >= 5
+        || overlap.ratio >= 0.55;
+    });
+    if (existing) {
+      // Retain Gemini's richer wording while tagging the point so the safe
+      // acknowledgement can address this concern specifically.
+      existing.fallbackKind = deterministicObservation.fallbackKind;
+      if (deterministicObservation.fallbackKind === "delivery_process") {
+        existing.topic = deterministicObservation.topic;
+      }
+      existing.sentiment = "negative";
+      existing.severity = existing.severity || deterministicObservation.severity;
+      if (deterministicObservation.needsFollowUp === false) existing.needsFollowUp = false;
+      if (!String(existing.detail || "").trim()) existing.detail = deterministicObservation.detail;
+    } else {
+      conducted.observations.push(deterministicObservation);
+    }
+  }
+
+  for (const appreciation of fallbackRoleAppreciations(text, project)) {
+    const existing = conducted.appreciations.find((item) => {
+      const overlap = contentOverlap(item.detail, appreciation.detail);
+      return overlap.shared >= 3 && overlap.ratio >= 0.45;
+    });
+    if (existing) {
+      const existingSubject = String(existing.subject || "").trim();
+      const fallbackSubject = String(appreciation.subject || "").trim();
+      const existingIsGeneric = !existingSubject
+        || /^(?:client appreciation|project poc team|poc team|account management team|team)$/i.test(existingSubject);
+      const fallbackIsNamed = fallbackSubject && !/^project poc team$/i.test(fallbackSubject);
+      if (existingIsGeneric && fallbackIsNamed) existing.subject = fallbackSubject;
+      existing.serviceKey = existing.serviceKey || appreciation.serviceKey || null;
+      if (!String(existing.detail || "").trim()) existing.detail = appreciation.detail;
+    } else {
+      conducted.appreciations.push(appreciation);
+    }
+  }
+  return conducted;
 }
 
 function canonicalObservationTopic(observation, text = "") {
@@ -2941,6 +3150,23 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         project,
         stateBefore
       );
+      // A successful Gemini call is not proof that every structured fact was
+      // returned. Preserve clear process concerns and named POC praise before
+      // the checklist decides whether this session is allowed to close.
+      enrichConductedWithDeterministicFacts(
+        conducted,
+        text,
+        project,
+        interpretation,
+        {
+          protectSubstantiveConcern: true,
+          // At the inclusive final-management question, substantial concern
+          // wording must fail safe even if the semantic read under-classifies
+          // it. During ordinary service/scope turns, keep Gemini's nuanced
+          // positive or neutral interpretation instead of keyword-overriding it.
+          allowLanguageOnly: pendingQuestionTypeFor(stateBefore) === "final_sweep"
+        }
+      );
       ensureClientAppreciations(conducted, stateBefore, text, project);
       separateAppreciations(conducted);
       for (const observation of conducted.observations || []) {
@@ -3042,11 +3268,12 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         && requiredService?.sentiment === "negative";
       const hasConcernAcknowledgement = /\b(?:sorry|hear you|thank you for (?:raising|explaining|sharing|flagging)|appreciate you (?:raising|explaining|sharing|flagging)|thank you for letting us know)\b/i.test(conducted.text)
         && /\b(?:look into|review|work on|share (?:this|it) with|take this forward)\b/i.test(conducted.text);
+      const needsAppreciationAcknowledgement = Boolean(conducted.appreciations?.length)
+        && !responseAcknowledgesAppreciation(conducted.text);
       const machineWordedAction = (needsConcernAcknowledgement && !hasConcernAcknowledgement)
         || (requiredAction.type === "observation_followup"
-          && (conducted.appreciations?.length
-            || ["Billing", "Senior Involvement"].includes(requiredAction.topic)))
-        || Boolean(conducted.appreciations?.length);
+          && ["Billing", "Senior Involvement"].includes(requiredAction.topic))
+        || needsAppreciationAcknowledgement;
 
       if (actionRejected || machineWordedAction) {
         if (actionRejected) {
@@ -3531,6 +3758,37 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     if (patched) updatedSession = { ...updatedSession, ...{ status: patched.status, reminderDueAt: patched.reminder_due_at } };
   }
 
+  const resumeUrl = buildResumeUrl(baseUrl, project, updatedSession);
+  const pendingQuestions = turn.conversationState.offTopicQuestions || [];
+  let postCompletionHandoffEvent = null;
+  if (control.notify === "post_completion_message" && !control.forceManagerAlert) {
+    try {
+      // A Replit request has no waitUntil lifecycle hook. Await this critical
+      // handoff so the audit row and n8n request exist before we tell the client
+      // their message was passed to a person.
+      postCompletionHandoffEvent = await notifyAutomation(store, control.notify, {
+        project,
+        poc,
+        session: updatedSession,
+        clientText: control.notifyText || text,
+        guardrail: control.guardrail || null,
+        state: turn.conversationState.state,
+        pendingQuestions,
+        resumeUrl
+      }, `${control.notify}:message:${clientMessage.id}`);
+    } catch (handoffError) {
+      postCompletionHandoffEvent = {
+        eventType: control.notify,
+        status: "failed",
+        error: handoffError.message
+      };
+    }
+    if (!["sent", "duplicate"].includes(postCompletionHandoffEvent?.status)) {
+      const salutation = poc?.salutation || poc?.name || "there";
+      replyText = `Thank you, ${salutation}. This feedback cycle is already closed, and I could not pass this new message to the team automatically. Please contact your SRV representative directly so it is not missed.`;
+    }
+  }
+
   const assistantMessage = await store.addMessage(session.id, {
     speaker: turn.nextMessage.speaker,
     side: turn.nextMessage.side,
@@ -3570,8 +3828,6 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     }
   });
 
-  const resumeUrl = buildResumeUrl(baseUrl, project, updatedSession);
-
   notifyAutomationAsync(store, "feedback_received", {
     project,
     poc,
@@ -3606,7 +3862,6 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   const sessionEnded = Boolean(turn.analysis.isComplete)
     || ["completed", "opted_out", "handed_off"].includes(turn.conversationState.state);
   const terminalNotificationsAllowed = sessionEnded && !control.suppressTerminalNotifications;
-  const pendingQuestions = turn.conversationState.offTopicQuestions || [];
   let cycleSummaryQueued = false;
 
   // Per-issue emails are gone: a manager received four separate messages about
@@ -3664,7 +3919,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   }
 
   // Guardrail events that a human must actually read.
-  if (control.notify && !control.forceManagerAlert) {
+  if (control.notify && control.notify !== "post_completion_message" && !control.forceManagerAlert) {
     notifyAutomationAsync(store, control.notify, {
       project,
       poc,
@@ -3691,6 +3946,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     whatsappReplyText: assistantMessage.body,
     sendToWhatsapp: control.sendReply !== false,
     guardrail: control.guardrail || null,
+    postCompletionHandoffEvent,
     state: turn.conversationState.state,
     resumeUrl
   });
@@ -7123,7 +7379,11 @@ module.exports = {
     applyConversationInterruption,
     observationFromInterpretation,
     fallbackDeliveryObservation,
+    fallbackGeneralConcernObservation,
     fallbackRoleAppreciations,
+    fallbackQuickCheckinConcerns,
+    enrichConductedWithDeterministicFacts,
+    enrichQuickCheckinInterpretation,
     canonicalObservationTopic,
     applyDeferredInterpretation,
     isExplicitActionRequest,
@@ -7311,6 +7571,15 @@ function fallbackQuickCheckinConcerns(text) {
   );
 
   return concerns.filter((item, index, values) => values.findIndex((candidate) => {
+    const candidateCategory = quickCheckinConcernCategory(candidate);
+    const itemCategory = quickCheckinConcernCategory(item);
+    if (new Set([candidateCategory, itemCategory]).size === 2
+      && [candidateCategory, itemCategory].includes("process")
+      && [candidateCategory, itemCategory].includes("communication")) {
+      const related = contentOverlap(candidate.summary, item.summary);
+      if (related.shared >= 4 || related.ratio >= 0.55) return true;
+    }
+    if (candidateCategory && itemCategory) return candidateCategory === itemCategory;
     const overlap = contentOverlap(
       `${candidate.title} ${candidate.summary}`,
       `${item.title} ${item.summary}`
@@ -7319,12 +7588,81 @@ function fallbackQuickCheckinConcerns(text) {
   }) === index).slice(0, 6);
 }
 
+function quickCheckinConcernCategory(item) {
+  const title = String(item?.title || "").toLowerCase();
+  if (/\b(?:report\w*|data|profile|visibility|information|insight\w*)\b/.test(title)) return "reporting";
+  if (/\b(?:campaign|applicants?|leads?|traction|outcomes?|results?)\b/.test(title)) return "campaign_outcomes";
+  if (/\b(?:ownership|proactiv\w*|initiative|course correction|change course)\b/.test(title)) return "ownership";
+  if (/\b(?:delay\w*|late|slow|turnaround|deadline|overdue|pending)\b/.test(title)) return "delay";
+  if (/\b(?:communication|coordination|updates?|responses?|follow[- ]?up|alignment)\b/.test(title)) return "communication";
+  if (/\b(?:rework|implementation|creative process|delivery process)\b/.test(title)) return "process";
+
+  const source = `${title} ${item?.summary || ""}`.toLowerCase();
+  if (/\b(?:campaign|applicants?|leads?|traction|attention|outcomes?|results?)\b/.test(source)
+    && /\b(?:below|poor|weak|low|disappoint|not|outcomes?|results?|traction|attention|applicants?|leads?)\b/.test(source)) {
+    return "campaign_outcomes";
+  }
+  if (/\b(?:report\w*|data|profile|visibility|information|insight\w*)\b/.test(source)) return "reporting";
+  if (/\b(?:ownership|proactiv\w*|initiative|interest|course correction|change course|analyse|analyze)\b/.test(source)) return "ownership";
+  if (/\b(?:delay\w*|late|slow|turnaround|deadline|overdue|pending)\b/.test(source)) return "delay";
+  if (/\b(?:communication|coordination|updates?|responses?|follow[- ]?up|alignment)\b/.test(source)) return "communication";
+  if (/\b(?:rework|reiterat\w*|repeat\w*|inconsisten\w*|implemented|applied|creative process|delivery process)\b/.test(source)) return "process";
+  return null;
+}
+
 function enrichQuickCheckinInterpretation(text, project, interpretation = {}) {
   const modelUnavailable = interpretation.source === "fallback"
     || Boolean(interpretation.error)
     || !interpretation.intent;
-  const deterministicConcerns = modelUnavailable ? fallbackQuickCheckinConcerns(text) : [];
-  const processObservation = modelUnavailable ? fallbackDeliveryObservation(text) : null;
+  // Supplement successful model output too. A successful request can still
+  // omit one of several concerns from its structured arrays, which previously
+  // produced a generic acknowledgement and incomplete issue records.
+  const deterministicConcerns = fallbackQuickCheckinConcerns(text);
+  const processObservation = fallbackDeliveryObservation(text);
+  const concerns = [...(interpretation.concerns || [])];
+  for (const concern of deterministicConcerns) {
+    const duplicate = concerns.some((existing) => {
+      const existingCategory = quickCheckinConcernCategory(existing);
+      const concernCategory = quickCheckinConcernCategory(concern);
+      if (existingCategory && concernCategory) return existingCategory === concernCategory;
+      const overlap = contentOverlap(
+        `${existing.title || ""} ${existing.summary || ""}`,
+        `${concern.title} ${concern.summary}`
+      );
+      return overlap.shared >= 4 && overlap.ratio >= 0.55;
+    });
+    if (!duplicate) concerns.push(concern);
+  }
+  const observations = [...(interpretation.observations || [])];
+  if (processObservation) {
+    const duplicate = observations.some((existing) => {
+      const overlap = contentOverlap(existing.detail, processObservation.detail);
+      return existing.fallbackKind === processObservation.fallbackKind
+        || overlap.shared >= 5
+        || overlap.ratio >= 0.55;
+    });
+    if (!duplicate) observations.push(processObservation);
+  }
+  const alreadyHasNegativeFact = concerns.some((item) => item.sentiment === "negative")
+    || observations.some((item) => item.sentiment === "negative")
+    || (interpretation.captured || []).some((item) => item.sentiment === "negative");
+  // If Gemini understood an explained negative experience but omitted its
+  // optional concern arrays, preserve the client's actual words as a general
+  // management concern. This is a topic-independent last line of defence for
+  // quick check-ins; it prevents a generic success acknowledgement and an
+  // empty issue record without guessing which service owns the concern.
+  if (!alreadyHasNegativeFact
+    && interpretation.sentiment === "negative"
+    && interpretation.explainsProblem === true) {
+    concerns.push({
+      title: "Concern requiring management review",
+      summary: String(text || "").replace(/\s+/g, " ").trim().slice(0, 600),
+      sentiment: "negative",
+      severity: "watch",
+      serviceKey: null,
+      needsFollowUp: false
+    });
+  }
   const roleAppreciations = fallbackRoleAppreciations(text, project);
   const appreciations = [...(interpretation.appreciations || [])];
   for (const item of roleAppreciations) {
@@ -7336,11 +7674,16 @@ function enrichQuickCheckinInterpretation(text, project, interpretation = {}) {
     if (duplicateIndex < 0) appreciations.push(item);
     else if (/\band\b|,/.test(item.subject)) appreciations[duplicateIndex] = item;
   }
-  if (!deterministicConcerns.length && !processObservation && !appreciations.length) return interpretation;
+  if (!deterministicConcerns.length
+    && !processObservation
+    && !appreciations.length
+    && concerns.length === (interpretation.concerns || []).length) return interpretation;
 
   return {
     ...interpretation,
-    intent: modelUnavailable && (deterministicConcerns.length || appreciations.length)
+    intent: (deterministicConcerns.length || processObservation)
+      ? "feedback"
+      : modelUnavailable && appreciations.length
       ? "feedback"
       : interpretation.intent,
     sentiment: deterministicConcerns.length
@@ -7349,12 +7692,8 @@ function enrichQuickCheckinInterpretation(text, project, interpretation = {}) {
     explainsProblem: interpretation.explainsProblem === true || deterministicConcerns.length > 0,
     isObservation: interpretation.isObservation === true
       || Boolean(processObservation && !(interpretation.captured || []).length),
-    observations: processObservation
-      ? [...(interpretation.observations || []), processObservation]
-      : (interpretation.observations || []),
-    concerns: deterministicConcerns.length
-      ? deterministicConcerns
-      : (interpretation.concerns || []),
+    observations,
+    concerns,
     appreciations,
     source: modelUnavailable && (deterministicConcerns.length || appreciations.length)
       ? "deterministic_fallback"
