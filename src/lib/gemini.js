@@ -873,6 +873,29 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
     observations
   );
 
+  const concerns = [];
+  for (const item of Array.isArray(parsed.concerns) ? parsed.concerns : []) {
+    if (!item || !item.title || !item.summary) continue;
+    const title = String(item.title).trim().slice(0, 120);
+    const summary = String(item.summary).trim().slice(0, 600);
+    if (!title || !summary) continue;
+    const concern = {
+      title,
+      summary,
+      sentiment: SENTIMENTS.includes(item.sentiment) ? item.sentiment : "negative",
+      severity: ["high", "watch", "info"].includes(item.severity) ? item.severity : "watch",
+      serviceKey: resolveServiceKey(item),
+      needsFollowUp: item.needsFollowUp === true
+    };
+    if (concern.sentiment !== "negative") continue;
+    const duplicate = concerns.some((existing) => (
+      observationTokens(`${existing.title} ${existing.summary}`).size
+      && tokenContainment(`${existing.title} ${existing.summary}`, `${concern.title} ${concern.summary}`).ratio >= 0.72
+    ));
+    if (!duplicate) concerns.push(concern);
+    if (concerns.length >= 6) break;
+  }
+
   const explicitAppreciations = extractExplicitAppreciations(sourceText, serviceList);
   const onlyPoliteAppreciationRequest = isAppreciationActionRequest(sourceText)
     && explicitAppreciations.length === 0;
@@ -922,6 +945,7 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
       && (parsed.isObservation === true || observations.length > 0),
     captured,
     observations,
+    concerns,
     appreciations,
     source: "gemini",
     error: null
@@ -932,7 +956,7 @@ async function interpretReply({ project, question, text }) {
   const fallback = {
     intent: null, deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
     serviceHint: null, serviceKeys: [], explainsProblem: false,
-    isObservation: false, captured: [], observations: [], appreciations: [],
+    isObservation: false, captured: [], observations: [], concerns: [], appreciations: [],
     source: "fallback", error: null
   };
   if (!isGeminiConfigured()) return { ...fallback, error: "gemini_not_configured" };
@@ -947,6 +971,7 @@ async function interpretReply({ project, question, text }) {
     ' "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
     ' "serviceFeedback": [{"serviceHint": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false, "kind": "feedback"}],',
+    ' "concerns": [{"title": "...", "summary": "...", "sentiment": "negative", "severity": "watch", "serviceHint": null, "needsFollowUp": false}],',
     ' "appreciations": [{"subject": "...", "detail": "...", "serviceHint": null}]}',
     "",
     "The client is typing quickly on a phone. Typos, missing letters and adjacent",
@@ -1039,6 +1064,17 @@ async function interpretReply({ project, question, text }) {
     "observations contains every non-service point, including billing, contracts,",
     "internal processes, named people and leadership. kind is request only when",
     "the client asks SRV to do something; otherwise it is feedback.",
+    "",
+    "concerns contains every DISTINCT actionable negative concern in this reply,",
+    "whether it belongs to a service or is project-wide. Do not create concerns",
+    "from praise, courtesy, neutral context, or the client's own internal problem.",
+    "Combine overlapping statements about the same underlying problem, but keep",
+    "materially different problems separate. title is a concise management issue",
+    "title, not copied opening text and not a full sentence. summary states the",
+    "specific problem in one factual sentence. Use serviceHint only when the",
+    "concern clearly belongs to one configured service; otherwise use null.",
+    "Example: weak campaign traction, missing applicant-profile reporting, and",
+    "insufficient proactive ownership are three concerns, not one truncated issue.",
     "",
     "appreciations contains every semantic expression of praise, gratitude or",
     "positive recognition, regardless of the exact words used and even when it",

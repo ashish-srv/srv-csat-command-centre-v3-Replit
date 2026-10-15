@@ -59,6 +59,17 @@ function digits(value) {
   return String(value || "").replace(/[^\d]/g, "");
 }
 
+function quickCheckinIssueKey(value, fallback = "general") {
+  const normalized = String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 72);
+  return `quick_checkin_${normalized || fallback}`;
+}
+
 function num(value) {
   return value === null || value === undefined ? null : Number(value);
 }
@@ -3551,17 +3562,49 @@ class SupabaseStore {
 
     let observation = null;
     let issue = null;
+    let issues = [];
     let service = null;
     let sentiment = "neutral";
     if (detail) {
       const interpretation = input.interpretation || {};
       const captured = Array.isArray(interpretation.captured) ? interpretation.captured : [];
       const observations = Array.isArray(interpretation.observations) ? interpretation.observations : [];
+      const projectServices = await this.servicesForProject(session.projectId);
+      const projectServicesByKey = new Map(projectServices.map((item) => [item.serviceKey, item]));
       const serviceKey = interpretation.serviceKeys?.[0] || captured[0]?.serviceKey || null;
-      service = serviceKey
-        ? (await this.servicesForProject(session.projectId)).find((item) => item.serviceKey === serviceKey) || null
-        : null;
-      const sentiments = [interpretation.sentiment, ...captured.map((item) => item.sentiment), ...observations.map((item) => item.sentiment)];
+      service = serviceKey ? projectServicesByKey.get(serviceKey) || null : null;
+      const concerns = (Array.isArray(interpretation.concerns) ? interpretation.concerns : [])
+        .filter((item) => item && item.title && item.summary && item.sentiment === "negative")
+        .slice(0, 6);
+      if (!concerns.length) {
+        for (const item of captured.filter((entry) => entry.sentiment === "negative" && entry.summary)) {
+          concerns.push({
+            title: `${projectServicesByKey.get(item.serviceKey)?.name || "Service"} Concern`,
+            summary: String(item.summary).trim(),
+            sentiment: "negative",
+            severity: "watch",
+            serviceKey: item.serviceKey || null,
+            needsFollowUp: item.needsFollowUp === true
+          });
+        }
+        for (const item of observations.filter((entry) => entry.sentiment === "negative" && entry.detail)) {
+          concerns.push({
+            title: String(item.topic || "Project-Wide Concern").trim(),
+            summary: String(item.detail).trim(),
+            sentiment: "negative",
+            severity: item.severity || "watch",
+            serviceKey: null,
+            needsFollowUp: item.needsFollowUp === true
+          });
+        }
+      }
+      concerns.splice(6);
+      const sentiments = [
+        interpretation.sentiment,
+        ...captured.map((item) => item.sentiment),
+        ...observations.map((item) => item.sentiment),
+        ...concerns.map((item) => item.sentiment)
+      ];
       sentiment = sentiments.includes("negative") ? "negative" : sentiments.includes("positive") ? "positive" : "neutral";
       const severity = sentiment === "negative" ? "watch" : "info";
 
@@ -3580,32 +3623,50 @@ class SupabaseStore {
       });
       observation = observationRows[0] || null;
 
-      if (sentiment === "negative") {
+      if (sentiment === "negative" && !concerns.length) {
+        concerns.push({
+          title: service ? `${service.name} Concern` : "Quick Check-In Concern",
+          summary: detail,
+          sentiment: "negative",
+          severity,
+          serviceKey: service?.serviceKey || null,
+          needsFollowUp: false
+        });
+      }
+
+      if (concerns.length) {
+        const issueBodies = concerns.map((concern) => {
+          const concernService = concern.serviceKey ? projectServicesByKey.get(concern.serviceKey) || null : null;
+          const issueSeverity = concern.severity === "high" ? "high" : "watch";
+          const issueKey = quickCheckinIssueKey(`${concern.serviceKey || "project"}_${concern.title}`);
+          return {
+            project_id: session.projectId,
+            session_id: session.id,
+            client_poc_id: session.clientPocId,
+            service_key: issueKey,
+            service_name: concernService ? concernService.name : "Quick check-in",
+            severity: issueSeverity,
+            status: "open",
+            title: String(concern.title).trim().slice(0, 160),
+            root_cause: `${String(concern.summary).trim()}\n\nOriginal client feedback: ${detail}`,
+            internal_poc_id: concernService ? concernService.internalPocId : null,
+            sla: issueSeverity === "high" ? "24h" : "48h",
+            due_at: addHours(new Date(), issueSeverity === "high" ? 24 : 48)
+          };
+        });
         const issueRows = await this.request("issues", {
           method: "POST",
           query: "on_conflict=session_id,service_key",
           prefer: "resolution=ignore-duplicates,return=representation",
-          body: [{
-            project_id: session.projectId,
-            session_id: session.id,
-            client_poc_id: session.clientPocId,
-            service_key: service ? service.serviceKey : "quick_checkin",
-            service_name: service ? service.name : "Quick check-in",
-            severity,
-            status: "open",
-            title: detail.slice(0, 160),
-            root_cause: detail,
-            internal_poc_id: service ? service.internalPocId : null,
-            sla: "48h",
-            due_at: addHours(new Date(), 48)
-          }]
+          body: issueBodies
         });
-        issue = issueRows[0] || null;
-        if (issue) {
+        issues = issueRows || [];
+        issue = issues[0] || null;
+        for (const createdIssue of issues) {
           await this.request("issue_events", {
             method: "POST",
             body: [{
-              issue_id: issue.id,
+              issue_id: createdIssue.id,
               project_id: session.projectId,
               session_id: session.id,
               action: "created",
@@ -3623,7 +3684,7 @@ class SupabaseStore {
       pocWeight: session.pocWeight
     });
     await this.recomputeCycle(session.cycleId, session.projectId);
-    return { session: updatedSession, observation, issue, service, sentiment };
+    return { session: updatedSession, observation, issue, issues, service, sentiment };
   }
 
   async hasScheduledQuickCheckin(projectId, scheduleKey) {

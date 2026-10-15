@@ -7042,6 +7042,16 @@ function quickCheckinDetailDecision(text, interpretation) {
   if (quickCheckinAcknowledgementReply(text)) return "acknowledgement";
 
   if (interpretation?.deferRequested || interpretation?.intent === "defer") return "defer";
+  const hasStructuredNegativeFeedback = (
+    (Array.isArray(interpretation?.concerns) && interpretation.concerns.length > 0)
+    || (Array.isArray(interpretation?.captured)
+      && interpretation.captured.some((item) => item.sentiment === "negative" && item.summary))
+    || (Array.isArray(interpretation?.observations)
+      && interpretation.observations.some((item) => item.sentiment === "negative" && item.detail))
+  );
+  const hasSubstantiveNegativeFeedback = hasStructuredNegativeFeedback
+    || (interpretation?.sentiment === "negative" && interpretation?.explainsProblem === true);
+  if (hasSubstantiveNegativeFeedback) return "feedback";
   if (interpretation?.intent === "negative") return "covered";
   if (interpretation?.intent === "affirmative") return "acknowledgement";
   if (interpretation?.intent === "off_topic" || interpretation?.intent === "rating") return "off_topic";
@@ -7055,6 +7065,7 @@ function quickCheckinDetailDecision(text, interpretation) {
     ));
     const hasMeaningfulFeedback = hasCompleteServicePoint
       || (Array.isArray(interpretation.observations) && interpretation.observations.length > 0)
+      || (Array.isArray(interpretation.concerns) && interpretation.concerns.length > 0)
       || (Array.isArray(interpretation.appreciations) && interpretation.appreciations.length > 0)
       || interpretation.explainsProblem === true
       || interpretation.serviceScope === "overall_feedback";
@@ -7064,6 +7075,46 @@ function quickCheckinDetailDecision(text, interpretation) {
   // A model timeout, rejected payload or unavailable key must never turn an
   // uncertain message into completed feedback. Keep waiting instead.
   return "uncertain";
+}
+
+function quickCheckinConcernPoints(interpretation, { includeSummary = true } = {}) {
+  const points = [];
+  const add = (title, summary) => {
+    const cleanTitle = String(title || "").replace(/\s+/g, " ").trim();
+    const cleanSummary = String(summary || "").replace(/\s+/g, " ").trim();
+    if (!cleanSummary) return;
+    const point = cleanTitle && !cleanSummary.toLowerCase().startsWith(cleanTitle.toLowerCase())
+      ? `${cleanTitle}: ${cleanSummary}`
+      : cleanSummary;
+    const normalized = point.toLowerCase();
+    if (points.some((existing) => existing.toLowerCase() === normalized)) return;
+    points.push(point.slice(0, 180).replace(/[.,:;\s]+$/g, ""));
+  };
+
+  for (const concern of interpretation?.concerns || []) {
+    if (concern?.sentiment === "negative") {
+      add(null, includeSummary ? `${concern.title}: ${concern.summary}` : concern.title);
+    }
+  }
+  if (!points.length) {
+    for (const item of interpretation?.captured || []) {
+      if (item?.sentiment === "negative") add(null, item.summary);
+    }
+    for (const item of interpretation?.observations || []) {
+      if (item?.sentiment === "negative") add(item.topic, item.detail);
+    }
+  }
+  return points.slice(0, 3);
+}
+
+function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText) {
+  const name = poc.salutation || poc.name;
+  const concernPoints = quickCheckinConcernPoints(interpretation, { includeSummary: false });
+  if (!concernPoints.length) {
+    return `Thank you, ${name}. Your feedback has been recorded for confidential management review. ${windowText}`;
+  }
+  const numbered = concernPoints.map((point, index) => `${index + 1}) ${point}`).join(" ");
+  return `Thank you for sharing this candidly, ${name}. I’m sorry that the experience has been disappointing. I have specifically noted: ${numbered}. Your feedback has been recorded for confidential management review. ${windowText}`;
 }
 
 async function handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil }) {
@@ -7098,6 +7149,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   let result;
   let replyText;
   let alertText = null;
+  let recordedInterpretation = null;
   let postCompletionHandoff = false;
   let postCompletionHandoffEvent = null;
 
@@ -7113,12 +7165,18 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       const positive = /\b(good|great|fine|excellent|happy|appreciat\w*|well done|satisfied)\b/i.test(text);
       interpretation = { ...interpretation, sentiment: negative ? "negative" : positive ? "positive" : "neutral" };
     }
+    recordedInterpretation = interpretation;
     const recorded = await store.applyQuickCheckinResponse(session.id, {
       outcome: "feedback_shared",
       detail: text,
       interpretation
     });
-    if (recorded.sentiment !== "positive") alertText = text;
+    if (recorded.sentiment !== "positive") {
+      const concernPoints = quickCheckinConcernPoints(interpretation);
+      alertText = concernPoints.length
+        ? concernPoints.map((point, index) => `${index + 1}. ${point}`).join("\n")
+        : text;
+    }
     return recorded;
   };
   const interpretAndRecord = async () => recordDetail(await interpretDetail());
@@ -7152,7 +7210,11 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       replyText = "Thank you. Your response is recorded, and the original 10-minute window remains open if you would like to add or correct anything else.";
     } else {
       result = await interpretAndRecord();
-      replyText = `Thank you, ${poc.salutation || poc.name}. I have added that to your quick check-in for confidential management review. The original 10-minute window remains open if you would like to add or correct anything else.`;
+      replyText = quickCheckinFeedbackAcknowledgement(
+        poc,
+        recordedInterpretation,
+        "The original 10-minute window remains open if you would like to add or correct anything else."
+      );
     }
   } else if (allGood) {
     result = await store.applyQuickCheckinResponse(session.id, { outcome: "all_good" });
@@ -7168,7 +7230,11 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     const decision = quickCheckinDetailDecision(text, interpretation);
     if (decision === "feedback") {
       result = await recordDetail(interpretation);
-      replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+      replyText = quickCheckinFeedbackAcknowledgement(
+        poc,
+        interpretation,
+        "This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response."
+      );
     } else if (decision === "defer") {
       result = { session };
       replyText = `No problem, ${poc.salutation || poc.name}. Please respond whenever convenient by choosing All good or Share feedback.`;
@@ -7198,7 +7264,11 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       replyText = `No problem, ${poc.salutation || poc.name}. Please share it here whenever convenient.`;
     } else if (decision === "feedback") {
       result = await recordDetail(interpretation);
-      replyText = `Thank you, ${poc.salutation || poc.name}. Your feedback has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
+      replyText = quickCheckinFeedbackAcknowledgement(
+        poc,
+        interpretation,
+        "This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response."
+      );
     } else if (decision === "off_topic") {
       result = { session };
       replyText = "To continue this quick check-in, please share what needs improvement, any issue you are facing, or anything you would like management to be aware of.";
@@ -7215,6 +7285,9 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   }
 
   if (alertText) {
+      const concernCount = recordedInterpretation?.concerns?.length || 0;
+      const issues = Array.isArray(result.issues) ? result.issues : (result.issue ? [result.issue] : []);
+      const riskLevel = issues.some((item) => item.severity === "high") ? "High" : (issues[0]?.severity || "Watch");
       notifyAutomationAsync(store, "manager_alert", {
         project,
         poc,
@@ -7222,13 +7295,15 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
         clientText: text,
         analysis: {
           requiresManagerAlert: true,
-          managerEmail: result.service?.managerEmail || null,
-          ownerEmail: result.service?.ownerEmail || null,
-          ownerName: result.service?.ownerName || "Management",
-          primaryServiceName: result.service?.name || "Quick check-in",
-          riskLevel: result.issue?.severity || "Watch",
+          managerEmail: concernCount > 1 ? null : result.service?.managerEmail || null,
+          ownerEmail: concernCount > 1 ? null : result.service?.ownerEmail || null,
+          ownerName: concernCount > 1 ? "Management" : result.service?.ownerName || "Management",
+          primaryServiceName: concernCount > 1 ? `${concernCount} quick check-in concerns` : result.service?.name || "Quick check-in",
+          riskLevel,
           csatScore: null,
-          rootCause: alertText
+          rootCause: alertText,
+          concerns: recordedInterpretation?.concerns || [],
+          issueCount: issues.length
         },
         resumeUrl: buildResumeUrl(baseUrl, project, result.session)
       }, `manager_alert:quick_checkin:${clientMessage.id}`, waitUntil);

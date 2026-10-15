@@ -131,11 +131,17 @@ const store = {
       conversationState
     };
     calls.quickCheckinResponses.push({ sessionId, input, session: store._session });
+    const issues = (input.interpretation?.concerns || []).map((concern, index) => ({
+      id: `quick_issue_${index + 1}`,
+      title: concern.title,
+      severity: concern.severity === "high" ? "high" : "watch"
+    }));
     return {
       session: store._session,
       sentiment: input.interpretation?.sentiment || "neutral",
       service: null,
-      issue: null
+      issue: issues[0] || null,
+      issues
     };
   },
   applyAnalysis: async (sessionId, analysis) => {
@@ -2771,6 +2777,78 @@ async function scenario(name, fn) {
       assert.strictEqual(payload.session.conversationState.quickCheckinOutcome, "feedback_shared");
       assert.match(payload.whatsappReplyText, /feedback has been recorded/i);
       assert.match(payload.whatsappReplyText, /next 10 minutes/i);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
+  });
+
+  await scenario("quick check-in separates multiple concerns, acknowledges them, and sends one alert", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorMessages = [...calls.messages];
+    const priorSession = store._session;
+    const automationBefore = calls.automation.length;
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output_text: JSON.stringify({
+          // Structured concerns must win even when the model's top-level
+          // sentiment is inconsistent with its detailed extraction.
+          intent: "negative", deferRequested: false, serviceScope: "overall_feedback", sentiment: "neutral", rating: null,
+          serviceHint: null, serviceHints: [], explainsProblem: true, isObservation: false,
+          serviceFeedback: [], observations: [], appreciations: [],
+          concerns: [
+            {
+              title: "Campaign traction below expectations",
+              summary: "The campaign has attracted little attention and applicant numbers do not justify the additional spend.",
+              sentiment: "negative", severity: "high", serviceHint: null, needsFollowUp: false
+            },
+            {
+              title: "Applicant-profile reporting is missing",
+              summary: "The shared data does not explain the profile of applicants who are signing on.",
+              sentiment: "negative", severity: "watch", serviceHint: null, needsFollowUp: false
+            },
+            {
+              title: "More proactive ownership is needed",
+              summary: "The client expects SRV to analyse performance and change course when required.",
+              sentiment: "negative", severity: "watch", serviceHint: "PPC / Media", needsFollowUp: false
+            }
+          ]
+        })
+      })
+    });
+    store._session = {
+      id: "sess_1", cycleId: "cyc_quick", projectId: "prj_1", clientPocId: "poc_1",
+      status: "partial", completionStatus: "partial", sessionType: "quick_checkin",
+      reminderDueAt: "2099-01-02T00:00:00.000Z",
+      conversationState: { state: "quick_checkin_detail", quickCheckinOutcome: "needs_improvement" }
+    };
+    try {
+      const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+        text: "The campaign is not attracting attention, the data has no applicant profiles, and I need more ownership and course correction from your team."
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      const payload = JSON.parse(response.body);
+      const recorded = calls.quickCheckinResponses.at(-1)?.input?.interpretation;
+      const newAlerts = calls.automation.slice(automationBefore)
+        .filter((item) => item.eventType === "manager_alert");
+
+      assert.strictEqual(payload.state, "quick_checkin_window");
+      assert.strictEqual(recorded.concerns.length, 3);
+      assert.match(payload.whatsappReplyText, /campaign traction below expectations/i);
+      assert.match(payload.whatsappReplyText, /applicant-profile reporting is missing/i);
+      assert.match(payload.whatsappReplyText, /proactive ownership is needed/i);
+      assert.match(payload.whatsappReplyText, /next 10 minutes/i);
+      assert.strictEqual(newAlerts.length, 1, "one client message must create one consolidated management alert");
+      assert.strictEqual(newAlerts[0].payload.analysis.issueCount, 3);
+      assert.strictEqual(newAlerts[0].payload.analysis.concerns.length, 3);
     } finally {
       if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = priorKey;

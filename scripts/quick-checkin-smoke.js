@@ -131,8 +131,11 @@ async function run() {
       return [row];
     }
     if (table === "observations") return [{ id: "ob1" }];
-    if (table === "issues") return [{ id: "issue1" }];
-    if (table === "issue_events") return [{ id: "event1" }];
+    if (table === "issues") {
+      const bodies = Array.isArray(options.body) ? options.body : [options.body];
+      return bodies.map((body, index) => ({ id: `issue${index + 1}`, ...body }));
+    }
+    if (table === "issue_events") return [{ id: `event${writes.filter((write) => write.table === "issue_events").length}` }];
     return [];
   };
 
@@ -145,10 +148,32 @@ async function run() {
   assert.equal(writes.some((write) => write.table === "issues"), false);
 
   writes.length = 0;
+  const detailedFeedback = "The campaign is not attracting attention, the data has no applicant profiles, and we need more proactive ownership and course correction.";
   const shared = await store.applyQuickCheckinResponse("s1", {
     outcome: "feedback_shared",
-    detail: "The weekly report is delayed.",
-    interpretation: { sentiment: "negative", observations: [], captured: [] }
+    detail: detailedFeedback,
+    interpretation: {
+      sentiment: "negative",
+      observations: [],
+      captured: [],
+      concerns: [
+        {
+          title: "Campaign traction below expectations",
+          summary: "The campaign has attracted little attention and applicant numbers do not justify the additional spend.",
+          sentiment: "negative", severity: "high", serviceKey: null, needsFollowUp: false
+        },
+        {
+          title: "Applicant-profile reporting is missing",
+          summary: "The shared data does not explain the profile of applicants who are signing on.",
+          sentiment: "negative", severity: "watch", serviceKey: null, needsFollowUp: false
+        },
+        {
+          title: "More proactive ownership is needed",
+          summary: "The client expects SRV to analyse performance and change course when required.",
+          sentiment: "negative", severity: "watch", serviceKey: null, needsFollowUp: false
+        }
+      ]
+    }
   });
   assert.equal(shared.session.conversationState.quickCheckinOutcome, "feedback_shared");
   assert.equal(shared.session.status, "partial");
@@ -156,6 +181,19 @@ async function run() {
   assert.equal(shared.session.conversationState.quickCheckinWindowExpiresAt, originalWindowExpiry);
   assert.equal(writes.some((write) => write.table === "observations"), true);
   assert.equal(writes.some((write) => write.table === "issues"), true);
+  const issueWrite = writes.find((write) => write.table === "issues");
+  assert.equal(issueWrite.options.body.length, 3);
+  assert.deepEqual(
+    issueWrite.options.body.map((issue) => issue.title),
+    [
+      "Campaign traction below expectations",
+      "Applicant-profile reporting is missing",
+      "More proactive ownership is needed"
+    ]
+  );
+  assert.equal(issueWrite.options.body.every((issue) => issue.root_cause.includes(detailedFeedback)), true);
+  assert.equal(writes.filter((write) => write.table === "issue_events").length, 3);
+  assert.equal(shared.issues.length, 3);
 
   console.log("Quick check-in scheduling and persistence smoke tests passed.");
 }
