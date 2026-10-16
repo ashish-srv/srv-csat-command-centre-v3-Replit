@@ -3,7 +3,7 @@ entrypoint = "server.js"
 modules = ["nodejs-24"]
 
 [deployment]
-build = "npm ci && npm run build"
+build = "npm run build"
 run = "npm start"
 
 [gitHubImport]
