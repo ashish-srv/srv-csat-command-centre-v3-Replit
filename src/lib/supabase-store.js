@@ -893,9 +893,10 @@ class SupabaseStore {
     }
     const selectedIds = selectedCycleIds.map((id) => encodeURIComponent(id));
     const cycles = await this.request("feedback_cycles", {
-      query: `project_id=eq.${encodeURIComponent(projectId)}&id=in.(${selectedIds.join(",")})&select=id`
+      query: `project_id=eq.${encodeURIComponent(projectId)}&id=in.(${selectedIds.join(",")})&select=id,cycle_type`
     });
     const matchedCycleIds = cycles.map((row) => row.id).filter(Boolean);
+    const removedProjectEndCycle = cycles.some((row) => row.cycle_type === "project_end");
     if (!matchedCycleIds.length) {
       return {
         cyclesDeleted: 0, sessionsDeleted: 0, messagesDeleted: 0,
@@ -974,6 +975,33 @@ class SupabaseStore {
     });
     counts.cyclesDeleted = Array.isArray(deletedCycles) ? deletedCycles.length : 0;
     await this.refreshProjectRollups(projectId);
+
+    // Sending project-end feedback creates a durable lifecycle lock on the
+    // project as well as the cycle row. If an admin deliberately removes the
+    // final project-end cycle through Data Cleanup, reset both sides together;
+    // otherwise the deleted history is gone but monthly/quick-check-in sends
+    // remain permanently blocked by an invisible marker.
+    if (removedProjectEndCycle && !(await this.hasAnyCycle(projectId, "project_end"))) {
+      const projectRows = await this.request("projects", {
+        query: `id=eq.${encodeURIComponent(projectId)}&select=id,feedback_interval_days,automatic_feedback_enabled&limit=1`
+      });
+      const project = projectRows[0] || null;
+      const automaticFeedbackEnabled = project?.automatic_feedback_enabled !== false;
+      const nextCycleDueAt = automaticFeedbackEnabled
+        ? addDays(new Date(), num(project?.feedback_interval_days) || 30)
+        : null;
+      await this.request("projects", {
+        method: "PATCH",
+        query: `id=eq.${encodeURIComponent(projectId)}`,
+        body: {
+          end_feedback_requested_at: null,
+          next_cycle_due_at: nextCycleDueAt,
+          updated_at: new Date().toISOString()
+        }
+      });
+      counts.projectEndLockReset = true;
+      counts.nextCycleDueAt = nextCycleDueAt;
+    }
     return counts;
   }
 
@@ -2179,10 +2207,39 @@ class SupabaseStore {
   }
 
   async getProjectWorkspace(projectKey) {
-    const project = await this.getProject(projectKey);
+    let project = await this.getProject(projectKey);
     if (!project) return null;
 
     let cycles = await this.listProjectCycles(project.id);
+
+    // Repair projects whose Project-End cycles were deleted by an older
+    // version of Data Cleanup. That version removed the history but left the
+    // durable lifecycle marker behind, so the UI and schedulers continued to
+    // block 30-day feedback and quick check-ins with no visible cycle explaining
+    // why. A real remaining Project-End cycle always wins and keeps the lock.
+    if (
+      project.endFeedbackRequestedAt
+      && !cycles.some((cycle) => cycle.cycleType === "project_end")
+    ) {
+      const nextCycleDueAt = project.automaticFeedbackEnabled !== false
+        ? addDays(new Date(), Number(project.feedbackIntervalDays) || 30)
+        : null;
+      await this.request("projects", {
+        method: "PATCH",
+        query: `id=eq.${encodeURIComponent(project.id)}`,
+        body: {
+          end_feedback_requested_at: null,
+          next_cycle_due_at: nextCycleDueAt,
+          updated_at: new Date().toISOString()
+        }
+      });
+      project = {
+        ...project,
+        endFeedbackRequestedAt: null,
+        nextCycleDueAt
+      };
+    }
+
     const sessions = await this.listProjectSessions(project.id);
     const issues = await this.listProjectIssues(project.id);
     const serviceFeedbackByCycle = await this.serviceFeedbackByCycle(project.id);
@@ -2289,6 +2346,7 @@ class SupabaseStore {
           projectName: project?.name || null,
           projectStatus: project?.active_status || null,
           clientId: client?.id || null,
+          clientKey: client?.client_key || null,
           clientName: client?.name || null,
           clientStatus: client?.active_status || null,
           clusterId: client?.cluster_id || null

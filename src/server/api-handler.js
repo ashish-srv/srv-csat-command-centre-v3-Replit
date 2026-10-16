@@ -670,6 +670,38 @@ function reconcilePendingServiceArtifacts(conversationState, stateBefore, captur
   return conversationState;
 }
 
+/**
+ * The inclusive Directors question is the last conversational stage, not the
+ * start of a new service-by-service interview. Detailed concerns volunteered
+ * there are recorded and acknowledged, then one inclusive follow-up remains.
+ * Only a genuinely vague point stays open for clarification.
+ */
+function settleActionableFinalSweepFacts(conversationState, stateBefore, conducted = {}) {
+  if (pendingQuestionTypeFor(stateBefore) !== "final_sweep") return conversationState;
+
+  for (const item of conducted.captured || []) {
+    if (!item.serviceKey || item.needsFollowUp === true) continue;
+    const service = conversationState.mentionedServices?.[item.serviceKey];
+    if (!service || service.status !== "needs_service_followup") continue;
+    service.serviceFollowUpAnswered = true;
+    service.status = service.rating !== null && service.rating !== undefined
+      ? "rated"
+      : "captured";
+    if (conversationState.pendingServiceKey === item.serviceKey) {
+      conversationState.pendingServiceKey = null;
+    }
+  }
+
+  const hasActionableObservation = (conducted.observations || []).some((item) =>
+    item.kind !== "appreciation"
+    && item.sentiment !== "positive"
+    && item.needsFollowUp !== true);
+  if (hasActionableObservation && conversationState.pendingObservation?.stage === "followup") {
+    conversationState.pendingObservation = null;
+  }
+  return conversationState;
+}
+
 function issueOwnershipScore(service) {
   const text = `${service.issueTitle || ""} ${service.issueRootCause || service.reasonText || ""}`.toLowerCase();
   const key = String(service.serviceKey || "").toLowerCase();
@@ -1215,8 +1247,14 @@ function validatedAnswerMarkers(stateBefore, conducted, text, interpretation = n
         && stateBefore.resumeQuestionType === "appreciation"
         && conducted.answeredAppreciation === true),
     appreciationVolunteered: volunteeredAppreciation,
+    // Substantive feedback answers the words of the final question, but after
+    // acknowledging it we deliberately offer one inclusive "anything else?"
+    // opportunity. Only an explicit done/no response closes that opportunity.
+    // Otherwise every concern captured here can both answer and instantly
+    // close the session, or reopen as several service-specific follow-ups.
     answeredAnythingElse: pendingType === "final_sweep"
-      && (conducted.answeredAnythingElse === true || explicitlyFinished || answeredSweepWithFeedback),
+      && (explicitlyFinished
+        || (conducted.answeredAnythingElse === true && !answeredSweepWithFeedback)),
     completedServiceFollowUpKeys: pendingType === "service_followup"
       && pendingServiceKey
       && (explicitlyFinished || movedToAnotherService)
@@ -3341,6 +3379,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       applyPendingIssueInterpretation(turn.conversationState, stateBefore, interpretation);
       applyConversationInterruption(
         turn.conversationState, stateBefore, interpretation, conducted, text
+      );
+      settleActionableFinalSweepFacts(
+        turn.conversationState, stateBefore, conducted
       );
       // First record only what THIS client reply answered. The checklist then
       // selects the next action; outgoing-question markers are accepted only
@@ -7464,6 +7505,7 @@ module.exports = {
     groundMultiServiceCaptures,
     resetFreshCapturedServices,
     reconcilePendingServiceArtifacts,
+    settleActionableFinalSweepFacts,
     suppressDuplicateIssues,
     mergeObservations,
     separateAppreciations,

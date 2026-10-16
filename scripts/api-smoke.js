@@ -3788,6 +3788,73 @@ async function scenario(name, fn) {
     assert.strictEqual(workspace.cycles[0].csatScore, 7);
   });
 
+  await scenario("workspace refresh repairs a legacy project-end lock after its cycle was already deleted", async () => {
+    const repairStore = Object.create(SupabaseStore.prototype);
+    const requests = [];
+    const lockedAt = "2026-10-01T08:00:00.000Z";
+    repairStore.getProject = async () => ({
+      ...project,
+      services: [],
+      endFeedbackRequestedAt: lockedAt,
+      automaticFeedbackEnabled: true,
+      feedbackIntervalDays: 30
+    });
+    repairStore.listProjectCycles = async () => [];
+    repairStore.listProjectSessions = async () => [];
+    repairStore.listProjectIssues = async () => [];
+    repairStore.serviceFeedbackByCycle = async () => ({});
+    repairStore.listProjectObservations = async () => [];
+    repairStore.pocsForProject = async () => [];
+    repairStore.request = async (table, options = {}) => {
+      requests.push({ table, options });
+      if (table === "projects" && options.method === "PATCH") return [];
+      throw new Error(`Unexpected ${options.method || "GET"} ${table}`);
+    };
+
+    const before = Date.now();
+    const workspace = await repairStore.getProjectWorkspace(project.key);
+    const after = Date.now();
+    assert.strictEqual(workspace.project.endFeedbackRequestedAt, null);
+    const projectPatch = requests.find((request) =>
+      request.table === "projects" && request.options.method === "PATCH").options.body;
+    assert.strictEqual(projectPatch.end_feedback_requested_at, null);
+    const dueAt = Date.parse(projectPatch.next_cycle_due_at);
+    assert.ok(dueAt >= before + (30 * 24 * 60 * 60 * 1000));
+    assert.ok(dueAt <= after + (30 * 24 * 60 * 60 * 1000) + 1000);
+  });
+
+  await scenario("workspace refresh keeps the project-end lock while a project-end cycle remains", async () => {
+    const repairStore = Object.create(SupabaseStore.prototype);
+    const requests = [];
+    const lockedAt = "2026-10-01T08:00:00.000Z";
+    repairStore.getProject = async () => ({
+      ...project,
+      services: [],
+      endFeedbackRequestedAt: lockedAt,
+      automaticFeedbackEnabled: true,
+      feedbackIntervalDays: 30
+    });
+    repairStore.listProjectCycles = async () => [{
+      id: "cyc_project_end",
+      projectId: project.id,
+      cycleType: "project_end",
+      status: "closed"
+    }];
+    repairStore.listProjectSessions = async () => [];
+    repairStore.listProjectIssues = async () => [];
+    repairStore.serviceFeedbackByCycle = async () => ({});
+    repairStore.listProjectObservations = async () => [];
+    repairStore.pocsForProject = async () => [];
+    repairStore.request = async (table, options = {}) => {
+      requests.push({ table, options });
+      throw new Error(`Unexpected ${options.method || "GET"} ${table}`);
+    };
+
+    const workspace = await repairStore.getProjectWorkspace(project.key);
+    assert.strictEqual(workspace.project.endFeedbackRequestedAt, lockedAt);
+    assert.strictEqual(requests.length, 0);
+  });
+
   await scenario("automation create-due-sessions starts a cycle per due project", async () => {
     const res = await req("POST", "/api/automation/create-due-sessions", {});
     assert.strictEqual(res.statusCode, 201);
@@ -4763,6 +4830,61 @@ async function scenario(name, fn) {
     const cycleDelete = requests.findIndex((request) => request.table === "feedback_cycles" && request.options.method === "DELETE");
     assert.ok(eventDelete >= 0 && eventDelete < issueDelete);
     assert.ok(issueDelete < sessionDelete && sessionDelete < cycleDelete);
+  });
+
+  await scenario("deleting the final project-end cycle resets its recurring-feedback lock safely", async () => {
+    const cleanupStore = Object.create(SupabaseStore.prototype);
+    const requests = [];
+    cleanupStore.refreshProjectRollups = async () => {};
+    cleanupStore.request = async (table, options = {}) => {
+      requests.push({ table, options });
+      if (table === "feedback_cycles" && !options.method && options.query.includes("id=in.")) {
+        return [{ id: "cyc_end", cycle_type: "project_end" }];
+      }
+      if (table === "feedback_sessions" && !options.method) return [];
+      if (table === "feedback_cycles" && options.method === "DELETE") return [{ id: "cyc_end" }];
+      if (table === "feedback_cycles" && !options.method && options.query.includes("cycle_type=eq.project_end")) {
+        return [];
+      }
+      if (table === "projects" && !options.method) {
+        return [{ id: "prj_cleanup", feedback_interval_days: 30, automatic_feedback_enabled: true }];
+      }
+      if (table === "projects" && options.method === "PATCH") return [];
+      throw new Error(`Unexpected ${options.method || "GET"} ${table}: ${options.query || ""}`);
+    };
+
+    const before = Date.now();
+    const result = await cleanupStore.deleteProjectCycles("prj_cleanup", ["cyc_end"]);
+    const after = Date.now();
+    assert.strictEqual(result.projectEndLockReset, true);
+    const projectPatch = requests.find((request) =>
+      request.table === "projects" && request.options.method === "PATCH").options.body;
+    assert.strictEqual(projectPatch.end_feedback_requested_at, null);
+    const dueAt = Date.parse(projectPatch.next_cycle_due_at);
+    assert.ok(dueAt >= before + (30 * 24 * 60 * 60 * 1000));
+    assert.ok(dueAt <= after + (30 * 24 * 60 * 60 * 1000) + 1000);
+  });
+
+  await scenario("deleting one project-end cycle keeps the lock when another remains", async () => {
+    const cleanupStore = Object.create(SupabaseStore.prototype);
+    const requests = [];
+    cleanupStore.refreshProjectRollups = async () => {};
+    cleanupStore.request = async (table, options = {}) => {
+      requests.push({ table, options });
+      if (table === "feedback_cycles" && !options.method && options.query.includes("id=in.")) {
+        return [{ id: "cyc_end_old", cycle_type: "project_end" }];
+      }
+      if (table === "feedback_sessions" && !options.method) return [];
+      if (table === "feedback_cycles" && options.method === "DELETE") return [{ id: "cyc_end_old" }];
+      if (table === "feedback_cycles" && !options.method && options.query.includes("cycle_type=eq.project_end")) {
+        return [{ id: "cyc_end_remaining" }];
+      }
+      throw new Error(`Unexpected ${options.method || "GET"} ${table}: ${options.query || ""}`);
+    };
+
+    const result = await cleanupStore.deleteProjectCycles("prj_cleanup", ["cyc_end_old"]);
+    assert.strictEqual(result.projectEndLockReset, undefined);
+    assert.ok(!requests.some((request) => request.table === "projects"));
   });
 
   await scenario("Supabase project deletion removes restricted children before the project", async () => {
@@ -7192,19 +7314,73 @@ async function scenario(name, fn) {
     assert.strictEqual(grounded[0].needsFollowUp, true);
   });
 
-  await scenario("a final-sweep issue counts as the answer and does not repeat the sweep", async () => {
+  await scenario("final-sweep concerns get one inclusive follow-up, not one interview per service", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
+    const { applyCaptured, applyTurnProgress, buildChecklist } =
+      require("../src/lib/whatsapp-state-machine");
     const before = {
+      sessionType: "project_end",
+      mentionedServices: {},
       pendingQuestionType: "final_sweep",
       askedForAnythingElse: true,
-      anythingElseAnswered: false
+      anythingElseAnswered: false,
+      overallRatingAsked: true,
+      overallRating: 9,
+      npsScore: 10,
+      projectEndReviewCaptured: true,
+      serviceScopeStatus: "overall_feedback"
     };
-    const markers = conversationFlow.validatedAnswerMarkers(before, {
-      captured: [],
-      observations: [{ topic: "Billing", detail: "Invoices are inaccurate", sentiment: "negative" }],
-      appreciations: []
-    }, "Invoices are inaccurate; please send the ledger");
-    assert.strictEqual(markers.answeredAnythingElse, true);
+    const conducted = {
+      captured: [
+        {
+          serviceKey: "ppc", sentiment: "negative",
+          summary: "Creative changes required repeated follow-up", needsFollowUp: false
+        },
+        {
+          serviceKey: "website", sentiment: "negative",
+          summary: "The same changes were repeated while working on landing pages", needsFollowUp: false
+        }
+      ],
+      observations: [],
+      appreciations: [],
+      answeredAnythingElse: true
+    };
+
+    const state = JSON.parse(JSON.stringify(before));
+    applyCaptured(state, project, conducted.captured);
+    assert.ok(Object.values(state.mentionedServices).every((service) =>
+      service.status === "needs_service_followup"));
+    conversationFlow.settleActionableFinalSweepFacts(state, before, conducted);
+    assert.ok(Object.values(state.mentionedServices).every((service) =>
+      service.status === "captured" && service.serviceFollowUpAnswered === true));
+
+    const markers = conversationFlow.validatedAnswerMarkers(
+      before, conducted,
+      "The agreed changes had to be repeated across creatives and landing pages.",
+      { intent: "feedback" }
+    );
+    assert.strictEqual(markers.answeredAnythingElse, false,
+      "substantive feedback should be acknowledged before the inclusive question closes");
+    applyTurnProgress(state, project, markers);
+    assert.strictEqual(
+      conversationFlow.requiredConversationAction(buildChecklist(state, project), state).type,
+      "final_sweep",
+      "actionable feedback must not queue one anything-else question per service"
+    );
+
+    const afterQuestion = { ...state, pendingQuestionType: "final_sweep" };
+    const noMarkers = conversationFlow.validatedAnswerMarkers(
+      afterQuestion,
+      { captured: [], observations: [], appreciations: [] },
+      "no",
+      { intent: "negative" }
+    );
+    applyTurnProgress(afterQuestion, project, noMarkers);
+    assert.strictEqual(
+      conversationFlow.requiredConversationAction(buildChecklist(afterQuestion, project), afterQuestion).type,
+      "close",
+      "the client's no must close instead of reopening captured services"
+    );
   });
 
   await scenario("invoice and ledger feedback overrides an incorrect senior-involvement label", async () => {

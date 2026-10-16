@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Download, Lock, Pencil, Plus, RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
 import { apiAdminGet, apiGet, apiWrite, apiWriteWithAdminPin, hasAdminPin, setAdminPin } from "../api";
 import { formatCycleType, formatDate, formatDateTime, formatPocWeightShare } from "../format";
+import { downloadPocControlWorkbook } from "../lib/poc-control-workbook.mjs";
 import { parseCsatWorkbook } from "../lib/workbook-import";
 import { FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, ErrorBlock, LoadingBlock, Panel } from "./Ui.jsx";
@@ -348,7 +349,7 @@ function CleanupPinModal({ confirmation, pin, error, busy, onPinChange, onCancel
   const consequence = isChatCleanup
     ? " Ratings, scores, cycles and issues will be preserved."
     : isCycleDeletion
-      ? " Their POC sessions, chats, ratings, service feedback, issues, issue history, appreciations and observations will also be deleted. Open sessions and reminders in those cycles will stop."
+      ? ` Their POC sessions, chats, ratings, service feedback, issues, issue history, appreciations and observations will also be deleted. Open sessions and reminders in those cycles will stop.${confirmation.resetsProjectEndLock ? " Because this removes the final Project-End cycle, the project-end lock will also be reset and recurring feedback can be used again." : ""}`
       : isPocDeletion
         ? " Their feedback sessions, chats, service feedback and ratings will also be deleted. Remaining cycle scores will be recalculated."
         : isProjectDeletion
@@ -576,6 +577,8 @@ function PocControlCentre({ rows, levels, clusters, onChange, onSave, saving }) 
   const [clientIds, setClientIds] = useState([]);
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [selected, setSelected] = useState([]);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
   const clusterNames = new Map((clusters || []).map((cluster) => [cluster.id, cluster.name]));
   const availableClusterIds = [...new Set(rows.map((row) => row.clusterId).filter(Boolean))]
     .sort((left, right) => String(clusterNames.get(left) || "").localeCompare(String(clusterNames.get(right) || "")));
@@ -632,6 +635,28 @@ function PocControlCentre({ rows, levels, clusters, onChange, onSave, saving }) 
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.includes(id));
   const selectedIds = new Set(selected);
 
+  async function downloadDisplayedRows() {
+    setExporting(true);
+    setExportError("");
+    try {
+      const selectedLabels = (ids, labels) => ids.length
+        ? ids.map((id) => labels.get(id) || id).join(", ")
+        : "All";
+      const filterSummary = [
+        `Search: ${query.trim() || "All"}`,
+        `Clusters: ${selectedLabels(clusterIds, clusterNames)}`,
+        `Clients: ${selectedLabels(clientIds, clientNames)}`,
+        `Projects: ${selectedLabels(selectedProjectIds, projectNames)}`,
+        `Statuses: ${statuses.length ? statuses.join(", ") : "All"}`
+      ].join("; ");
+      await downloadPocControlWorkbook(visible, { clusterNames, filterSummary });
+    } catch (error) {
+      setExportError(error.message || "Could not prepare the POC Excel download.");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   function patchSelected(patch) {
     onChange(rows.map((row) => selectedIds.has(row.id) ? { ...row, ...patch } : row));
   }
@@ -671,6 +696,9 @@ function PocControlCentre({ rows, levels, clusters, onChange, onSave, saving }) 
         {(query || statuses.length || clusterIds.length || clientIds.length || selectedProjectIds.length) ? <Button onClick={() => { setQuery(""); setStatuses([]); setClusterIds([]); setClientIds([]); setSelectedProjectIds([]); }}>Reset filters</Button> : null}
       </div>
       <div className="button-row poc-control-actions">
+        <Button icon={Download} onClick={downloadDisplayedRows} disabled={exporting || !visible.length}>
+          {exporting ? "Preparing Excel…" : `Download displayed Excel (${visible.length})`}
+        </Button>
         <Button onClick={() => setSelected(allVisibleSelected ? selected.filter((id) => !visibleIds.includes(id)) : [...new Set([...selected, ...visibleIds])])}>
           {allVisibleSelected ? "Deselect displayed" : `Select all displayed (${visible.length})`}
         </Button>
@@ -679,6 +707,7 @@ function PocControlCentre({ rows, levels, clusters, onChange, onSave, saving }) 
         <Button onClick={redistribute} disabled={!selected.length}>Redistribute affected projects equally</Button>
         <Button variant="primary" onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save all changed POCs"}</Button>
       </div>
+      {exportError ? <p className="form-note missing" role="alert">{exportError}</p> : null}
       <p className="form-note">Edit Salutation or Influence directly, then save. Equal redistribution includes every active POC on each affected project, not only displayed rows.</p>
       <div className="poc-control-table">
         <div className="poc-control-row head"><span /><span>POC</span><span>Salutation</span><span>Client</span><span>Project</span><span>Tag</span><span>Status</span><span>Influence</span></div>
@@ -2003,13 +2032,18 @@ export default function Manage({ onReload, currentUser = null }) {
       showToast("Select at least one issue to delete.");
       return;
     }
+    const projectEndCycles = (cleanupWorkspace?.cycles || [])
+      .filter((cycle) => cycle.cycleType === "project_end");
     setCleanupPin("");
     setCleanupPinError("");
     setCleanupConfirmation({
       kind,
       project: { id: project.id, key: project.key, name: project.name },
       cycleIds: [...selectedCleanupCycleIds],
-      issueIds: kind === "issues" ? [...selectedCleanupIssueIds] : []
+      issueIds: kind === "issues" ? [...selectedCleanupIssueIds] : [],
+      resetsProjectEndLock: kind === "cycles"
+        && projectEndCycles.length > 0
+        && projectEndCycles.every((cycle) => selectedCleanupCycleIds.includes(cycle.id))
     });
   }
 
@@ -2113,7 +2147,7 @@ export default function Manage({ onReload, currentUser = null }) {
               : kind === "messages"
                 ? `${result.messagesDeleted} chat message${result.messagesDeleted === 1 ? "" : "s"} cleared from ${result.cyclesAffected} selected cycle${result.cyclesAffected === 1 ? "" : "s"}. Ratings and issues were preserved.`
                 : kind === "cycles"
-                  ? `${result.cyclesDeleted} feedback cycle${result.cyclesDeleted === 1 ? "" : "s"} and all dependent feedback data were permanently deleted from ${project.name}.`
+                  ? `${result.cyclesDeleted} feedback cycle${result.cyclesDeleted === 1 ? "" : "s"} and all dependent feedback data were permanently deleted from ${project.name}.${result.projectEndLockReset ? " The Project-End lock was reset; 30-day feedback and quick check-ins are available again." : ""}`
                   : `${result.issuesDeleted} selected issue${result.issuesDeleted === 1 ? "" : "s"} deleted from ${project.name}. Chats and ratings were preserved.`);
     } catch (cleanupError) {
       setCleanupPinError(cleanupError.status === 403 ? "Incorrect admin PIN." : cleanupError.message);
@@ -4338,6 +4372,7 @@ export default function Manage({ onReload, currentUser = null }) {
               <small>
                 This removes every POC session, chat, rating, predicted score, service feedback record, issue and issue history,
                 appreciation and observation belonging to those cycles. The client, project, POCs, services, feedback schedule and other cycles remain.
+                If the final Project-End cycle is deleted, its lifecycle lock is also reset so 30-day feedback and quick check-ins can be used again.
               </small>
               <Button
                 icon={Trash2}
