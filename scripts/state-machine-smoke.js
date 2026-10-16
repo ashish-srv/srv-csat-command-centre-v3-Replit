@@ -1196,6 +1196,87 @@ scenario("Rating corrections follow intended meaning across varied wording", () 
     "an unrelated number must not become a correction");
 });
 
+scenario("Correction words cannot redirect non-rating feedback during the closing window", () => {
+  const done = run(newSession(), ["all good", "9", "no", "6"]);
+  const examples = [
+    "There should be a weekly report sent to us about spend",
+    "Please update the spend report every 7 days",
+    "Set a review meeting for 10 days from now",
+    "Actually, the creatives should be updated within 2 days",
+    "The rating process needs 2 weeks to be redesigned"
+  ];
+
+  for (const text of examples) {
+    const reply = processWhatsAppReply({
+      session: {
+        ...newSession(),
+        conversationState: JSON.parse(JSON.stringify(done.last.conversationState))
+      },
+      project,
+      poc,
+      text,
+      interpretation: {
+        source: "gemini", intent: "feedback", sentiment: "neutral",
+        rating: null, serviceKeys: [], explainsProblem: true, isObservation: true
+      }
+    });
+    assert.strictEqual(reply.conversationState.overallRating, 6, text);
+    assert.doesNotMatch(reply.nextMessage.body, /currently have your overall rating|updated your overall rating/i, text);
+  }
+});
+
+scenario("Control words embedded in real feedback never become survey commands", () => {
+  const { detectors: controls } = require("../src/lib/whatsapp-state-machine");
+
+  for (const text of [
+    "There is no weekly spend report",
+    "No one from the team responds",
+    "Nothing in the dashboard is clear",
+    "The work is not done yet",
+    "Nothing is working well",
+    "The dashboard is not working well"
+  ]) {
+    assert.strictEqual(controls.isNegativeSkip(text), false, text);
+    assert.strictEqual(controls.isPositiveOverallReply(text), false, text);
+  }
+  for (const text of [
+    "The dashboard is unclear",
+    "I am not sure why the leads dropped",
+    "The team cannot say when the report will arrive"
+  ]) {
+    assert.strictEqual(controls.isVagueDetailResponse(text), false, text);
+  }
+  for (const text of [
+    "The AVP was absent in a meeting",
+    "The team will share the spend report tomorrow",
+    "We need a weekly report and the agency should send it later in the day"
+  ]) {
+    assert.strictEqual(controls.isDeferral(text), false, text);
+  }
+  for (const text of [
+    "Yes, but the reporting is incomplete",
+    "All campaign reports are delayed",
+    "The same creative errors keep returning"
+  ]) {
+    assert.strictEqual(controls.isAffirmative(text), false, text);
+    assert.strictEqual(controls.isNonSpecificContinuation(text), false, text);
+  }
+  for (const text of [
+    "The account manager did not call me",
+    "The proposal process was slow"
+  ]) {
+    assert.strictEqual(controls.isOutOfScope(text), false, text);
+  }
+
+  assert.strictEqual(controls.isNegativeSkip("Nothing else from my side"), true);
+  assert.strictEqual(controls.isVagueDetailResponse("I am not sure"), true);
+  assert.strictEqual(controls.isDeferral("I will share my feedback tomorrow morning"), true);
+  assert.strictEqual(controls.isAffirmative("Yes please"), true);
+  assert.strictEqual(controls.isNonSpecificContinuation("All of them"), true);
+  assert.strictEqual(controls.isPositiveOverallReply("Everything is working well"), true);
+  assert.strictEqual(controls.isOutOfScope("Could someone please call me?"), true);
+});
+
 scenario("An acknowledgement inside the correction window does not reopen the survey", () => {
   const done = run(newSession(), ["all good", "9", "no", "8"]);
   const reply = processWhatsAppReply({

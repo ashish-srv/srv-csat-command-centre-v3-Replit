@@ -781,19 +781,16 @@ function baseFallbackForAction(action, conversationState, project, context = {})
   }
   if (action.type === "observation_followup") {
     if (conversationState.pendingObservation?.acknowledged) {
-      return `Before we move on, is there anything else about ${action.topic} we should know? If not, just reply no.`;
-    }
-    if (action.topic === "Billing") {
-      const requestLead = conversationState.pendingObservation?.responseKind === "request"
-        ? " We will also pass your request to the team."
-        : "";
-      return `I am sorry to hear about the inaccurate billing. Our team will review the invoice process.${requestLead} Is there anything else about Billing we should know?`;
+      return "Before we move on, is there anything else you would like the Directors to know? If not, just reply no.";
     }
     if (conversationState.pendingObservation?.responseKind === "request") {
       const positiveLead = conversationState.pendingObservation?.positiveContext === "Social Media"
         ? "Glad to hear that social media is working well. "
         : "";
-      return `${positiveLead}Thank you for raising this. We will share the meeting request with our team and senior management and ask them to take it forward. Is there anything else about ${action.topic} we should know?`;
+      return `${positiveLead}Thank you for raising this. We have recorded your request and will share it with the relevant team for action. Is there anything else you would like the Directors to know?`;
+    }
+    if (action.topic === "Billing") {
+      return "I am sorry to hear about the billing concern. We have recorded it for review by the relevant team. Is there anything else you would like the Directors to know?";
     }
     if (action.topic === "Senior Involvement") {
       return `I am sorry to hear about the lack of senior involvement and communication. We will raise this with management and ask the relevant leaders to address it. Is there anything else about Senior Involvement we should know?`;
@@ -1119,15 +1116,16 @@ function acceptedOverallRating(conversationState, conducted, text = "") {
   // separate from the earlier overall score.
   const source = String(text || "").trim();
   const read = detectors.detectRatingCorrection(source);
+  const normalized = read && read.scale === 5 ? read.value * 2 : read?.value;
   const answeringOverall = conversationState.state === STATES.WAITING_FOR_OVERALL_RATING
     || pendingQuestionTypeFor(conversationState) === "overall_rating";
   const startsWithRating = /^\s*(?:\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(source)
     && !/^\s*(?:\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:day|days|week|weeks|month|months|meeting|meetings|lead|leads|report|reports)\b/i.test(source);
   const latestReplyIsRating = detectors.looksLikeRatingAnswer(source)
-    || (answeringOverall && startsWithRating)
-    || /\b(?:overall|rating|raiting|score|csat|rate|give|take|record|use|make that|change|correct|revise|update|set|actually|instead|rather than|i said|i meant|should be)\b/i.test(source);
+    || (answeringOverall && startsWithRating
+      && numericScore(conducted?.overallRating) === normalized)
+    || detectors.isRatingCorrectionReply(source);
   if (!read || !latestReplyIsRating) return null;
-  const normalized = read.scale === 5 ? read.value * 2 : read.value;
   if (normalized < 0 || normalized > 10 || (read.scale && ![5, 10].includes(read.scale))) return null;
   return normalized;
 }
@@ -1171,7 +1169,8 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
       && !read.scale
       && !/\b(?:rating|raiting|score|csat|rate)\b/i.test(body)) continue;
     const direct = /^\s*(?:\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*(?:\/|out of)\s*(?:5|10))?\s*[.!]*\s*$/i.test(body);
-    const explicit = /\b(?:out of|rating|raiting|score|take|record|use|make that|change|correct|revise|update|set|actually|instead|rather than|i said|i meant|should be|i(?:'d| would)? say|i(?:'ll| will)? give)\b/i.test(body);
+    const explicit = detectors.isRatingCorrectionReply(body)
+      || /\b(?:out of|overall rating|rating|raiting|csat)\b/i.test(body);
     if (!direct && !explicit) continue;
     const normalized = read.scale === 5 ? read.value * 2 : read.value;
     if (normalized < 0 || normalized > 10 || (read.scale && ![5, 10].includes(read.scale))) continue;
@@ -1364,7 +1363,10 @@ function messageMatchesRequiredAction(action, message) {
       && /(?:\b0\s*(?:to|-)\s*10\b|\bout of 10\b)/i.test(text);
   }
   if (["observation_reason", "observation_followup"].includes(action.type)) {
-    return lowerText.includes(String(action.topic || "").toLowerCase()) && /\?\s*$/.test(text);
+    if (!/\?\s*$/.test(text)) return false;
+    return action.type === "observation_reason"
+      ? /\b(?:what|which|how|share|explain|detail|tell)\b/i.test(text)
+      : /\b(?:anything else|anything more|anything further|more to add|else you would like|add anything)\b/i.test(text);
   }
   if (action.type === "general_issue_detail") return /\b(?:tell me|tell us|what happened|please share|please explain)\b/i.test(text);
   if (action.type === "close") return !/\?\s*$/.test(text);
@@ -1443,9 +1445,33 @@ function normalizeLegacyServiceFollowups(conversationState) {
 function isExplicitActionRequest(text) {
   const source = String(text || "").toLowerCase();
   if (!source) return false;
-  const asksForAction = /\b(?:i\s+(?:would\s+(?:like|appreciate)|want|need)|we\s+(?:would\s+(?:like|appreciate)|want|need)|(?:client|they|he|she)\s+(?:would\s+(?:like|appreciate)|wants?|needs?)|please|kindly|request|can\s+we|could\s+we|should\s+have|need\s+to\s+have)\b/.test(source);
-  const actionableObject = /\b(?:meeting|call|review|discussion|report|reports|ledger|invoice|follow[ -]?up|senior\s+involvement|management\s+involvement)\b/.test(source);
+  const asksForAction = /\b(?:i\s+(?:would\s+(?:like|appreciate)|want|need)|we\s+(?:would\s+(?:like|appreciate)|want|need)|(?:client|they|he|she)\s+(?:would\s+(?:like|appreciate)|wants?|needs?)|please|kindly|request|can\s+(?:we|you|the\s+team|your\s+team)|could\s+(?:we|you|the\s+team|your\s+team)|should\s+(?:have|be)|need\s+to\s+have|(?:we|you|the\s+team|your\s+team|team)\s+should\s+(?:share|send|provide|give|prepare|circulate|update|schedule|arrange))\b/.test(source)
+    || /\b(?:reports?|dashboard|meeting|call|review|ledger|invoice)\b[^.!?]{0,35}\b(?:should|must|need(?:s)?\s+to|has\s+to|have\s+to)\b/.test(source);
+  const actionableObject = /\b(?:meeting|call|review|discussion|reports?|dashboard|spend\s+(?:reports?|updates?)|budget\s+(?:reports?|updates?)|ledger|invoice|follow[ -]?up|senior\s+involvement|management\s+involvement)\b/.test(source);
   return asksForAction && actionableObject;
+}
+
+/**
+ * Identify the object of an explicit request from the client's sentence. If a
+ * sentence contains several operational nouns, the first requested object is
+ * a safer fallback than a global keyword priority. Gemini may still supply a
+ * more natural grounded label; this function only prevents a fabricated one.
+ */
+function explicitRequestTopic(text) {
+  const source = String(text || "").toLowerCase();
+  if (!isExplicitActionRequest(source)) return null;
+  const candidates = [
+    ["Billing", /\b(?:bill|billing|invoice|tax invoice|ledger)\b/],
+    ["Review Meeting", /\b(?:meeting|meetings|call|calls|review|discussion)\b/],
+    ["Spend Reporting", /\b(?:spend|budget|cost)\b[^.!?]{0,30}\b(?:reports?|reporting|updates?|dashboard)\b|\b(?:reports?|reporting|updates?|dashboard)\b[^.!?]{0,30}\b(?:spend|budget|cost)\b/],
+    ["Reporting", /\b(?:reports?|reporting|dashboard)\b/],
+    ["Senior Involvement", /\b(?:senior involvement|management involvement|leadership involvement)\b/],
+    ["Commercial Process", /\b(?:contract|scope|commercial|payment|payments)\b/]
+  ].map(([topic, pattern]) => {
+    const match = pattern.exec(source);
+    return match ? { topic, index: match.index } : null;
+  }).filter(Boolean).sort((left, right) => left.index - right.index);
+  return candidates[0]?.topic || "Management Feedback";
 }
 
 function positiveSocialMediaContext(text) {
@@ -1464,14 +1490,18 @@ function observationFromInterpretation(interpretation, text) {
   const lowered = source.toLowerCase();
   const deterministicBilling = /\b(?:bill|billing|invoice|tax invoice|cfo)\b/.test(lowered)
     && /\b(?:inaccurate|incorrect|wrong|error|issue|problem|attention|check|review)\b/.test(lowered);
-  const deterministicSeniorConcern = /\b(?:senior|leadership|leader|avp|director|management|sarang)\b/.test(lowered)
+  const deterministicSeniorConcern = /\b(?:senior|leadership|leader|avp|director|management involvement|sarang)\b/.test(lowered)
     && /\b(?:absent|missing|unavailable|not (?:attend|attending|available|responding|picking)|doesn'?t (?:attend|respond|pick)|didn'?t (?:attend|respond|pick)|calls?|meetings?)\b/.test(lowered);
   if (!interpretedObservation && !explicitRequest && !deterministicBilling && !deterministicSeniorConcern) {
     return null;
   }
   let topic = "Management Feedback";
-  if (/\b(?:bill|billing|invoice|tax invoice|cfo)\b/.test(lowered)) topic = "Billing";
-  else if (/\b(?:senior|leadership|leader|avp|director|management)\b/.test(lowered)) {
+  const requestedTopic = explicitRequestTopic(source);
+  if (requestedTopic) topic = requestedTopic;
+  else if (/\b(?:bill|billing|invoice|tax invoice|cfo)\b/.test(lowered)) topic = "Billing";
+  else if (/\b(?:reports?|reporting|dashboard|spend updates?|spend reports?|budget updates?|budget reports?)\b/.test(lowered)) {
+    topic = /\b(?:spend|budget|cost)\b/.test(lowered) ? "Spend Reporting" : "Reporting";
+  } else if (/\b(?:senior|leadership|leader|avp|director|management involvement)\b/.test(lowered)) {
     topic = "Senior Involvement";
   } else if (/\b(?:meeting|meetings|call|review|discussion)\b/.test(lowered)) {
     topic = "Review Meeting";
@@ -1575,7 +1605,23 @@ function factFreeControlReply(text, interpretation = null) {
   // detail / being done / asking to move on (not negative service sentiment).
   // Use that semantic read first; isMoveOnReply remains the deterministic
   // timeout fallback for short, common mobile answers.
-  return ratingOnly || interpretation?.intent === "negative" || isMoveOnReply(source);
+  const hasGroundedStructuredFact = [
+    ...(interpretation?.captured || []),
+    ...(interpretation?.observations || []),
+    ...(interpretation?.concerns || []),
+    ...(interpretation?.appreciations || [])
+  ].some((item) => {
+    const evidence = String(item?.summary || item?.detail || item?.subject || "").trim();
+    if (!evidence) return false;
+    const overlap = contentOverlap(source, evidence);
+    return overlap.shared >= 2 || overlap.ratio >= 0.5 || phraseAppearsInReply(source, evidence);
+  });
+  const substantiveMissingFact = /\b(?:no|without|missing|lack(?:ing)?|not receiving|not getting)\b[^.!?]{0,35}\b(?:reports?|updates?|responses?|results?|support|ownership|communication|information|data|meetings?)\b/i.test(source);
+  const semanticMoveOn = interpretation?.intent === "negative"
+    && !hasGroundedStructuredFact
+    && !substantiveMissingFact
+    && !isExplicitActionRequest(source);
+  return ratingOnly || semanticMoveOn || isMoveOnReply(source);
 }
 
 function phraseAppearsInReply(text, phrase) {
@@ -1596,6 +1642,8 @@ function groundedObservationTopic(text, item = {}) {
   const candidate = String(item.topic || item.title || "").trim();
   const candidateLower = candidate.toLowerCase();
   const evidence = String(item.detail || item.summary || source).toLowerCase();
+  const requestedTopic = explicitRequestTopic(evidence);
+  if (requestedTopic) return requestedTopic;
 
   // A label does not have to repeat the client's exact wording. Preserve a
   // model label when its meaning is independently supported by that fact's
@@ -1617,7 +1665,10 @@ function groundedObservationTopic(text, item = {}) {
   if (candidate && semanticLabelSupported) return candidate;
 
   if (/\b(?:bill|billing|invoice|tax invoice|cfo|ledger)\b/.test(evidence)) return "Billing";
-  if (/\b(?:senior|leadership|leader|avp|director|management|sarang)\b/.test(evidence)
+  if (/\b(?:reports?|reporting|dashboard|spend updates?|spend reports?|budget updates?|budget reports?)\b/.test(evidence)) {
+    return /\b(?:spend|budget|cost)\b/.test(evidence) ? "Spend Reporting" : "Reporting";
+  }
+  if (/\b(?:senior|leadership|leader|avp|director|sarang|management involvement)\b/.test(evidence)
     && /\b(?:absent|missing|unavailable|not (?:attend|attending|available|responding|picking)|doesn'?t (?:attend|respond|pick)|didn'?t (?:attend|respond|pick)|meetings?|calls?|would (?:like|appreciate)|request)\b/.test(evidence)) {
     return "Senior Involvement";
   }
@@ -1656,11 +1707,20 @@ function groundModelFact(kind, item, text, project = {}) {
       : item.detail || item.summary;
   const overlap = contentOverlap(source, evidenceText);
   const sourceTokenCount = contentTokens(source).size;
+  const detectedServiceKeys = detectors.detectServices(source, project);
+  // A general request may have an operational owner, but that is not the same
+  // as the client giving feedback about that owner's configured service. Do
+  // not let a model-inferred service create a service interview unless the
+  // latest message itself identifies that service.
+  if (["captured", "concern"].includes(kind)
+    && item.serviceKey
+    && isExplicitActionRequest(source)
+    && !detectedServiceKeys.includes(item.serviceKey)) return null;
   let grounded = overlap.shared >= 2 || overlap.ratio >= 0.5;
   if (!grounded && sourceTokenCount <= 4 && overlap.shared >= 1) grounded = true;
 
   if (kind === "captured" && item.serviceKey) {
-    if (detectors.detectServices(source, project).includes(item.serviceKey)) grounded = true;
+    if (detectedServiceKeys.includes(item.serviceKey)) grounded = true;
     // A short answer such as "great" or "not up to mark" refers to the
     // service in the pending question even when it does not repeat its name.
     const sourceSentiment = detectors.detectSentiment(source);
@@ -1926,7 +1986,10 @@ function canonicalObservationTopic(observation, text = "") {
   const classify = (value) => {
     const source = String(value || "").toLowerCase();
     if (/\b(?:bill|billing|invoice|tax invoice|cfo)\b/.test(source)) return "Billing";
-    if (/\b(?:senior|leadership|leader|avp|director|management|sarang)\b/.test(source)) {
+    if (/\b(?:reports?|reporting|dashboard|spend updates?|spend reports?|budget updates?|budget reports?)\b/.test(source)) {
+      return /\b(?:spend|budget|cost)\b/.test(source) ? "Spend Reporting" : "Reporting";
+    }
+    if (/\b(?:senior|leadership|leader|avp|director|sarang|management involvement)\b/.test(source)) {
       return "Senior Involvement";
     }
     if (/\b(?:meeting|meetings|call|calls|review|discussion)\b/.test(source)) return "Review Meeting";
@@ -1939,17 +2002,18 @@ function canonicalObservationTopic(observation, text = "") {
   const source = String(text || "").toLowerCase();
   const strongTopics = [
     /\b(?:bill|billing|invoice|tax invoice|cfo|ledger)\b/.test(source) && "Billing",
-    /\b(?:senior|leadership|leader|avp|director|management|sarang)\b/.test(source)
+    /\b(?:senior|leadership|leader|avp|director|sarang|management involvement)\b/.test(source)
       && /\b(?:absent|missing|unavailable|not (?:attend|attending|available|responding|picking)|doesn'?t (?:attend|respond|pick)|didn'?t (?:attend|respond|pick)|meetings?|calls?|would (?:like|appreciate)|request)\b/.test(source)
       && "Senior Involvement"
   ].filter(Boolean);
   const unambiguousStrongTopic = new Set(strongTopics).size === 1 ? strongTopics[0] : null;
-  const classified = classify(observation?.detail)
-    || unambiguousStrongTopic
-    || classify(observation?.topic)
-    || classify(text);
+  const grounded = groundedObservationTopic(text, observation);
+  const classified = explicitRequestTopic(observation?.detail)
+    || classify(observation?.detail)
+    || (grounded !== "Management Feedback" ? grounded : null)
+    || unambiguousStrongTopic;
   if (classified) return classified;
-  return observation?.topic || "Management Feedback";
+  return "Management Feedback";
 }
 
 /**
@@ -2031,10 +2095,7 @@ function applyDeferredInterpretation(turn, stateBefore, interpretation, text, pr
   if (explicitRequest) {
     for (const observation of observations) {
       const observationIsRequest = observation.kind === "request"
-        || isExplicitActionRequest(observation.detail)
-        || /\b(?:meeting|senior management|senior involvement)\b/i.test(
-          `${observation.topic || ""} ${observation.detail || ""}`
-        );
+        || isExplicitActionRequest(observation.detail);
       if (!observationIsRequest) continue;
       observation.kind = "request";
       observation.needsFollowUp = false;
@@ -3439,8 +3500,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
           allowLanguageOnly: pendingQuestionTypeFor(stateBefore) === "final_sweep"
         }
       );
-      const latestReplyCorrects = /\b(?:actually|correction|correct(?:ion|ed)?|instead|rather than|i (?:said|meant)|change|revise|update|replace)\b/i.test(text);
-      conducted.corrects = latestReplyCorrects;
+      const explicitFeedbackCorrection = interpretation?.corrects === true
+        && /(?:^\s*actually\b|\b(?:correction|i\s+(?:said|meant)|instead\s+of|rather\s+than|disregard|withdraw|take\s+back|my\s+(?:earlier|previous)\s+(?:feedback|answer|comment)|what\s+i\s+(?:said|mentioned))\b)/i.test(text);
+      conducted.corrects = explicitFeedbackCorrection;
       ensureClientAppreciations(conducted, stateBefore, text, project);
       separateAppreciations(conducted);
       for (const observation of conducted.observations || []) {
@@ -3451,10 +3513,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       if (explicitRequest) {
         for (const observation of conducted.observations || []) {
           if (observation.kind === "appreciation") continue;
-          const observationIsRequest = isExplicitActionRequest(observation.detail)
-            || /\b(?:meeting|senior management|senior involvement)\b/i.test(
-              `${observation.topic || ""} ${observation.detail || ""}`
-            );
+          const observationIsRequest = observation.kind === "request"
+            || isExplicitActionRequest(observation.detail);
           if (!observationIsRequest) continue;
           observation.kind = "request";
           observation.needsFollowUp = false;
@@ -3464,12 +3524,12 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       }
       const interpretedObservation = observationFromInterpretation(interpretation, text);
       if (interpretedObservation) {
-        const alreadyCaptured = (conducted.observations || []).some((observation) =>
-          observation.kind === "request"
-          || /\b(?:meeting|senior management|senior involvement)\b/i.test(
-            `${observation.topic || ""} ${observation.detail || ""}`
-          )
-        );
+        const alreadyCaptured = (conducted.observations || []).some((observation) => {
+          const overlap = contentOverlap(observation.detail, interpretedObservation.detail);
+          return String(observation.topic || "").toLowerCase()
+            === String(interpretedObservation.topic || "").toLowerCase()
+            && (overlap.shared >= 2 || overlap.ratio >= 0.55);
+        });
         if (!alreadyCaptured) {
           conducted.observations = [...(conducted.observations || []), interpretedObservation];
         }
@@ -3569,8 +3629,6 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         requiredAction
       );
       const machineWordedAction = (needsConcernAcknowledgement && !hasConcernAcknowledgement)
-        || (requiredAction.type === "observation_followup"
-          && ["Billing", "Senior Involvement"].includes(requiredAction.topic))
         || needsAppreciationAcknowledgement
         || unsupportedResponseTopic;
 
@@ -7711,6 +7769,7 @@ module.exports = {
     canonicalObservationTopic,
     applyDeferredInterpretation,
     isExplicitActionRequest,
+    explicitRequestTopic,
     latestExplicitOverallRating,
     clientBurstContext,
     manualQuestionType,

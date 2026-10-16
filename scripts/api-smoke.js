@@ -2154,9 +2154,9 @@ async function scenario(name, fn) {
         providerMessageId: "wamid.billing-praise-fallback"
       });
       const issuePayload = JSON.parse(issue.body);
-      assert.match(issuePayload.whatsappReplyText, /inaccurate billing/i);
+      assert.match(issuePayload.whatsappReplyText, /recorded your request/i);
       assert.match(issuePayload.whatsappReplyText, /appreciating (?:the )?Creative Team/i);
-      assert.match(issuePayload.whatsappReplyText, /anything else about Billing/i);
+      assert.match(issuePayload.whatsappReplyText, /anything else you would like the Directors to know/i);
       assert.strictEqual(store._session.conversationState.pendingObservation.topic, "Billing");
       assert.strictEqual(store._session.conversationState.appreciationAnswered, true);
 
@@ -6707,7 +6707,7 @@ async function scenario(name, fn) {
     assert.deepStrictEqual(action, { type: "observation_followup", topic: "Billing" });
     const reply = conversationFlow.fallbackForAction(action, state, project);
     assert.ok(/sorry/i.test(reply));
-    assert.ok(/anything else about Billing/i.test(reply));
+    assert.ok(/anything else you would like the Directors to know/i.test(reply));
     assert.ok(!/rate .*support/i.test(reply), "per-service ratings must never leak into this turn");
     const recorded = conversationFlow.recordRequiredQuestion(state, project, action);
     conversationFlow.setStateForRequiredAction(state, action, recorded);
@@ -6826,8 +6826,9 @@ async function scenario(name, fn) {
     }, state);
     assert.deepStrictEqual(action, { type: "observation_followup", topic: "Review Meeting" });
     const reply = conversationFlow.fallbackForAction(action, state, project);
-    assert.match(reply, /our team and (?:senior )?management/i);
-    assert.match(reply, /anything else about Review Meeting/i);
+    assert.match(reply, /recorded your request/i);
+    assert.match(reply, /relevant team/i);
+    assert.match(reply, /anything else you would like the Directors to know/i);
     assert.ok(!/how has SEO/i.test(reply), "the bot must not move to SEO before closing the request");
   });
 
@@ -6836,7 +6837,7 @@ async function scenario(name, fn) {
     const text = "Social media is working well. And we would appreciate a meeting with your senior management if possible.";
     const observation = conversationFlow.observationFromInterpretation(null, text);
     assert.ok(observation, "the meeting request must have a deterministic fallback");
-    assert.strictEqual(observation.topic, "Senior Involvement");
+    assert.strictEqual(observation.topic, "Review Meeting");
     assert.strictEqual(observation.kind, "request");
     assert.strictEqual(observation.positiveContext, "Social Media");
 
@@ -6864,10 +6865,10 @@ async function scenario(name, fn) {
       overallRatingStillNeeded: false,
       npsStillNeeded: false
     }, state);
-    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Senior Involvement" });
+    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Review Meeting" });
     const reply = conversationFlow.fallbackForAction(action, state, project);
     assert.match(reply, /social media is working well/i);
-    assert.match(reply, /meeting request.*senior management/i);
+    assert.match(reply, /recorded your request.*relevant team/i);
     assert.ok(!/PPC/i.test(reply));
   });
 
@@ -7177,6 +7178,117 @@ async function scenario(name, fn) {
     ), "an outgoing reply must not introduce an unsupported senior-involvement topic");
   });
 
+  await scenario("requests stay grounded in the latest words and never inherit a service or meeting topic", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const cases = [
+      ["There should be a weekly report sent to us about spend.", "Spend Reporting"],
+      ["Could the team share regular budget updates with us?", "Spend Reporting"],
+      ["Please provide a campaign dashboard every fortnight.", "Reporting"],
+      ["We would like a review call next week.", "Review Meeting"]
+    ];
+
+    for (const [text, expectedTopic] of cases) {
+      const interpreted = conversationFlow.groundLatestReplyInterpretation({
+        source: "gemini",
+        intent: "feedback",
+        sentiment: "neutral",
+        explainsProblem: true,
+        isObservation: true,
+        captured: [{
+          serviceKey: "account", sentiment: "negative", summary: text,
+          declined: false, needsFollowUp: false
+        }],
+        concerns: [{
+          title: "Account Management", summary: text, sentiment: "negative",
+          severity: "watch", serviceKey: "account", needsFollowUp: false
+        }],
+        observations: [{
+          topic: "Senior Involvement", detail: text, sentiment: "neutral",
+          severity: "info", needsFollowUp: false, kind: "request"
+        }],
+        appreciations: []
+      }, text, project);
+
+      assert.deepStrictEqual(interpreted.captured, [], `${text}: inferred service survived`);
+      assert.deepStrictEqual(interpreted.concerns, [], `${text}: inferred service concern survived`);
+      assert.strictEqual(interpreted.observations.length, 1, text);
+      assert.strictEqual(interpreted.observations[0].topic, expectedTopic, text);
+      assert.strictEqual(
+        conversationFlow.canonicalObservationTopic(interpreted.observations[0], text),
+        expectedTopic,
+        text
+      );
+
+      const observed = conversationFlow.observationFromInterpretation(interpreted, text);
+      assert.ok(observed, text);
+      assert.strictEqual(observed.topic, expectedTopic, text);
+      assert.strictEqual(observed.kind, "request", text);
+
+      const reply = conversationFlow.fallbackForAction(
+        { type: "observation_followup", topic: expectedTopic },
+        {
+          pendingObservation: {
+            topic: expectedTopic, stage: "followup", acknowledged: false,
+            responseKind: "request"
+          }
+        },
+        project,
+        { observations: [observed], appreciations: [] }
+      );
+      assert.match(reply, /recorded your request/i, text);
+      assert.doesNotMatch(reply, /meeting request|Senior Involvement|Account Management/i, text);
+    }
+
+    const mixedText = "Creative changes were not applied consistently. Please send us a weekly spend report.";
+    assert.strictEqual(
+      conversationFlow.canonicalObservationTopic({
+        topic: "Creative Process",
+        detail: "Creative changes were not applied consistently.",
+        sentiment: "negative",
+        kind: "feedback"
+      }, mixedText),
+      "Creative Process",
+      "a separate reporting request must not relabel the creative concern"
+    );
+    assert.strictEqual(
+      conversationFlow.canonicalObservationTopic({
+        topic: "Spend Reporting",
+        detail: "Please send us a weekly spend report.",
+        sentiment: "neutral",
+        kind: "request"
+      }, mixedText),
+      "Spend Reporting",
+      "the request must retain the topic grounded in its own clause"
+    );
+  });
+
+  await scenario("rating routing requires score context rather than generic correction words", async () => {
+    const { detectors } = require("../src/lib/whatsapp-state-machine");
+    const realCorrections = [
+      "Revise the rating to 10",
+      "I meant nine point five",
+      "change it from 9.5 to 7",
+      "10 instead of 7",
+      "my score should be 8"
+    ];
+    const unrelated = [
+      "There should be a weekly report",
+      "Please update the report every 7 days",
+      "Set the meeting for 10 days from now",
+      "Actually, deliver the creatives in 2 days",
+      "The rating process needs 2 weeks to be redesigned"
+    ];
+    for (const text of realCorrections) {
+      assert.strictEqual(detectors.isRatingCorrectionReply(text), true, text);
+    }
+    for (const text of unrelated) {
+      assert.strictEqual(detectors.isRatingCorrectionReply(text), false, text);
+    }
+    for (const text of ["Sorry, that was a mistake", "I need to correct my rating", "My score was wrong"]) {
+      assert.strictEqual(detectors.isRatingCorrectionClarification(text), true, text);
+    }
+  });
+
   await scenario("rating and move-on replies cannot inherit fabricated observations", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const fabricated = () => ({
@@ -7228,6 +7340,27 @@ async function scenario(name, fn) {
     );
     assert.deepStrictEqual(semanticMoveOn.observations, [],
       "a semantically declined follow-up must not depend on an exact phrase list");
+
+    const misreadComplaint = fabricated();
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      misreadComplaint,
+      "There is no weekly spend report and this needs to be fixed",
+      project,
+      {
+        source: "gemini", intent: "negative", sentiment: "negative", rating: null,
+        captured: [], appreciations: [], concerns: [],
+        observations: [{
+          topic: "Spend Reporting",
+          detail: "There is no weekly spend report and this needs to be fixed",
+          sentiment: "negative", severity: "watch", needsFollowUp: false,
+          kind: "feedback"
+        }]
+      },
+      { protectSubstantiveConcern: true, allowLanguageOnly: true }
+    );
+    assert.strictEqual(misreadComplaint.observations.length, 1,
+      "a model intent label must not erase grounded substantive feedback");
+    assert.strictEqual(misreadComplaint.observations[0].topic, "Spend Reporting");
 
     const positiveNarrative = fabricated();
     conversationFlow.enrichConductedWithDeterministicFacts(

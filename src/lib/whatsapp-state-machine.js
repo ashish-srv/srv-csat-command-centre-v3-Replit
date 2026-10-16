@@ -323,7 +323,7 @@ function looksLikeRatingAnswer(text) {
   }
 
   if (
-    new RegExp(`\\b(?:rating|raiting|score|rate|give|take|make that|revise|update|set|i said|i meant|i(?:'d| would| will|'ll)? say)\\b[^.!?]{0,35}\\b(?:\\d+(?:\\.\\d+)?|${numberWord})\\b`, "i").test(value)
+    new RegExp(`\\b(?:rating|raiting|score|rate)\\b[^.!?]{0,35}\\b(?:\\d+(?:\\.\\d+)?|${numberWord})\\b`, "i").test(value)
     && !/\b(?:day|days|week|weeks|month|months|meeting|meetings|lead|leads|report|reports)\b/i.test(value)
   ) {
     return true;
@@ -398,6 +398,62 @@ function detectRatingCorrection(text) {
     if (read) return read;
   }
   return detectNumber(value);
+}
+
+const RATING_VALUE_PATTERN = "(?:-?\\d+(?:\\.\\d+)?|(?:zero|one|two|three|four|five|six|seven|eight|nine|ten)(?:\\s+(?:point|dot)\\s+(?:zero|one|two|three|four|five|six|seven|eight|nine))?)";
+const RATING_SCALE_PATTERN = "(?:\\s*(?:/|out of)\\s*(?:5|10))?";
+
+/**
+ * A correction is rating-directed only when its grammar points at a score.
+ * Generic verbs such as "update", "set" and "should be" are not enough:
+ * clients also update reports, set meetings and say that delivery should be
+ * weekly. Gemini remains responsible for semantic language; these patterns
+ * cover only compact, unambiguous score corrections during an active survey.
+ */
+function isRatingCorrectionReply(text) {
+  const source = String(text || "").trim();
+  if (!source || !detectRatingCorrection(source)) return false;
+
+  const value = `${RATING_VALUE_PATTERN}${RATING_SCALE_PATTERN}`;
+  const optionalLead = "(?:sorry[,.!]?\\s*|no[,.!]?\\s*)?";
+  const patterns = [
+    new RegExp(`\\b(?:overall\\s+rating|rating|raiting|csat|score)\\b[^.!?]{0,20}?(?:is|was|should\\s+be|to|at|as|of|:)\\s*${value}\\b`, "i"),
+    new RegExp(`^\\s*(?:overall\\s+rating|rating|raiting|csat|score)\\s+${value}\\s*[.!]?\\s*$`, "i"),
+    new RegExp(`\\b(?:rate|give)\\b[^.!?]{0,25}?${value}\\b(?:\\s*(?:/|out of)\\s*(?:5|10))?`, "i"),
+    new RegExp(`\\b${value}\\b[^.!?]{0,20}\\b(?:overall\\s+rating|rating|raiting|csat|score)\\b`, "i"),
+    new RegExp(`^\\s*${optionalLead}(?:please\\s+)?(?:take|record|use|make\\s+(?:it|that))\\s+${value}\\s*[.!]?\\s*$`, "i"),
+    new RegExp(`^\\s*${optionalLead}(?:i\\s+(?:said|meant)|actually)\\s+${value}\\s*[.!]?\\s*$`, "i"),
+    new RegExp(`^\\s*${optionalLead}(?:please\\s+)?(?:change|correct|revise|update|set)\\s+(?:it|that)?\\s*(?:from\\s+${RATING_VALUE_PATTERN}\\s+)?(?:to|as)\\s+${value}\\s*[.!]?\\s*$`, "i"),
+    new RegExp(`^\\s*${value}\\s+(?:instead\\s+of|rather\\s+than)\\s+${value}\\s*[.!]?\\s*$`, "i"),
+    new RegExp(`^\\s*(?:it|that)?\\s*should\\s+be\\s+${value}\\s*[.!]?\\s*$`, "i")
+  ];
+  return patterns.some((pattern) => pattern.test(source));
+}
+
+/** A compact statement that clearly asks to correct a score but omits it. */
+function isRatingCorrectionClarification(text) {
+  const source = String(text || "").trim();
+  if (!source || detectRatingCorrection(source)) return false;
+  return [
+    /^\s*(?:sorry[,.!]?\s*)?(?:that|it)\s+was\s+(?:a\s+)?mistake\s*[.!]?\s*$/i,
+    /\b(?:i\s+(?:want|need|would\s+like)\s+to|please)\s+(?:change|correct|revise|update)\s+(?:my\s+|the\s+)?(?:overall\s+)?(?:rating|raiting|score|csat)\b/i,
+    /\b(?:my\s+|the\s+)?(?:overall\s+)?(?:rating|raiting|score|csat)\s+(?:is|was)\s+(?:wrong|incorrect|a\s+mistake)\b/i,
+    /\b(?:i\s+)?(?:made|have\s+made)\s+(?:a\s+)?mistake\s+(?:in|with)\s+(?:my\s+|the\s+)?(?:rating|raiting|score|csat)\b/i
+  ].some((pattern) => pattern.test(source));
+}
+
+/** A recommendation correction must describe a recommendation SCORE. */
+function isRecommendationRatingReply(text) {
+  const source = String(text || "").trim();
+  const read = detectRatingCorrection(source);
+  if (!source || !read || !/\b(?:recommend|recommendation|nps|likelihood)\w*\b/i.test(source)) return false;
+  const value = `${RATING_VALUE_PATTERN}${RATING_SCALE_PATTERN}`;
+  return [
+    new RegExp(`\\b(?:take|record|set|change|revise|update|use)\\s+(?:it\\s+)?(?:to\\s+)?${value}\\s+(?:for|as)\\s+(?:the\\s+)?recommend\w*`, "i"),
+    new RegExp(`\\brecommend\w*\\b[^.!?]{0,45}\\b(?:is|at|to\\s+be)\\s+${value}\\b`, "i"),
+    new RegExp(`^\\s*${value}\\s+(?:for|as)\\s+(?:the\\s+)?recommend\w*`, "i"),
+    new RegExp(`\\b(?:nps|recommendation\\s+(?:rating|score)|recommend\w*\\s+(?:rating|score)|likelihood\\s+(?:rating|score))\\b[^.!?]{0,20}(?:is|was|to|at|as|of|:)?\\s*${value}\\b`, "i")
+  ].some((pattern) => pattern.test(source));
 }
 
 function detectSentiment(text) {
@@ -487,7 +543,12 @@ function isOutOfScope(text) {
   // Questions about them still route through isQuestionToUs(), but a statement
   // such as "the tax invoice is inaccurate" must remain feedback even when
   // Gemini is unavailable.
-  return /\b(proposal|quotation|new requirement|contract renewal|call me)\b/i.test(text);
+  const source = String(text || "").trim();
+  const commercialRequest = /\b(?:send|share|provide|prepare|need|want|request|looking for)\b[^.!?]{0,40}\b(?:proposal|quotation|new requirement|contract renewal)\b/i.test(source)
+    || /\b(?:proposal|quotation|new requirement|contract renewal)\b[^.!?]{0,35}\b(?:please|needed|required|send|share|provide)\b/i.test(source);
+  const callbackRequest = /^(?:please\s+|kindly\s+)?call me(?:\s+(?:back|today|tomorrow|when (?:free|available)|at .+))?[.!]*$/i.test(source)
+    || /\b(?:can|could|will|would)\s+(?:you|someone|the team)\s+(?:please\s+)?call me\b/i.test(source);
+  return commercialRequest || callbackRequest;
 }
 
 function isUnparseable(text) {
@@ -509,15 +570,18 @@ function isGreetingOnly(text) {
 }
 
 function isAffirmative(text) {
-  return /\b(yes|yeah|yep|sure|go ahead|move ahead)\b/i.test(text);
+  return /^\s*(?:yes+|yeah|yep|yup|sure|certainly|go ahead|move ahead)(?:\s+(?:please|with it|now))?\s*[.!]*\s*$/i.test(String(text || ""));
 }
 
 function isNegativeSkip(text) {
-  return /\b(no|nothing else|no more|move ahead|skip|done|that'?s all)\b/i.test(text);
+  // A control reply must describe the whole message. Matching the word "no"
+  // inside prose made "there is no weekly report" silently skip the topic.
+  return isMoveOnReply(text)
+    || /^\s*(?:please\s+)?(?:skip(?:\s+(?:this|it|that|the topic))?|done|move\s+(?:on|ahead)|next|proceed)(?:\s+(?:please|now))?\s*[.!]*\s*$/i.test(String(text || ""));
 }
 
 function isNonSpecificContinuation(text) {
-  return /\b(both|all|not sure|no preference|same|all of them)\b/i.test(text);
+  return /^\s*(?:both|all|all of them|the same|same|not sure|no preference)(?:\s+(?:please|are fine|is fine))?\s*[.!]*\s*$/i.test(String(text || ""));
 }
 
 /**
@@ -553,7 +617,9 @@ function explicitServiceScopeDecision(text, answeringScope = false) {
 }
 
 function isVagueDetailResponse(text) {
-  return /\b(not sure|unsure|don'?t know|do not know|no idea|unclear|can'?t say|cannot say)\b/i.test(text);
+  // These are only declines when they are the answer, not when they describe
+  // the service: "the dashboard is unclear" is substantive feedback.
+  return /^\s*(?:i(?:'m| am)?\s+)?(?:not sure|unsure|don'?t know|do not know|no idea|can'?t say|cannot say|unclear)(?:\s+(?:about that|right now|at the moment))?\s*[.!]*\s*$/i.test(String(text || ""));
 }
 
 /**
@@ -584,11 +650,21 @@ function isUnambiguous(text) {
 
 /** "later", "after some time", "will revert" — a postponement, not a refusal. */
 function isDeferral(text) {
-  const wantsLater = /\b(later|after ?some ?time|some ?time|afterwards|tomorrow|next week|another time|will revert|revert back|get back to you|will share|will do it|will give|give me (?:some )?time|need (?:some )?time)\b/i.test(text);
-  const asksForTime = /\b(?:allow|give)\s+me\s+(?:(?:a|one|another|some)\s+)?(?:day|time|while|moment)\b/i.test(text)
-    || /\b(?:come|get)\s+back\s+(?:with|to)\s+(?:the\s+|my\s+|you\s+)?(?:feedback|review|reviews|response)\b/i.test(text);
-  const notNow = /\b(busy|not now|not right now|no time|don'?t have time|do not have time|travell?ing|on leave|in a meeting|driving|out of office|can'?t (?:do|give|share) (?:it |this )?now|cannot (?:do|give|share))\b/i.test(text);
-  const refusingNow = /\b(?:will not|won'?t|do ?n'?t want to|not going to)\b[^.!?]{0,30}\b(?:give|share|do|provide|answer)\b/i.test(text);
+  const source = String(text || "").trim();
+  const later = "(?:later|after\\s+some\\s+time|afterwards|tomorrow(?:\\s+(?:morning|afternoon|evening))?|next\\s+week|another\\s+time|some\\s+other\\s+time|when\\s+(?:free|available))";
+  const wantsLater = new RegExp(`\\b(?:i|we)\\s+(?:will|shall|can|would\\s+like\\s+to)\\s+(?:revert(?:\\s+back)?|get\\s+back(?:\\s+to\\s+you)?|share|send|give|provide|do\\s+it|respond|reply)(?:[^.!?]{0,45})?(?:${later})\\b`, "i").test(source)
+    || new RegExp(`^\\s*(?:will|shall)\\s+(?:revert(?:\\s+back)?|get\\s+back|share|send|give|provide|respond|reply)(?:[^.!?]{0,35})?(?:${later}|asap)\\s*[.!]*\\s*$`, "i").test(source)
+    || new RegExp(`^\\s*${later}\\s*[.!]*\\s*$`, "i").test(source)
+    || /^\s*(?:later\s+please|can\s+i\s+(?:do|give|share|answer)\s+(?:this|it|feedback)?\s*later|will\s+get\s+back\s+to\s+you)\s*[.!]*\s*$/i.test(source)
+    || /\b(?:i|we)\s+(?:will|shall)\s+(?:revert|reply|respond|get back)\b/i.test(source);
+  const asksForTime = /\b(?:please\s+)?(?:allow|give)\s+me\s+(?:(?:a|one|another|some)\s+)?(?:day|time|while|moment)\b/i.test(source)
+    || /\b(?:i|we)\s+(?:need|would\s+like)\s+(?:some\s+|more\s+)?time\b/i.test(source)
+    || /\b(?:i|we)\s+(?:will|shall|can)\s+(?:come|get)\s+back\s+(?:with|to)\s+(?:the\s+|my\s+|you\s+)?(?:feedback|review|reviews|response)\b/i.test(source);
+  const notNow = /\b(?:i\s+am|i'?m|we\s+are|we'?re)\s+(?:currently\s+)?(?:busy|travell?ing|on leave|in a meeting|driving|out of office)\b/i.test(source)
+    || /^\s*(?:busy|busy\s+in\s+a\s+meeting|not now|not right now|no time|currently\s+(?:busy|travell?ing|driving|in a meeting|out of office))(?:\s*(?:,|-)?\s*(?:now|right now|later|some other time|please|thanks))?\s*[.!]*\s*$/i.test(source)
+    || /\b(?:i|we)\s+(?:don'?t|do not)\s+have\s+time\b/i.test(source)
+    || /\b(?:i|we)\s+(?:can'?t|cannot)\s+(?:do|give|share|provide|answer)(?:\s+(?:it|this|feedback))?\s+now\b/i.test(source);
+  const refusingNow = /\b(?:i|we)\s+(?:will not|won'?t|do ?n'?t want to|not going to)\b[^.!?]{0,30}\b(?:give|share|do|provide|answer)\b/i.test(source);
   return wantsLater || asksForTime || notNow || refusingNow;
 }
 
@@ -643,8 +719,17 @@ function isShortServiceOpinion(text) {
 
 /** Coming back after asking to answer later. */
 function isResumption(text) {
-  return /\b(ready|let'?s (?:start|go|do it|begin|complete|finish|continue|carry on)|go ahead|i can (?:give|do|share) (?:it )?now|(?:can|will) give feedback now|available now|free now|shall we (?:start|begin|continue)|start now|proceed|carry on|continue|complete it|finish it|lets do it)\b/i.test(text)
+  const source = String(text || "").trim();
+  return /^\s*(?:(?:i(?:'m| am)?\s+)?ready(?:\s+now)?|let'?s\s+(?:start|go|do it|begin|complete|finish|continue|carry on)|go ahead|i can (?:give|do|share)(?:\s+(?:it|feedback))? now|i (?:can|will) give feedback now|(?:i(?:'m| am)?\s+)?(?:available|free) now|shall we (?:start|begin|continue)|start now|proceed|carry on|continue|complete it|finish it|let'?s do it)\s*[.!]*\s*$/i.test(source)
     || isAcknowledgement(text);
+}
+
+function isPositiveOverallReply(text) {
+  const source = String(text || "").trim();
+  if (/\b(?:not|isn'?t|wasn'?t|aren'?t|weren'?t|nothing)\b[^.!?]{0,20}\b(?:working|going|good|fine|well)\b/i.test(source)) {
+    return false;
+  }
+  return /^\s*(?:(?:everything|things|it|the project|work)\s+(?:is|are|was|were|has been)\s+)?(?:working well|going well|all good|good overall|fine overall|well overall)(?:\s+(?:here|now|at present|for now))?\s*[.!]*\s*$/i.test(source);
 }
 
 function isMoveOnReply(text) {
@@ -653,7 +738,10 @@ function isMoveOnReply(text) {
   // "nothingggg"). Gemini remains the primary interpreter; this normalization
   // keeps the same answers working during a timeout without listing each typo.
   const unstretched = value.replace(/([a-z])\1{2,}/gi, "$1");
-  return /\b(nothing else|nothing more|nothing to (?:share|sahre|add)|that'?s all|that'?s it(?: from my side)?|that is it(?: from my side)?|apart from (this|that) nothing|no other|working well|well overall|all good|good overall|fine overall|going well)\b/i.test(unstretched) ||
+  return /^\s*(?:no[,.]?\s*)?(?:nothing else|nothing more|nothing to (?:share|sahre|add)|that'?s all|that'?s it|that is it)(?:\s+(?:from (?:me|my side)|for now|at the moment))?(?:[,.]?\s*(?:thanks|thank you))?\s*[.!]*\s*$/i.test(unstretched) ||
+    /^\s*apart from (?:this|that)[,]?\s*nothing(?:\s+else)?\s*[.!]*\s*$/i.test(unstretched) ||
+    /^\s*no other\s+(?:issue|issues|concern|concerns|problem|problems|point|points|feedback|thing|things)(?:\s+(?:from (?:me|my side)|for now))?\s*[.!]*\s*$/i.test(unstretched) ||
+    isPositiveOverallReply(unstretched) ||
     /^\s*(?:nothing happened[.!\s]*)?(?:please\s+)?(?:move on|move ahead|skip(?: this)?|next|proceed)(?:\s+(?:please|now))?\s*[.!]*\s*$/i.test(unstretched) ||
     /^\s*(?:no|nothing)\s+(?:issues?|concerns?|problems?)(?:\s+(?:here|now|at present|for now))?\s*[.!]*\s*$/i.test(unstretched) ||
     /^\s*(no+|nope|nothing|none|nah|np|nk|mo|not)\s*[.!]*\s*$/i.test(unstretched);
@@ -1874,9 +1962,10 @@ function processWhatsAppReply({
     if (graceIsOpen) {
       const asksRecordedRating = /\b(what|which)\b.{0,20}\b(take|took|record(?:ed)?|rating|score)\b/i.test(text)
         || /\bwhat did (?:you|u) take\b/i.test(text);
-      const signalsCorrection = /\b(sorry|mistake|correct(?:ion|ed)?|change|revise|update|set|instead|rather than|make that|take|record|use|actually|i said|i meant|should be)\b/i.test(text);
-      const refersToRecommendation = conversationState.sessionType === "project_end"
-        && /\b(?:recommend|recommendation|nps|network)\w*\b/i.test(text);
+      const ratingCorrectionDirected = isRatingCorrectionReply(text);
+      const mentionsRatingCorrection = isRatingCorrectionClarification(text);
+      const recommendationRatingDirected = conversationState.sessionType === "project_end"
+        && isRecommendationRatingReply(text);
       const wordCount = String(text || "").trim().split(/\s+/).filter(Boolean).length;
       const numericMentions = String(text || "").match(/\b(?:10|[0-9](?:\.\d+)?)\b/g) || [];
       const looksLikePastedExchange = wordCount > 15
@@ -1885,10 +1974,9 @@ function processWhatsAppReply({
       const ratingDirected = !looksLikePastedExchange && wordCount <= 45 && (
         looksLikeRatingAnswer(text)
         || asksRecordedRating
-        || signalsCorrection
-        || (refersToRecommendation
-          && wordCount <= 20
-          && /\d|zero|one|two|three|four|five|six|seven|eight|nine|ten/i.test(text))
+        || ratingCorrectionDirected
+        || mentionsRatingCorrection
+        || (recommendationRatingDirected && wordCount <= 20)
       );
       // Do not mine scores out of a pasted conversation, email or long piece
       // of feedback. Rating correction applies only when the latest message is
@@ -1909,7 +1997,7 @@ function processWhatsAppReply({
         && ratingRead.value <= 10
         && (!ratingRead.scale || ratingRead.scale === 10);
 
-      if (refersToRecommendation && validNps) {
+      if (recommendationRatingDirected && validNps) {
         conversationState.npsScore = ratingRead.value;
         conversationState.npsCorrectedAt = new Date().toISOString();
         const overall = conversationState.overallRating;
@@ -1924,7 +2012,7 @@ function processWhatsAppReply({
         });
       }
 
-      if (refersToRecommendation && ratingRead && !validNps) {
+      if (recommendationRatingDirected && ratingRead && !validNps) {
         return plainTurn({
           conversationState, project, poc, text, guardrails,
           state: STATES.CLOSING_GRACE,
@@ -1934,7 +2022,7 @@ function processWhatsAppReply({
         });
       }
 
-      if (validRating && (looksLikeRatingAnswer(text) || (signalsCorrection && correctionNumberLooksRelevant))) {
+      if (validRating && (looksLikeRatingAnswer(text) || (ratingCorrectionDirected && correctionNumberLooksRelevant))) {
         conversationState.overallRating = normalizedRating;
         conversationState.ratingCorrectedAt = new Date().toISOString();
         return plainTurn({
@@ -1945,7 +2033,17 @@ function processWhatsAppReply({
         });
       }
 
-      if (ratingDirected && (asksRecordedRating || signalsCorrection)) {
+      if (ratingCorrectionDirected && ratingRead && !validRating) {
+        return plainTurn({
+          conversationState, project, poc, text, guardrails,
+          state: STATES.CLOSING_GRACE,
+          guardrail: GUARDRAILS.INVALID_RATING,
+          body: "That rating is not valid. The scale here is 0 to 10, where 10 is best. Please reply with a number from 0 to 10; decimals such as 3.5 are accepted.",
+          control: { suppressTerminalNotifications: true }
+        });
+      }
+
+      if (ratingDirected && (asksRecordedRating || mentionsRatingCorrection)) {
         const recorded = conversationState.overallRating;
         return plainTurn({
           conversationState, project, poc, text, guardrails,
@@ -2442,7 +2540,7 @@ function processWhatsAppReply({
   ) {
     // A vague answer to the follow-up is NOT detail — it must not open an issue.
     const service = ensureServiceState(conversationState, project, conversationState.pendingServiceKey);
-    const positiveOverall = /\b(working well|well overall|all good|good overall|fine overall|going well)\b/i.test(text) || sentiment === "positive";
+    const positiveOverall = isPositiveOverallReply(text) || sentiment === "positive";
     if (positiveOverall && service.sentiment !== "negative") {
       service.sentiment = "positive";
       service.reasonText = service.reasonText || "Client says it is working well overall.";
@@ -2804,5 +2902,14 @@ module.exports = {
   overallRatingQuestion,
   scoreConversation,
   buildAnalysis,
-  detectors: { detectServices, detectSentiment, detectNumber, detectRatingCorrection, looksLikeRatingAnswer, isOptOut, isEscalation, emojiSentiment }
+  detectors: {
+    detectServices, detectSentiment, detectNumber, detectRatingCorrection,
+    looksLikeRatingAnswer, isRatingCorrectionReply, isRatingCorrectionClarification,
+    isRecommendationRatingReply,
+    isOptOut, isEscalation, emojiSentiment,
+    // Exported for regression tests. These are deliberately conservative
+    // timeout fallbacks; natural language still belongs to Gemini.
+    isAffirmative, isNegativeSkip, isNonSpecificContinuation, isPositiveOverallReply,
+    isVagueDetailResponse, isDeferral, isResumption, isOutOfScope
+  }
 };
