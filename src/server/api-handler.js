@@ -1068,7 +1068,10 @@ function pendingQuestionTypeFor(conversationState) {
 
 function applyTurnServiceScope(conversationState, project, text, interpretation, conducted = {}, stateBefore = {}) {
   const valid = new Set(Object.values(SERVICE_SCOPE_DECISIONS));
-  let decision = [interpretation?.serviceScope, conducted?.serviceScope]
+  // Service scope is a fact about what the client chose. Only the dedicated
+  // latest-reply interpretation may supply it; the response-writing model is
+  // not an evidence source and must never change survey state.
+  let decision = [interpretation?.serviceScope]
     .find((value) => valid.has(value) && value !== SERVICE_SCOPE_DECISIONS.NONE)
     || SERVICE_SCOPE_DECISIONS.NONE;
   const projectEnd = conversationState.sessionType === "project_end";
@@ -1234,27 +1237,19 @@ function validatedAnswerMarkers(stateBefore, conducted, text, interpretation = n
     && capturedServiceKeys.some((key) => key !== pendingServiceKey)
     && !capturedServiceKeys.includes(pendingServiceKey);
   const volunteeredAppreciation = (conducted.appreciations || []).length > 0;
-  const answeredSweepWithFeedback = pendingType === "final_sweep" && Boolean(
-    (conducted.captured || []).length
-    || (conducted.observations || []).length
-    || (conducted.appreciations || []).length
-  );
-
   return {
     answeredAppreciation: volunteeredAppreciation || (pendingType === "appreciation"
-      ? (conducted.answeredAppreciation === true || explicitlyFinished)
+      ? explicitlyFinished
       : pendingType === "general_issue_detail"
         && stateBefore.resumeQuestionType === "appreciation"
-        && conducted.answeredAppreciation === true),
+        && explicitlyFinished),
     appreciationVolunteered: volunteeredAppreciation,
     // Substantive feedback answers the words of the final question, but after
     // acknowledging it we deliberately offer one inclusive "anything else?"
     // opportunity. Only an explicit done/no response closes that opportunity.
     // Otherwise every concern captured here can both answer and instantly
     // close the session, or reopen as several service-specific follow-ups.
-    answeredAnythingElse: pendingType === "final_sweep"
-      && (explicitlyFinished
-        || (conducted.answeredAnythingElse === true && !answeredSweepWithFeedback)),
+    answeredAnythingElse: pendingType === "final_sweep" && explicitlyFinished,
     completedServiceFollowUpKeys: pendingType === "service_followup"
       && pendingServiceKey
       && (explicitlyFinished || movedToAnotherService)
@@ -1374,6 +1369,56 @@ function messageMatchesRequiredAction(action, message) {
   if (action.type === "general_issue_detail") return /\b(?:tell me|tell us|what happened|please share|please explain)\b/i.test(text);
   if (action.type === "close") return !/\?\s*$/.test(text);
   return false;
+}
+
+function responseIntroducesUnsupportedTopic(message, text, project = {}, conducted = {}, requiredAction = {}) {
+  const output = String(message || "");
+  const source = String(text || "");
+  const approvedTopics = new Set((conducted.observations || [])
+    .map((item) => String(item.topic || "").toLowerCase())
+    .filter(Boolean));
+  const topicChecks = [
+    {
+      topic: "senior involvement",
+      output: /\b(?:senior involvement|senior leadership|lack of senior|avp)\b/i,
+      source: /\b(?:senior|leadership|leader|avp)\b/i
+    },
+    {
+      topic: "billing",
+      output: /\b(?:billing|invoice|tax invoice|ledger)\b/i,
+      source: /\b(?:billing|invoice|tax invoice|ledger)\b/i
+    },
+    {
+      topic: "review meeting",
+      output: /\b(?:review meeting|weekly meeting|meeting cadence)\b/i,
+      source: /\b(?:review meeting|weekly meeting|meeting cadence|meetings?)\b/i
+    },
+    {
+      topic: "commercial process",
+      output: /\b(?:commercial process|contract|payment)\b/i,
+      source: /\b(?:commercial|contract|payment)\b/i
+    },
+    {
+      topic: "creative process",
+      output: /\b(?:creative process|design process|creatives?|designers?)\b/i,
+      source: /\b(?:creative process|design process|creatives?|designers?|design)\b/i
+    }
+  ];
+  if (topicChecks.some((check) => check.output.test(output)
+    && !check.source.test(source)
+    && !approvedTopics.has(check.topic))) return true;
+
+  const approvedServices = new Set([
+    ...(conducted.captured || []).map((item) => item.serviceKey),
+    ...(conducted.appreciations || []).map((item) => item.serviceKey),
+    ...detectors.detectServices(source, project),
+    requiredAction.serviceKey
+  ].filter(Boolean));
+  return (project.services || []).some((service) => {
+    if (approvedServices.has(service.serviceKey)) return false;
+    const name = String(service.name || "").trim();
+    return name.length >= 3 && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(output);
+  });
 }
 
 function normalizeLegacyServiceFollowups(conversationState) {
@@ -1515,11 +1560,6 @@ function fallbackGeneralConcernObservation(
   };
 }
 
-function responseAcknowledgesConcern(message) {
-  const source = String(message || "");
-  return /\b(?:sorry|concern(?:s)?|issue(?:s)?|area(?:s)? for improvement|did not meet expectations?|has not met expectations?|look into (?:this|it|the matter)|review (?:this|it|these concerns?|the matter)|take (?:this|it) forward|address (?:this|it|these concerns?)|necessary action)\b/i.test(source);
-}
-
 function responseAcknowledgesAppreciation(message) {
   const source = String(message || "");
   return /\b(?:thank(?:s| you)?(?: for)?|appreciat(?:e|ed|ing|ion)|kind words|special mention|glad to hear)\b/i.test(source)
@@ -1550,32 +1590,124 @@ function phraseAppearsInReply(text, phrase) {
  * prompt examples or older transcript details from being copied into a new
  * turn while still allowing natural paraphrases and short service answers.
  */
-function modelFactGroundedInReply(kind, item, text, project = {}) {
-  if (!item) return false;
+function groundedObservationTopic(text, item = {}) {
   const source = String(text || "").trim();
-  if (!source) return false;
+  if (!source) return "Management Feedback";
+  const candidate = String(item.topic || item.title || "").trim();
+  const candidateLower = candidate.toLowerCase();
+  const evidence = String(item.detail || item.summary || source).toLowerCase();
 
-  const factText = kind === "captured"
+  // A label does not have to repeat the client's exact wording. Preserve a
+  // model label when its meaning is independently supported by that fact's
+  // grounded detail. Crucially, inspect the individual fact detail here—not
+  // the whole multi-topic message—so one campaign concern cannot relabel a
+  // separate reporting concern.
+  const semanticLabelSupported = (
+    (/\b(?:campaign|outcome|result|traction|applicant|lead)\w*\b/.test(candidateLower)
+      && /\b(?:campaign|outcome|result|traction|attention|applicant|lead)\w*\b/.test(evidence))
+    || (/\b(?:report|data|profile|visibility|attribution|insight|information)\w*\b/.test(candidateLower)
+      && /\b(?:report|data|profile|visibility|attribution|conversion|source|insight|information)\w*\b/.test(evidence))
+    || (/\b(?:ownership|proactive|initiative|course correction)\w*\b/.test(candidateLower)
+      && /\b(?:ownership|proactive|initiative|analyse|analyze|change course|course correction)\w*\b/.test(evidence))
+    || (/\b(?:commercial|scope|contract|payment)\w*\b/.test(candidateLower)
+      && /\b(?:commercial|scope|proposal|contract|payment)\w*\b/.test(evidence))
+    || (/\b(?:leadership|director|review)\w*\b/.test(candidateLower)
+      && /\b(?:leadership|leader|director|review)\w*\b/.test(evidence))
+  );
+  if (candidate && semanticLabelSupported) return candidate;
+
+  if (/\b(?:bill|billing|invoice|tax invoice|cfo|ledger)\b/.test(evidence)) return "Billing";
+  if (/\b(?:senior|leadership|leader|avp|director|management|sarang)\b/.test(evidence)
+    && /\b(?:absent|missing|unavailable|not (?:attend|attending|available|responding|picking)|doesn'?t (?:attend|respond|pick)|didn'?t (?:attend|respond|pick)|meetings?|calls?|would (?:like|appreciate)|request)\b/.test(evidence)) {
+    return "Senior Involvement";
+  }
+  if (/\b(?:meeting|meetings|review call|review calls|weekly review|discussion|discussions)\b/.test(evidence)) {
+    return "Review Meeting";
+  }
+  if (/\b(?:contract|scope|commercial|payment|payments)\b/.test(evidence)) return "Commercial Process";
+  if (/\b(?:creative process|creatives?|design(?:s|ed|ing)?|designers?|artwork|landing pages?)\b/.test(evidence)) {
+    return "Creative Process";
+  }
+  if (/\b(?:back[- ]and[- ]forth|rework|reiterat\w*|repeat(?:ed|edly)?|not (?:consistently )?(?:applied|implemented|incorporated)|internal (?:alignment|communication)|delivery process|coordination gap|handoff gap)\b/.test(evidence)) {
+    return "Delivery Process";
+  }
+
+  const topicOverlap = contentOverlap(source, candidate);
+  if (candidate && (
+    phraseAppearsInReply(source, candidate)
+    || topicOverlap.shared >= 2
+    || (topicOverlap.shared >= 1 && topicOverlap.ratio >= 0.5)
+  )) return candidate;
+  return "Management Feedback";
+}
+
+function groundModelFact(kind, item, text, project = {}) {
+  if (!item) return null;
+  const source = String(text || "").trim();
+  if (!source) return null;
+
+  // Ground the evidence separately from its label. Combining topic + detail
+  // allowed a fabricated label such as "Senior Involvement" to survive merely
+  // because its otherwise-generic detail overlapped with "an issue in design".
+  const evidenceText = kind === "captured"
     ? item.summary
     : kind === "appreciation"
-      ? `${item.subject || ""} ${item.detail || ""}`
-      : `${item.topic || item.title || ""} ${item.detail || item.summary || ""}`;
-  const overlap = contentOverlap(source, factText);
+      ? item.detail || item.subject
+      : item.detail || item.summary;
+  const overlap = contentOverlap(source, evidenceText);
   const sourceTokenCount = contentTokens(source).size;
-  if (overlap.shared >= 2 || overlap.ratio >= 0.5) return true;
-  if (sourceTokenCount <= 4 && overlap.shared >= 1) return true;
+  let grounded = overlap.shared >= 2 || overlap.ratio >= 0.5;
+  if (!grounded && sourceTokenCount <= 4 && overlap.shared >= 1) grounded = true;
 
   if (kind === "captured" && item.serviceKey) {
-    if (detectors.detectServices(source, project).includes(item.serviceKey)) return true;
+    if (detectors.detectServices(source, project).includes(item.serviceKey)) grounded = true;
     // A short answer such as "great" or "not up to mark" refers to the
     // service in the pending question even when it does not repeat its name.
     const sourceSentiment = detectors.detectSentiment(source);
     if (sourceTokenCount <= 6 && sourceSentiment !== "neutral"
-      && sourceSentiment === item.sentiment) return true;
+      && sourceSentiment === item.sentiment) grounded = true;
   }
 
-  if (kind === "appreciation" && phraseAppearsInReply(source, item.subject)) return true;
-  return false;
+  if (kind === "appreciation" && phraseAppearsInReply(source, item.subject)) grounded = true;
+  if (!grounded) return null;
+
+  const result = { ...item };
+  if (kind === "observation") result.topic = groundedObservationTopic(source, item);
+  if (kind === "concern" && !item.serviceKey) result.title = groundedObservationTopic(source, item);
+  return result;
+}
+
+function groundLatestReplyInterpretation(interpretation, text, project = {}) {
+  if (!interpretation) return null;
+  const captured = (interpretation.captured || [])
+    .map((item) => groundModelFact("captured", item, text, project))
+    .filter(Boolean);
+  const observations = (interpretation.observations || [])
+    .map((item) => groundModelFact("observation", item, text, project))
+    .filter(Boolean);
+  const concerns = (interpretation.concerns || [])
+    .map((item) => groundModelFact("concern", item, text, project))
+    .filter(Boolean);
+  const appreciations = (interpretation.appreciations || [])
+    .map((item) => groundModelFact("appreciation", item, text, project))
+    .filter(Boolean);
+  const serviceKeys = [...new Set([
+    ...captured.map((item) => item.serviceKey),
+    ...concerns.map((item) => item.serviceKey),
+    ...detectors.detectServices(text, project)
+  ].filter(Boolean))];
+  const hasGroundedObservation = observations.length > 0
+    || concerns.some((item) => !item.serviceKey);
+
+  return {
+    ...interpretation,
+    serviceKeys,
+    captured,
+    observations,
+    concerns,
+    appreciations,
+    isObservation: interpretation.isObservation === true && hasGroundedObservation
+  };
 }
 
 function fallbackRoleAppreciations(text, project = {}) {
@@ -1622,9 +1754,13 @@ function enrichConductedWithDeterministicFacts(
   { protectSubstantiveConcern = false, allowLanguageOnly = false } = {}
 ) {
   interpretation = interpretation || {};
-  conducted.captured = Array.isArray(conducted.captured) ? conducted.captured : [];
-  conducted.observations = Array.isArray(conducted.observations) ? conducted.observations : [];
-  conducted.appreciations = Array.isArray(conducted.appreciations) ? conducted.appreciations : [];
+  // The conductor writes the reply; it is not an evidence source. Discard all
+  // facts it generated from transcript context and rebuild exclusively from
+  // the latest-reply interpretation plus deterministic facts found in the
+  // latest client text. This deliberately removes the cross-model fact merge.
+  conducted.captured = [];
+  conducted.observations = [];
+  conducted.appreciations = [];
 
   // A score or an explicit "nothing / move on" response contains no new
   // narrative facts. Neither model is allowed to attach an observation,
@@ -1638,33 +1774,21 @@ function enrichConductedWithDeterministicFacts(
     return conducted;
   }
 
-  // Do not let the response-writing pass originate an ungrounded fact either.
-  // It sees transcript and prompt examples, both of which are useful context
-  // for wording but are not evidence that the latest client reply said it.
-  conducted.captured = conducted.captured.filter((item) =>
-    modelFactGroundedInReply("captured", item, text, project));
-  conducted.observations = conducted.observations.filter((item) =>
-    modelFactGroundedInReply("observation", item, text, project));
-  conducted.appreciations = conducted.appreciations.filter((item) =>
-    modelFactGroundedInReply("appreciation", item, text, project));
-
-  // A normal turn has two model reads: one interprets the client's meaning and
-  // one writes the response. Facts found by the first read must not disappear
-  // merely because the second read omitted them from its JSON arrays. Merge
-  // them before the checklist decides what remains open. This works by
-  // semantic type and service key, not by a list of issue-specific phrases.
-  // Every merged item must also be grounded in the latest client reply.
+  // The interpretation pass reads only the current question and latest client
+  // reply. It is the sole model source for facts, and every fact is grounded
+  // again before it can alter session state.
   for (const item of interpretation.captured || []) {
-    if (!modelFactGroundedInReply("captured", item, text, project)) continue;
-    const existing = conducted.captured.find((candidate) => candidate.serviceKey === item.serviceKey);
+    const grounded = groundModelFact("captured", item, text, project);
+    if (!grounded) continue;
+    const existing = conducted.captured.find((candidate) => candidate.serviceKey === grounded.serviceKey);
     if (!existing) {
-      conducted.captured.push({ ...item });
+      conducted.captured.push(grounded);
       continue;
     }
-    if (item.sentiment === "negative") existing.sentiment = "negative";
-    if (!String(existing.summary || "").trim()) existing.summary = item.summary;
-    if (item.needsFollowUp === true) existing.needsFollowUp = true;
-    if (item.declined === true) existing.declined = true;
+    if (grounded.sentiment === "negative") existing.sentiment = "negative";
+    if (!String(existing.summary || "").trim()) existing.summary = grounded.summary;
+    if (grounded.needsFollowUp === true) existing.needsFollowUp = true;
+    if (grounded.declined === true) existing.declined = true;
   }
 
   const mergeObservation = (candidate) => {
@@ -1686,65 +1810,70 @@ function enrichConductedWithDeterministicFacts(
   };
 
   for (const item of interpretation.observations || []) {
-    if (modelFactGroundedInReply("observation", item, text, project)) mergeObservation(item);
+    const grounded = groundModelFact("observation", item, text, project);
+    if (grounded) mergeObservation(grounded);
   }
   for (const concern of interpretation.concerns || []) {
     if (concern?.sentiment !== "negative") continue;
-    if (!modelFactGroundedInReply("concern", concern, text, project)) continue;
-    if (concern.serviceKey) {
-      const existing = conducted.captured.find((item) => item.serviceKey === concern.serviceKey);
+    const grounded = groundModelFact("concern", concern, text, project);
+    if (!grounded) continue;
+    if (grounded.serviceKey) {
+      const existing = conducted.captured.find((item) => item.serviceKey === grounded.serviceKey);
       if (existing) {
         existing.sentiment = "negative";
-        if (!String(existing.summary || "").trim()) existing.summary = concern.summary;
-        if (concern.needsFollowUp === true) existing.needsFollowUp = true;
+        if (!String(existing.summary || "").trim()) existing.summary = grounded.summary;
+        if (grounded.needsFollowUp === true) existing.needsFollowUp = true;
       } else {
         conducted.captured.push({
-          serviceKey: concern.serviceKey,
+          serviceKey: grounded.serviceKey,
           sentiment: "negative",
-          summary: concern.summary,
+          summary: grounded.summary,
           declined: false,
-          needsFollowUp: concern.needsFollowUp === true
+          needsFollowUp: grounded.needsFollowUp === true
         });
       }
     } else {
       mergeObservation({
-        topic: concern.title || "Management Feedback",
-        detail: concern.summary,
+        topic: grounded.title || "Management Feedback",
+        detail: grounded.summary,
         sentiment: "negative",
-        severity: concern.severity || "watch",
-        needsFollowUp: concern.needsFollowUp === true,
+        severity: grounded.severity || "watch",
+        needsFollowUp: grounded.needsFollowUp === true,
         kind: "feedback"
       });
     }
   }
 
   for (const item of interpretation.appreciations || []) {
-    if (!modelFactGroundedInReply("appreciation", item, text, project)) continue;
+    const grounded = groundModelFact("appreciation", item, text, project);
+    if (!grounded) continue;
     const existing = conducted.appreciations.find((candidate) => {
-      const overlap = contentOverlap(candidate.detail, item.detail);
-      return (candidate.subject === item.subject && overlap.shared >= 2)
+      const overlap = contentOverlap(candidate.detail, grounded.detail);
+      return (candidate.subject === grounded.subject && overlap.shared >= 2)
         || overlap.shared >= 4
         || overlap.ratio >= 0.6;
     });
-    if (!existing) conducted.appreciations.push({ ...item });
+    if (!existing) conducted.appreciations.push(grounded);
   }
-
-  const alreadyTracksConcern = conducted.captured.some((item) => item.sentiment === "negative")
-    || conducted.observations.some((item) => item.kind !== "appreciation" && item.sentiment === "negative");
 
   const groundedInterpretation = {
     ...interpretation,
-    observations: (interpretation.observations || []).filter((item) =>
-      modelFactGroundedInReply("observation", item, text, project)),
-    concerns: (interpretation.concerns || []).filter((item) =>
-      modelFactGroundedInReply("concern", item, text, project))
+    observations: (interpretation.observations || [])
+      .map((item) => groundModelFact("observation", item, text, project))
+      .filter(Boolean),
+    concerns: (interpretation.concerns || [])
+      .map((item) => groundModelFact("concern", item, text, project))
+      .filter(Boolean)
   };
 
-  const deterministicObservation = fallbackDeliveryObservation(text)
+  const deterministicObservation = observationFromInterpretation(groundedInterpretation, text)
+    || fallbackDeliveryObservation(text)
     || (protectSubstantiveConcern
       ? fallbackGeneralConcernObservation(text, groundedInterpretation, {
           allowLanguageOnly,
-          modelAcknowledgedConcern: !alreadyTracksConcern && responseAcknowledgesConcern(conducted.text)
+          // Response wording is never evidence. A model apology cannot create
+          // a concern that the client's latest reply did not contain.
+          modelAcknowledgedConcern: false
         })
       : null);
   if (deterministicObservation) {
@@ -1835,7 +1964,7 @@ function applyDeferredInterpretation(turn, stateBefore, interpretation, text, pr
     name: service.name
   }));
   const validKeys = new Set(serviceList.map((service) => service.serviceKey));
-  const interpretedCaptures = Array.isArray(interpretation?.captured)
+  let interpretedCaptures = Array.isArray(interpretation?.captured)
     ? interpretation.captured.map((item) => ({ ...item }))
     : [];
   const source = String(text || "");
@@ -1881,9 +2010,14 @@ function applyDeferredInterpretation(turn, stateBefore, interpretation, text, pr
       }
     }
   }
+  interpretedCaptures = interpretedCaptures
+    .map((item) => groundModelFact("captured", item, text, project))
+    .filter(Boolean);
 
   let observations = Array.isArray(interpretation?.observations)
-    ? interpretation.observations.map((item) => ({ ...item }))
+    ? interpretation.observations
+      .map((item) => groundModelFact("observation", item, text, project))
+      .filter(Boolean)
     : [];
   if (!observations.length) {
     const legacyObservation = observationFromInterpretation(interpretation, text);
@@ -1910,7 +2044,9 @@ function applyDeferredInterpretation(turn, stateBefore, interpretation, text, pr
   }
 
   const appreciations = Array.isArray(interpretation?.appreciations)
-    ? interpretation.appreciations.map((item) => ({ ...item }))
+    ? interpretation.appreciations
+      .map((item) => groundModelFact("appreciation", item, text, project))
+      .filter(Boolean)
     : extractExplicitAppreciations(text, serviceList);
   const conducted = {
     captured: groundMultiServiceCaptures(
@@ -3118,7 +3254,17 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   // Ask Gemini what the client MEANT, then run the same turn again with that
   // interpretation. Gemini reads intent; the state machine still decides.
   let interpretation = null;
-  if (turn.needsInterpretation || (manualContext && !turn.control?.optOut && !turn.control?.handoff)) {
+  // Every substantive narrative needs one latest-reply extraction pass. The
+  // conductor may see transcript for conversational wording, but its facts are
+  // ignored. Without this read, an apparently "unambiguous" long complaint had
+  // no authoritative facts and the response model became the de-facto source.
+  const needsNarrativeInterpretation = turn.control?.allowAiRephrase === true
+    && !factFreeControlReply(text)
+    && !turn.control?.optOut
+    && !turn.control?.handoff;
+  if (turn.needsInterpretation
+    || needsNarrativeInterpretation
+    || (manualContext && !turn.control?.optOut && !turn.control?.handoff)) {
     const lastQuestion = latestSrvMessage;
     const read = await interpretReply({
       project,
@@ -3135,7 +3281,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     // "PPC is not working well" as PPC, negative, unexplained — all correct —
     // and still be unsure what kind of reply it is. Discarding the whole
     // response over one field threw away everything it understood.
-    interpretation = read.source === "gemini" ? read : null;
+    interpretation = read.source === "gemini"
+      ? groundLatestReplyInterpretation(read, text, project)
+      : null;
 
     // Rewind to exactly where the turn started before running it again.
     turn = processWhatsAppReply({
@@ -3219,12 +3367,11 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       messages: transcript
     });
 
-    if (conducted.text && conducted.deferRequested === true) {
-      suppressBroadOverallServiceGuess(conducted, interpretation, text, project);
-      // The conductor is also the first model read for messages whose service
-      // feedback was obvious but whose postponement wording was unfamiliar to
-      // the rules. Rebuild from the pre-turn snapshot so no draft next-question
-      // markers are persisted, then keep every extracted fact and pause.
+    if (conducted.text && interpretation?.deferRequested === true) {
+      // Deferral is a fact about the client's latest message. The dedicated
+      // interpretation pass may supply it; the response-writing pass may not.
+      // Rebuild from the pre-turn snapshot so no draft next-question markers
+      // are persisted, then keep only grounded interpretation facts and pause.
       turn.conversationState = getConversationState({
         ...session,
         conversationState: JSON.parse(JSON.stringify(stateBefore))
@@ -3244,16 +3391,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         stateBefore,
         {
           ...(interpretation || {}),
-          intent: (conducted.captured.length || conducted.observations.length || conducted.appreciations.length)
-            ? "feedback"
-            : "defer",
-          deferRequested: true,
-          serviceScope: conducted.serviceScope,
-          rating: conducted.overallRating,
-          serviceKeys: conducted.captured.map((item) => item.serviceKey),
-          captured: conducted.captured,
-          observations: conducted.observations,
-          appreciations: conducted.appreciations
+          deferRequested: true
         },
         text,
         project
@@ -3301,6 +3439,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
           allowLanguageOnly: pendingQuestionTypeFor(stateBefore) === "final_sweep"
         }
       );
+      const latestReplyCorrects = /\b(?:actually|correction|correct(?:ion|ed)?|instead|rather than|i (?:said|meant)|change|revise|update|replace)\b/i.test(text);
+      conducted.corrects = latestReplyCorrects;
       ensureClientAppreciations(conducted, stateBefore, text, project);
       separateAppreciations(conducted);
       for (const observation of conducted.observations || []) {
@@ -3387,6 +3527,20 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // selects the next action; outgoing-question markers are accepted only
       // when they match that action.
       const answerMarkers = validatedAnswerMarkers(stateBefore, conducted, text, interpretation);
+      const suppliedFinalSweepFeedback = pendingQuestionTypeFor(stateBefore) === "final_sweep"
+        && Boolean(
+          (conducted.captured || []).length
+          || (conducted.observations || []).length
+          || (conducted.appreciations || []).length
+        );
+      if (suppliedFinalSweepFeedback && answerMarkers.answeredAnythingElse !== true) {
+        // Defence in depth: the preliminary rule pass must not be able to leave
+        // a stale completion flag behind. Detailed feedback is acknowledged,
+        // then the client gets one final inclusive opportunity to add more.
+        turn.conversationState.askedForAnythingElse = true;
+        turn.conversationState.anythingElseAnswered = false;
+        turn.conversationState.pendingQuestionType = "final_sweep";
+      }
       applyTurnProgress(turn.conversationState, project, answerMarkers, { recordAsked: false });
       normalizeLegacyServiceFollowups(turn.conversationState);
       const checklistAfterCapture = buildChecklist(turn.conversationState, project);
@@ -3407,10 +3561,18 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         && /\b(?:look into|review|work on|share (?:this|it) with|take this forward)\b/i.test(conducted.text);
       const needsAppreciationAcknowledgement = Boolean(conducted.appreciations?.length)
         && !responseAcknowledgesAppreciation(conducted.text);
+      const unsupportedResponseTopic = responseIntroducesUnsupportedTopic(
+        conducted.text,
+        text,
+        project,
+        conducted,
+        requiredAction
+      );
       const machineWordedAction = (needsConcernAcknowledgement && !hasConcernAcknowledgement)
         || (requiredAction.type === "observation_followup"
           && ["Billing", "Senior Involvement"].includes(requiredAction.topic))
-        || needsAppreciationAcknowledgement;
+        || needsAppreciationAcknowledgement
+        || unsupportedResponseTopic;
 
       if (actionRejected || machineWordedAction) {
         if (actionRejected) {
@@ -3477,7 +3639,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // the outstanding question. The model ended a conversation after one
       // service with "Have a great day ahead!" — the client reasonably read
       // that as the end, and the cycle closed with no rating and no score.
-      const wantsToLeave = soundsLikeFarewell(conducted.text) || conducted.readyToClose;
+      const wantsToLeave = soundsLikeFarewell(conducted.text);
       if (!covered && wantsToLeave) {
         const services = Object.values(turn.conversationState.mentionedServices || {});
         const uncovered = (project.services || [])
@@ -3507,30 +3669,34 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // malformed JSON, a promise, too long. Apologising for not following
       // something it read perfectly is the worst of both worlds. Ask whatever
       // is still outstanding, plainly.
-      const interpretedObservation = observationFromInterpretation(interpretation, text);
-      const deterministicObservation = interpretedObservation || fallbackDeliveryObservation(text);
-      if (deterministicObservation) {
-        deterministicObservation.topic = canonicalObservationTopic(deterministicObservation, text);
-      }
-      const serviceList = (project.services || []).map((service) => ({
-        serviceKey: service.serviceKey,
-        name: service.name
-      }));
       const fallbackConducted = {
-        captured: groundMultiServiceCaptures([], text, project, stateBefore),
-        observations: deterministicObservation ? [deterministicObservation] : [],
-        appreciations: [
-          ...extractExplicitAppreciations(text, serviceList),
-          ...fallbackRoleAppreciations(text, project)
-        ]
+        text: "",
+        captured: [],
+        observations: [],
+        appreciations: []
       };
+      enrichConductedWithDeterministicFacts(
+        fallbackConducted,
+        text,
+        project,
+        interpretation,
+        {
+          protectSubstantiveConcern: true,
+          allowLanguageOnly: pendingQuestionTypeFor(stateBefore) === "final_sweep"
+        }
+      );
       ensureClientAppreciations(fallbackConducted, stateBefore, text, project);
       separateAppreciations(fallbackConducted);
+      for (const observation of fallbackConducted.observations || []) {
+        if (observation.kind !== "appreciation") {
+          observation.topic = canonicalObservationTopic(observation, text);
+        }
+      }
 
       // An observation must not mutate a nearby service merely because the
       // preliminary keyword pass saw "creative" or "meeting". Restore the
       // pre-turn service state, then apply only grounded deterministic facts.
-      if (deterministicObservation) {
+      if ((fallbackConducted.observations || []).some((item) => item.kind !== "appreciation")) {
         turn.conversationState.mentionedServices = JSON.parse(JSON.stringify(
           stateBefore.mentionedServices || {}
         ));
@@ -3561,7 +3727,23 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         fallbackConducted,
         text
       );
+      settleActionableFinalSweepFacts(
+        turn.conversationState,
+        stateBefore,
+        fallbackConducted
+      );
       const answerMarkers = validatedAnswerMarkers(stateBefore, fallbackConducted, text, interpretation);
+      const suppliedFinalSweepFeedback = pendingQuestionTypeFor(stateBefore) === "final_sweep"
+        && Boolean(
+          (fallbackConducted.captured || []).length
+          || (fallbackConducted.observations || []).length
+          || (fallbackConducted.appreciations || []).length
+        );
+      if (suppliedFinalSweepFeedback && answerMarkers.answeredAnythingElse !== true) {
+        turn.conversationState.askedForAnythingElse = true;
+        turn.conversationState.anythingElseAnswered = false;
+        turn.conversationState.pendingQuestionType = "final_sweep";
+      }
       applyTurnProgress(turn.conversationState, project, answerMarkers, { recordAsked: false });
       normalizeLegacyServiceFollowups(turn.conversationState);
 
@@ -7519,6 +7701,10 @@ module.exports = {
     fallbackDeliveryObservation,
     fallbackGeneralConcernObservation,
     fallbackRoleAppreciations,
+    groundedObservationTopic,
+    groundModelFact,
+    groundLatestReplyInterpretation,
+    responseIntroducesUnsupportedTopic,
     fallbackQuickCheckinConcerns,
     enrichConductedWithDeterministicFacts,
     enrichQuickCheckinInterpretation,
@@ -7736,11 +7922,11 @@ function quickCheckinConcernCategory(item) {
   if (/\b(?:rework|implementation|creative process|delivery process)\b/.test(title)) return "process";
 
   const source = `${title} ${item?.summary || ""}`.toLowerCase();
+  if (/\b(?:report\w*|data|profile|visibility|information|insight\w*)\b/.test(source)) return "reporting";
   if (/\b(?:campaign|applicants?|leads?|traction|attention|outcomes?|results?)\b/.test(source)
     && /\b(?:below|poor|weak|low|disappoint|not|outcomes?|results?|traction|attention|applicants?|leads?)\b/.test(source)) {
     return "campaign_outcomes";
   }
-  if (/\b(?:report\w*|data|profile|visibility|information|insight\w*)\b/.test(source)) return "reporting";
   if (/\b(?:ownership|proactiv\w*|initiative|interest|course correction|change course|analyse|analyze)\b/.test(source)) return "ownership";
   if (/\b(?:delay\w*|late|slow|turnaround|deadline|overdue|pending)\b/.test(source)) return "delay";
   if (/\b(?:communication|coordination|updates?|responses?|follow[- ]?up|alignment)\b/.test(source)) return "communication";
@@ -7749,6 +7935,11 @@ function quickCheckinConcernCategory(item) {
 }
 
 function enrichQuickCheckinInterpretation(text, project, interpretation = {}) {
+  interpretation = groundLatestReplyInterpretation(interpretation || {}, text, project) || {};
+  // Quick Check-in has no conductor pass, but model labels still need the same
+  // latest-message evidence rule. In particular, normalize an unsupported
+  // observation title instead of letting an old prompt/transcript topic become
+  // a management issue.
   const modelUnavailable = interpretation.source === "fallback"
     || Boolean(interpretation.error)
     || !interpretation.intent;

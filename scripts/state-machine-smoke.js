@@ -1703,6 +1703,119 @@ scenario("Switching services does not attach the new complaint to the old servic
     "PPC feedback must not be appended to Design notes");
 });
 
+scenario("Detailed final-sweep feedback is recorded without immediately closing", () => {
+  const turn = processWhatsAppReply({
+    session: {
+      ...newSession("project_end"),
+      conversationState: {
+        state: STATES.WAITING_FOR_MORE_SERVICES,
+        sessionType: "project_end",
+        pendingQuestionType: "final_sweep",
+        askedForAnythingElse: true,
+        anythingElseAnswered: false,
+        projectEndReviewCaptured: true,
+        serviceScopeStatus: SERVICE_SCOPE_DECISIONS.OVERALL_FEEDBACK,
+        overallRatingAsked: true,
+        overallRating: 9,
+        npsScore: 10,
+        mentionedServices: {},
+        turnCount: 5
+      }
+    },
+    project,
+    poc,
+    text: "The execution was generally strong, although agreed changes sometimes required repeated follow-ups before they were applied consistently.",
+    interpretation: {
+      source: "gemini",
+      intent: "feedback",
+      sentiment: "negative",
+      rating: null,
+      serviceKeys: [],
+      explainsProblem: true,
+      isObservation: true
+    },
+    geminiUnavailable: false
+  });
+  assert.strictEqual(turn.conversationState.anythingElseAnswered, false,
+    "substantive feedback must not be treated as permission to finish");
+  assert.notStrictEqual(turn.conversationState.state, STATES.CLOSING_GRACE,
+    "the detailed feedback must be acknowledged before the closing window begins");
+});
+
+scenario("Semantic completion wording can finish the final Directors question", () => {
+  for (const text of [
+    "Everything important has been covered from my side.",
+    "We can wrap this up now, thank you.",
+    "I do not have anything further to add at present."
+  ]) {
+    const turn = processWhatsAppReply({
+      session: {
+        ...newSession("project_end"),
+        conversationState: {
+          state: STATES.WAITING_FOR_MORE_SERVICES,
+          sessionType: "project_end",
+          pendingQuestionType: "final_sweep",
+          askedForAnythingElse: true,
+          anythingElseAnswered: false,
+          projectEndReviewCaptured: true,
+          serviceScopeStatus: SERVICE_SCOPE_DECISIONS.OVERALL_FEEDBACK,
+          overallRatingAsked: true,
+          overallRating: 9,
+          npsScore: 10,
+          mentionedServices: {},
+          turnCount: 5
+        }
+      },
+      project,
+      poc,
+      text,
+      interpretation: {
+        source: "gemini",
+        intent: "negative",
+        sentiment: "neutral",
+        rating: null,
+        serviceKeys: [],
+        explainsProblem: false,
+        isObservation: false
+      },
+      geminiUnavailable: false
+    });
+    assert.strictEqual(turn.conversationState.anythingElseAnswered, true, text);
+  }
+});
+
+scenario("A pasted conversation in the correction window is not mined for a new score", () => {
+  const transcript = [
+    "Thank you for the 9 out of 10 rating.",
+    "How likely are you to recommend SRV Media?",
+    "10",
+    "I want to explain another process concern before this closes."
+  ].join(" ");
+  const turn = processWhatsAppReply({
+    session: {
+      ...newSession("project_end"),
+      conversationState: {
+        state: STATES.CLOSING_GRACE,
+        sessionType: "project_end",
+        overallRatingAsked: true,
+        overallRating: 9,
+        npsScore: 10,
+        askedForAnythingElse: true,
+        anythingElseAnswered: true,
+        closingGraceExpiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        mentionedServices: {}
+      }
+    },
+    project,
+    poc,
+    text: transcript,
+    geminiUnavailable: true
+  });
+  assert.strictEqual(turn.conversationState.overallRating, 9);
+  assert.strictEqual(turn.conversationState.npsScore, 10);
+  assert.notStrictEqual(turn.control.guardrail, GUARDRAILS.INVALID_RATING);
+});
+
 scenario("G11 'Hello' creates no service, no score, no alert", () => {
   const { last } = run(newSession(), ["Hello"]);
   assert.deepStrictEqual(Object.keys(last.conversationState.mentionedServices), []);

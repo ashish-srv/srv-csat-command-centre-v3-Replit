@@ -1872,7 +1872,28 @@ function processWhatsAppReply({
     const graceIsOpen = Number.isFinite(expiresAt) && expiresAt > Date.now();
 
     if (graceIsOpen) {
-      const ratingRead = detectRatingCorrection(text);
+      const asksRecordedRating = /\b(what|which)\b.{0,20}\b(take|took|record(?:ed)?|rating|score)\b/i.test(text)
+        || /\bwhat did (?:you|u) take\b/i.test(text);
+      const signalsCorrection = /\b(sorry|mistake|correct(?:ion|ed)?|change|revise|update|set|instead|rather than|make that|take|record|use|actually|i said|i meant|should be)\b/i.test(text);
+      const refersToRecommendation = conversationState.sessionType === "project_end"
+        && /\b(?:recommend|recommendation|nps|network)\w*\b/i.test(text);
+      const wordCount = String(text || "").trim().split(/\s+/).filter(Boolean).length;
+      const numericMentions = String(text || "").match(/\b(?:10|[0-9](?:\.\d+)?)\b/g) || [];
+      const looksLikePastedExchange = wordCount > 15
+        && numericMentions.length >= 2
+        && /\?|\b(?:thank you|you said|bot|client|reply|asked|conversation)\b/i.test(text);
+      const ratingDirected = !looksLikePastedExchange && wordCount <= 45 && (
+        looksLikeRatingAnswer(text)
+        || asksRecordedRating
+        || signalsCorrection
+        || (refersToRecommendation
+          && wordCount <= 20
+          && /\d|zero|one|two|three|four|five|six|seven|eight|nine|ten/i.test(text))
+      );
+      // Do not mine scores out of a pasted conversation, email or long piece
+      // of feedback. Rating correction applies only when the latest message is
+      // itself a concise, clearly rating-directed reply.
+      const ratingRead = ratingDirected ? detectRatingCorrection(text) : null;
       const normalizedRating = ratingRead && ratingRead.scale === 5
         ? ratingRead.value * 2
         : ratingRead?.value;
@@ -1880,14 +1901,9 @@ function processWhatsAppReply({
         && normalizedRating >= 0
         && normalizedRating <= 10
         && (!ratingRead.scale || ratingRead.scale === 5 || ratingRead.scale === 10);
-      const asksRecordedRating = /\b(what|which)\b.{0,20}\b(take|took|record(?:ed)?|rating|score)\b/i.test(text)
-        || /\bwhat did (?:you|u) take\b/i.test(text);
-      const signalsCorrection = /\b(sorry|mistake|correct(?:ion|ed)?|change|revise|update|set|instead|rather than|make that|take|record|use|actually|i said|i meant|should be)\b/i.test(text);
       const correctionNumberLooksRelevant = !/\b(?:day|days|week|weeks|month|months|meeting|meetings|campaign|campaigns|lead|leads|report|reports)\b/i.test(text)
         || Boolean(ratingRead?.scale)
         || /\b(?:rating|raiting|score|csat|rate)\b/i.test(text);
-      const refersToRecommendation = conversationState.sessionType === "project_end"
-        && /\b(?:recommend|recommendation|nps|network)\w*\b/i.test(text);
       const validNps = ratingRead
         && ratingRead.value >= 0
         && ratingRead.value <= 10
@@ -1929,7 +1945,7 @@ function processWhatsAppReply({
         });
       }
 
-      if (asksRecordedRating || signalsCorrection) {
+      if (ratingDirected && (asksRecordedRating || signalsCorrection)) {
         const recorded = conversationState.overallRating;
         return plainTurn({
           conversationState, project, poc, text, guardrails,
@@ -2596,13 +2612,15 @@ function processWhatsAppReply({
   // captured something. "geminiUnavailable" permits fallback matching; it must
   // never stand in for comprehension, or an unreadable reply gets silently
   // accepted and the client is asked the same question forever.
+  // Substantive feedback answers the content of the Directors question, but it
+  // is not permission to end the conversation immediately. Record and
+  // acknowledge the point, then offer one inclusive "anything else?" opening.
+  // Only a genuine completion response closes that opening. The API conductor
+  // applies the newly supplied facts before asking it again.
   const answeredFinalSweep = answeredQuestionType === "final_sweep" && (
     isMoveOnReply(text)
     || soundsLikeFarewell(text)
     || said.no
-    || interpretation?.intent === "feedback"
-    || interpretation?.isObservation === true
-    || detectedServiceKeys.length > 0
   );
   if (answeredFinalSweep) {
     conversationState.askedForAnythingElse = true;

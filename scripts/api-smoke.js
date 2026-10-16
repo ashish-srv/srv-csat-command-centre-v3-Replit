@@ -1786,7 +1786,7 @@ async function scenario(name, fn) {
     }
   });
 
-  await scenario("the existing conductor call catches a defer missed by the first interpretation", async () => {
+  await scenario("the response-writing call cannot invent a defer missed by the interpretation", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorFetch = global.fetch;
     const priorMessages = [...calls.messages];
@@ -1866,12 +1866,13 @@ async function scenario(name, fn) {
       assert.strictEqual(res.statusCode, 201);
       assert.strictEqual(modelCalls, 2,
         "this uses the normal interpretation plus conductor calls, not an added third call");
-      assert.match(payload.whatsappReplyText, /take your time/i);
+      assert.doesNotMatch(payload.whatsappReplyText, /take your time/i,
+        "only the latest-reply interpretation may pause a session");
       assert.doesNotMatch(payload.whatsappReplyText, /logged/i);
       assert.strictEqual(store._session.conversationState.mentionedServices.ppc.sentiment, "positive");
-      assert.strictEqual(store._session.conversationState.pendingQuestionType, "service");
+      assert.strictEqual(store._session.conversationState.pendingQuestionType, "service_followup");
       assert.strictEqual(store._session.conversationState.pendingServiceKey, "ppc");
-      assert.ok(store._session.conversationState.deferredAt);
+      assert.strictEqual(store._session.conversationState.deferredAt, undefined);
     } finally {
       global.fetch = priorFetch;
       if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
@@ -6999,7 +7000,7 @@ async function scenario(name, fn) {
     assert.strictEqual(conducted.observations[0].needsFollowUp, false);
   });
 
-  await scenario("facts from either successful Gemini read survive across unrelated topics", async () => {
+  await scenario("facts from the authoritative latest-reply read survive across unrelated topics", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const cases = [
       {
@@ -7086,7 +7087,7 @@ async function scenario(name, fn) {
     }
   });
 
-  await scenario("a usable Gemini acknowledgement cannot close over an unstructured concern", async () => {
+  await scenario("response wording cannot manufacture a client concern", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const text = "The cohort model assigns converted leads to the preceding source, so the report leads us toward the opposite channel decision.";
     const conducted = {
@@ -7101,27 +7102,29 @@ async function scenario(name, fn) {
       conducted, text, project, interpretation,
       { protectSubstantiveConcern: true }
     );
-    assert.strictEqual(conducted.observations.length, 1,
-      "the model's own concern acknowledgement must create an open fact even for an unfamiliar topic");
+    assert.strictEqual(conducted.observations.length, 0,
+      "an apology written by the response model must not become evidence that the client raised a concern");
 
-    for (const pendingQuestionType of ["project_end_review", "service_scope", "overall_rating", "nps", "final_sweep"]) {
-      const state = { pendingQuestionType, pendingObservation: null };
-      conversationFlow.applyConversationInterruption(
-        state, { ...state }, interpretation, conducted, text
-      );
-      const action = conversationFlow.requiredConversationAction({
-        servicesWhereWeStillDoNotKnowWhatIsWrongWithKeys: [],
-        servicesWaitingForAnythingElseAnswer: [],
-        servicesNotYetDiscussedWithKeys: [],
-        projectEndReviewStillNeeded: false,
-        serviceScopeChoiceStillNeeded: false,
-        overallRatingStillNeeded: false,
-        npsStillNeeded: false
-      }, state);
-      assert.notStrictEqual(action.type, "close",
-        `${pendingQuestionType}: checklist closed over a concern`);
-      assert.strictEqual(action.type, "observation_followup");
-    }
+    const state = {
+      pendingQuestionType: "final_sweep",
+      pendingObservation: null,
+      askedForAnythingElse: true,
+      anythingElseAnswered: false
+    };
+    conversationFlow.applyConversationInterruption(
+      state, { ...state }, interpretation, conducted, text
+    );
+    const action = conversationFlow.requiredConversationAction({
+      servicesWhereWeStillDoNotKnowWhatIsWrongWithKeys: [],
+      servicesWaitingForAnythingElseAnswer: [],
+      servicesNotYetDiscussedWithKeys: [],
+      projectEndReviewStillNeeded: false,
+      serviceScopeChoiceStillNeeded: false,
+      overallRatingStillNeeded: false,
+      npsStillNeeded: false
+    }, state);
+    assert.strictEqual(action.type, "final_sweep",
+      "an ungrounded response must leave the inclusive Directors question open, not close or invent a topic");
 
     const positive = {
       text: "Thank you for the kind words. We will share them with the team.",
@@ -7136,6 +7139,42 @@ async function scenario(name, fn) {
     );
     assert.strictEqual(positive.observations.length, 0,
       "positive feedback must not be converted into a concern by the fail-safe");
+  });
+
+  await scenario("latest-message grounding rejects fabricated labels and preserves real design feedback", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const text = "I want to talk about one more issue regarding design.";
+    const interpreted = conversationFlow.groundLatestReplyInterpretation({
+      source: "gemini",
+      intent: "feedback",
+      sentiment: "neutral",
+      observations: [{
+        topic: "Senior Involvement",
+        detail: text,
+        sentiment: "neutral",
+        severity: "info",
+        needsFollowUp: true,
+        kind: "feedback"
+      }],
+      concerns: [],
+      captured: [],
+      appreciations: []
+    }, text, project);
+    assert.strictEqual(interpreted.observations.length, 1);
+    assert.strictEqual(interpreted.observations[0].topic, "Creative Process",
+      "a fabricated label must be replaced by a topic grounded in the latest reply");
+
+    const conducted = {
+      text: "I am sorry to hear about Senior Involvement. What happened with Senior Involvement?",
+      captured: [], observations: [], appreciations: []
+    };
+    conversationFlow.enrichConductedWithDeterministicFacts(
+      conducted, text, project, interpreted,
+      { protectSubstantiveConcern: true, allowLanguageOnly: true }
+    );
+    assert.ok(conversationFlow.responseIntroducesUnsupportedTopic(
+      conducted.text, text, project, conducted, { type: "observation_reason", topic: "Creative Process" }
+    ), "an outgoing reply must not introduce an unsupported senior-involvement topic");
   });
 
   await scenario("rating and move-on replies cannot inherit fabricated observations", async () => {
