@@ -1,0 +1,94 @@
+# Feedback Conversation Regression Coverage
+
+## Scope
+
+These changes retain the latest-reply interpretation as the only model source
+for conversational facts. The response-writing pass cannot contribute facts
+from older transcript messages. The broader cross-model merge stays removed.
+
+Approved changes are limited to progression, completion, postponement and
+acknowledgements. Existing CSAT/NPS separation, current-message grounding,
+automatic-reply detection, ten-minute windows and handoff delivery checks remain
+covered. No schema migration or n8n workflow change is required for this update.
+
+## Historical Conversation Families
+
+| Shared conversation or failure | Regression coverage |
+| --- | --- |
+| Vinay: revise rating, typos, repeated corrections | Separate score streams, latest correction wins, no stale score restoration |
+| Vinay: landing-page/video appreciation; unnamed account manager | Appreciation is acknowledged; ask once for a person's name, not for every praised team |
+| Sukhwinder: overall agency praise | Acknowledge the broad review, proceed to CSAT; no missed-department question |
+| Shravya/Aashish: CSAT 9, NPS 10, long mixed feedback | Preserve both scores, actual process concerns and named POC praise; do not reopen every mentioned service |
+| Aashish: bare NPS answer imports Senior Involvement | Reject narrative facts not grounded in the current reply; response writer is not an evidence source |
+| Aashish: spend report during ratings or closing window | Save the reporting request, do not turn it into a rating correction or meeting request; offer a feedback-to-rating choice if a score is still pending |
+| Aashish: five improvement points plus YOY praise | Retain distinct points and praise; preserve original closing deadline and CSAT/NPS |
+| Aashish: pasted question/transcript | Do not accept a copied survey question as feedback or mine a pasted conversation for a new score |
+| Arun: detailed campaign/staffing complaints and repeated additions | Acknowledge and retain additional facts without repeating a service interview; continue to unanswered ratings |
+| Arun: account managers "were busy" | Past/third-party availability is not the client's request to postpone |
+| Arun: feedback is sufficient | Finish feedback questions, preserve concerns, do not assume an unanswered rating was declined |
+| Yuvraj: CSAT 5, NPS 0, "Don't hire interns" | Preserve a real zero; acknowledge the staffing concern rather than repeating the final question unchanged |
+| Swati: Share feedback, Okay, meeting reference | Do not start the ten-minute window from acknowledgement or a reference lacking actual feedback |
+| Smitu: campaign traction, applicant profiles and ownership | Replay the supplied long message through the API; preserve multiple concerns and a consolidated alert |
+| University admissions greetings and Sriparna's away reply | No survey progress, invented feedback or closing window; later real replies remain usable |
+| All good / Share feedback buttons | Button payload and typed-response handling; window stays available for corrections |
+| Messages after any closed feedback flow | Substantive follow-up routes to handoff; missing/failed delivery is not described as successful |
+| Other wording and custom services | Semantic completion, score refusal, topic changes, billing/access/reporting requests and Influencer Marketing |
+
+## Feedback Added During a Rating Question
+
+The already-requested rating remains pending, but substantive new feedback
+takes precedence. Acknowledge it and offer once:
+
+> Would you like to add anything else, or shall we move to the overall rating?
+
+Use recommendation rating only when the pending question is project-end NPS.
+More details are acknowledged without another question after every message.
+Natural completion resumes the numeric question; feedback supplied instead of
+that number starts another feedback opportunity. A volunteered valid score can
+still be accepted. An explicit refusal to give a score is distinct from saying
+there is no more feedback and leaves the score empty.
+
+The pause is per-session JSON state, not a new evidence source. It does not
+change extraction, allow response-writing facts to enter the state, apply to
+quick check-ins, or extend an existing ten-minute closing window.
+
+Additional replays cover bounded clarification, quantities inside NPS feedback,
+conflicting reply-writing output, response-writer timeouts and negative role
+descriptions that must not become appreciation. Related complaints are retained
+unless their wording is genuinely near-identical.
+
+## Rollback Discipline
+
+Preserve the pre-change worktree and Git history before updating conversational
+behaviour. A checkpoint is a recovery point, not evidence that a production
+version was known-good. If a regression is reported, capture the exact deployed
+revision and transcript, reproduce it, and compare with the confirmed working
+revision. Revert the responsible conversation change or fix the reproduced
+defect without resetting unrelated UI work or deleting feedback data. These
+changes do not migrate or rewrite historical scores, messages or cycles.
+
+## Test Entry Points
+
+- `npm run test:feedback-history`: sequential historical and paraphrase replays.
+- `npm run test:api`: real handler pipeline with controlled model responses,
+  including successful extraction, conflicting reply wording and timeouts.
+- `npm run test:state`: state transitions, ratings, limits and window handling.
+- `npm run test:sweep`: state/reply combinations.
+- `npm run test:gemini`: normalized extraction and prompt contract checks.
+- `npm run test:workspace-navigation`: activity links, same-project conversation
+  changes, stale filters, asynchronous loading and conversation scrolling;
+  Needs Attention section links, collapsed icons and high-risk project selection.
+- `npm test`: all above plus quick-check-in persistence, imports and store tests.
+
+Assertions focus on saved facts, question counts, required actions, score
+ownership and deadlines, not an exact approved reply string. The fixture inputs
+include supplied messages and representative variations; not every historical
+chat bubble is replayed verbatim.
+
+## Verification Limits
+
+Tests use controlled Gemini responses and mocked delivery/storage. They do not
+send WhatsApp messages or email, use a live model, or modify production data.
+They verify application routing and persistence behaviour, not every possible
+future model interpretation. Production delivery still depends on deployed
+code, credentials and active workflows.

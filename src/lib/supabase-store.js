@@ -2240,16 +2240,17 @@ class SupabaseStore {
       };
     }
 
-    const sessions = await this.listProjectSessions(project.id);
-    const issues = await this.listProjectIssues(project.id);
-    const serviceFeedbackByCycle = await this.serviceFeedbackByCycle(project.id);
-    const observations = await this.listProjectObservations(project.id);
-
     // EVERY POC, including deactivated ones. Feedback already given is a fact —
     // deactivating a contact should stop future sends, not erase what they
     // said. Filtering them out here made past conversations vanish from the
     // workspace along with the person.
-    const allPocs = await this.pocsForProject(project.id, { activeOnly: false });
+    const [sessions, issues, serviceFeedbackByCycle, observations, allPocs] = await Promise.all([
+      this.listProjectSessions(project.id),
+      this.listProjectIssues(project.id),
+      this.serviceFeedbackByCycle(project.id),
+      this.listProjectObservations(project.id),
+      this.pocsForProject(project.id, { activeOnly: false })
+    ]);
 
     // Self-heal cycles left stale by an older partial write: if every session
     // is already terminal, an Open parent is objectively wrong and also blocks

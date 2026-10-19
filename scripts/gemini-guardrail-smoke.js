@@ -1,6 +1,6 @@
 const assert = require("assert");
 const { containsClaim, toneFromRules, TONES, rephraseQuestion, offScriptReply, writeIssueText,
-  reviewIssues, interpretReply, readTone, normaliseOverallRating,
+  reviewIssues, interpretReply, conductTurn, readTone, normaliseOverallRating,
   cleanRepeatedText, extractExplicitAppreciations, humaniseGenericAcknowledgement,
   removeObservationDuplicates, normaliseReplyInterpretation,
   hasSatisfactionEvidence } = require("../src/lib/gemini");
@@ -182,6 +182,36 @@ const turn = {
     ];
     for (const line of good) {
       assert.ok(!containsClaim(line), `false positive: ${line}`);
+    }
+  });
+
+  await scenario("interpretation and reply prompts consistently permit completion without repeated service interviews", async () => {
+    const priorFetch = global.fetch;
+    const priorKey = process.env.GEMINI_API_KEY;
+    const prompts = [];
+    process.env.GEMINI_API_KEY = "test-key";
+    global.fetch = async (_url, options) => {
+      prompts.push(JSON.parse(options.body).input);
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+        intent: "negative", completionScope: "feedback", completionEvidence: "That covers everything",
+        message: "Thank you. How would you rate the project overall, out of 10?"
+      }) }) };
+    };
+    try {
+      const project = { name: "Prompt test", services: [{ serviceKey: "account", name: "Account Management" }] };
+      await interpretReply({ project, question: "Anything else?", text: "That covers everything" });
+      await conductTurn({ project, checklist: { overallRatingStillNeeded: true }, preferredAction: { type: "overall_rating" } });
+      assert.equal(prompts.length, 2);
+      assert.match(prompts[0], /completionEvidence must quote the EXACT current words/);
+      assert.match(prompts[0], /were busy.*not.*we are busy/);
+      assert.match(prompts[1], /Additional\s+detail answers that invitation/);
+      assert.match(prompts[1], /missing scores stay empty/);
+      assert.match(prompts[1], /Do not interview each named team/);
+      assert.doesNotMatch(prompts[1], /dig until it would be|Move on only when they say no/);
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
     }
   });
 

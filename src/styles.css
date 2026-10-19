@@ -1314,6 +1314,42 @@ button.metric-card {
 .rail-stat.watch { background: var(--amber-soft); }
 .rail-stat.watch strong { color: var(--amber); }
 
+button.rail-stat {
+  width: 100%;
+  border: 1px solid transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.rail-stat:hover:not(:disabled),
+button.rail-stat:focus-visible { border-color: var(--blue); }
+
+button.rail-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+button.rail-icon:hover:not(:disabled),
+button.rail-icon:focus-visible { border-color: var(--blue); background: var(--panel); }
+
+button.rail-stat:disabled,
+button.rail-icon:disabled { cursor: default; opacity: 0.65; }
+
+.rail-high-risk-projects {
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: auto;
+  padding: 2px;
+}
+
 .rail-link {
   display: block;
   width: 100%;

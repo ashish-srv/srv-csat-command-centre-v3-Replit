@@ -1984,7 +1984,9 @@ async function scenario(name, fn) {
     assert.strictEqual(turn.conversationState.overallRating, undefined,
       "a number must not be accepted before the overall-rating question was asked");
     assert.strictEqual(turn.conversationState.appreciationAnswered, true);
-    assert.strictEqual(turn.conversationState.pendingObservation.topic, "Billing");
+    assert.strictEqual(turn.conversationState.pendingObservation, null,
+      "an actionable billing observation is saved without creating another interview");
+    assert.ok(turn.analysis.observations.some((item) => item.topic === "Billing"));
   });
 
   await scenario("a rating given with a defer is saved only after the overall question", async () => {
@@ -2156,8 +2158,8 @@ async function scenario(name, fn) {
       const issuePayload = JSON.parse(issue.body);
       assert.match(issuePayload.whatsappReplyText, /recorded your request/i);
       assert.match(issuePayload.whatsappReplyText, /appreciating (?:the )?Creative Team/i);
-      assert.match(issuePayload.whatsappReplyText, /anything else you would like the Directors to know/i);
-      assert.strictEqual(store._session.conversationState.pendingObservation.topic, "Billing");
+      assert.match(issuePayload.whatsappReplyText, /original 10-minute window/i);
+      assert.strictEqual(store._session.conversationState.pendingObservation, null);
       assert.strictEqual(store._session.conversationState.appreciationAnswered, true);
 
       const close = await rawReq("POST", "/api/whatsapp/inbound", {
@@ -2166,8 +2168,7 @@ async function scenario(name, fn) {
         providerMessageId: "wamid.billing-praise-close"
       });
       const closePayload = JSON.parse(close.body);
-      assert.match(closePayload.whatsappReplyText, /added that to your recorded feedback/i);
-      assert.match(closePayload.whatsappReplyText, /original 10-minute window is still open/i);
+      assert.match(closePayload.whatsappReplyText, /feedback is recorded|recorded feedback/i);
       assert.doesNotMatch(closePayload.whatsappReplyText, /take care of your health/i,
         "the full original closing speech must not be repeated after every add-on");
       assert.strictEqual(store._session.conversationState.pendingObservation, null);
@@ -2863,7 +2864,7 @@ async function scenario(name, fn) {
     };
     try {
       const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
-        text: "The campaign is not attracting attention, the data has no applicant profiles, and I need more ownership and course correction from your team."
+        text: "Thank you for this opportunity. Though I think all the processess are in place - however I am quite disappointed with the outcome so far. The campaign doesn’t seem to be attracting much attention and the applicants number we have got presently could be well achieved without spending additional resources . Also the data shared gives us no information on the profile of the individuals signing on. I need more ownership from your end - to review / analyse and change course if required- right now it seems to be lacking. You are the experts and I expect you to be taking more interest."
       });
       await new Promise((resolve) => setImmediate(resolve));
       const payload = JSON.parse(response.body);
@@ -3752,6 +3753,33 @@ async function scenario(name, fn) {
     } finally {
       console.error = originalConsoleError;
     }
+  });
+
+  await scenario("workspace loads independent project data together and retains inactive POCs", async () => {
+    const workspaceStore = Object.create(SupabaseStore.prototype);
+    const started = new Set();
+    const read = async (name, result) => {
+      started.add(name);
+      await Promise.resolve();
+      assert.strictEqual(started.size, 5, "independent workspace reads should start together");
+      return result;
+    };
+    workspaceStore.getProject = async () => ({ ...project, services: [] });
+    workspaceStore.listProjectCycles = async () => [];
+    workspaceStore.listProjectSessions = () => read("sessions", []);
+    workspaceStore.listProjectIssues = () => read("issues", []);
+    workspaceStore.serviceFeedbackByCycle = () => read("services", {});
+    workspaceStore.listProjectObservations = () => read("observations", []);
+    workspaceStore.pocsForProject = (projectId, options) => {
+      assert.strictEqual(projectId, project.id);
+      assert.strictEqual(options.activeOnly, false);
+      return read("pocs", [{ ...poc, active: false }]);
+    };
+
+    const result = await workspaceStore.getProjectWorkspace(project.key);
+    assert.strictEqual(result.project.id, project.id);
+    assert.strictEqual(result.pocs[0].active, false);
+    assert.deepStrictEqual(result.messages, []);
   });
 
   await scenario("workspace refresh repairs an open cycle whose sessions are complete", async () => {
@@ -5815,6 +5843,134 @@ async function scenario(name, fn) {
     );
   });
 
+  await scenario("historical Arun feedback progresses through the API even when response wording tries to reopen a service", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorSession = store._session;
+    const priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    calls.messages.length = 0;
+    const opening = "The campaign was never optimized and acquisition cost reached 1.9 lacs for only 32 admissions. The account managers did not understand our requirements.";
+    const busy = "Some account managers were busy with their work. They were never available for the review.";
+    const done = "Hope this feedback is sufficient";
+    const extract = (text) => ({
+      intent: "feedback", deferRequested: false, sentiment: "negative", rating: null,
+      serviceScope: "overall_feedback", explainsProblem: true,
+      serviceFeedback: [{ serviceHint: "PPC / Media", sentiment: "negative", summary: text, needsFollowUp: false }],
+      observations: [], concerns: [], appreciations: []
+    });
+    const answer = { message: "Thank you. Is there anything else about PPC / Media?", captured: [], observations: [], appreciations: [], askedServiceFollowUpKey: "ppc" };
+    const replies = [extract(opening), answer, extract(busy), answer, {
+      intent: "negative", deferRequested: false, completionScope: "feedback", completionEvidence: done,
+      sentiment: "neutral", serviceFeedback: [], observations: [], concerns: [], appreciations: []
+    }, answer];
+    let modelCalls = 0;
+    global.fetch = async () => ({
+      ok: true, status: 200,
+      json: async () => ({ output_text: JSON.stringify(replies[modelCalls++] || answer) })
+    });
+    store._session = {
+      id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+      status: "started", completionStatus: "no_response", sessionType: "project_end",
+      conversationState: { state: "waiting_for_open_feedback", sessionType: "project_end", pendingQuestionType: "project_end_review", projectEndReviewAsked: true }
+    };
+    try {
+      for (const [index, text] of [opening, busy, done].entries()) {
+        const response = await rawReq("POST", "/api/whatsapp/inbound", {
+          from: "919999999999", text, providerMessageId: `wamid.history-arun-${index}`
+        });
+        const result = JSON.parse(response.body);
+        assert.strictEqual(response.statusCode, 201);
+        assert.strictEqual(result.state, "waiting_for_overall_rating", text);
+        if (index === 1) {
+          assert.match(result.whatsappReplyText, /Would you like to add anything else, or shall we move to the overall rating\?$/);
+          assert.doesNotMatch(result.whatsappReplyText, /appreciat|kind words/i, "never available is a complaint, not praise");
+        } else assert.match(result.whatsappReplyText, /overall.*out of 10/i);
+        assert.doesNotMatch(result.whatsappReplyText, /take your time|anything else about PPC|Senior Involvement/i);
+        assert.strictEqual(result.session.conversationState.overallRating, null);
+      }
+      assert.match(store._session.conversationState.mentionedServices.ppc.reasonText, /32 admissions/);
+      assert.match(store._session.conversationState.mentionedServices.ppc.reasonText, /never available for the review/);
+      assert.strictEqual(store._session.conversationState.feedbackQuestionsComplete, true);
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0;
+      calls.messages.push(...priorMessages);
+      store._session = priorSession;
+    }
+  });
+
+  for (const responseTimeout of [false, true]) {
+    await scenario(`feedback-to-rating choice works through the API with ${responseTimeout ? "a response-writer timeout" : "a conflicting response-writer question"}`, async () => {
+      const priorKey = process.env.GEMINI_API_KEY;
+      const priorFetch = global.fetch;
+      const priorSession = store._session;
+      const priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      let currentRead = {};
+      global.fetch = async (_url, options) => {
+        const input = JSON.parse(options?.body || "{}").input || "";
+        if (input.includes("Task: interpret ONE client reply")) {
+          return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(currentRead) }) };
+        }
+        if (responseTimeout) throw new Error("simulated response-writer timeout");
+        return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+          message: "Is there anything else about Senior Involvement?", askedObservationFollowUpTopic: "Senior Involvement",
+          captured: [{ serviceKey: "ppc", sentiment: "negative", summary: "Invented leadership failure" }],
+          observations: [{ topic: "Senior Involvement", detail: "Invented leadership failure", sentiment: "negative" }]
+        }) }) };
+      };
+      store._session = {
+        id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+        status: "started", completionStatus: "partial", sessionType: "project_end",
+        conversationState: {
+          state: "waiting_for_overall_rating", pendingQuestionType: "overall_rating", sessionType: "project_end",
+          projectEndReviewCaptured: true, serviceScopeStatus: "project_end_overall", overallRatingAsked: true,
+          overallRating: null, npsScore: null, mentionedServices: {}
+        }
+      };
+      const steps = [
+        ["Please send weekly spend reports", { intent: "feedback", observations: [{ topic: "Spend Reporting", detail: "Please send weekly spend reports", sentiment: "neutral", kind: "request", needsFollowUp: false }] }, "choice"],
+        ["Please include the campaign allocation breakdown too", { intent: "feedback", observations: [{ topic: "Spend Reporting", detail: "Please include the campaign allocation breakdown too", sentiment: "neutral", kind: "request", needsFollowUp: false }] }, "acknowledgement"],
+        ["The PPC reports are clear now", { intent: "feedback", serviceFeedback: [{ serviceHint: "PPC / Media", sentiment: "positive", summary: "The PPC reports are clear now", needsFollowUp: false }] }, "acknowledgement"],
+        ["That's it", { intent: "negative", completionScope: "feedback", completionEvidence: "That's it" }, "rating"],
+        ["The invoice has the wrong tax number", { intent: "feedback", observations: [{ topic: "Billing", detail: "The invoice has the wrong tax number", sentiment: "negative", needsFollowUp: false }] }, "choice"],
+        ["no", { intent: "negative" }, "rating"]
+      ];
+      try {
+        for (const [index, [text, extraction, expected]] of steps.entries()) {
+          currentRead = { sentiment: "neutral", deferRequested: false, rating: null, serviceFeedback: [], observations: [], appreciations: [], concerns: [], ...extraction };
+          const response = await rawReq("POST", "/api/whatsapp/inbound", {
+            from: "919999999999", text, providerMessageId: `wamid.choice-${responseTimeout}-${index}`
+          });
+          const result = JSON.parse(response.body);
+          assert.equal(response.statusCode, 201);
+          assert.equal(result.state, "waiting_for_overall_rating");
+          assert.equal(result.session.conversationState.overallRating, null);
+          assert.notEqual(result.session.conversationState.overallRatingDeclined, true);
+          assert.doesNotMatch(result.whatsappReplyText, /Senior Involvement|Invented leadership/i);
+          if (expected === "choice") assert.match(result.whatsappReplyText, /Would you like to add anything else, or shall we move to the overall rating\?$/);
+          if (expected === "acknowledgement") assert.doesNotMatch(result.whatsappReplyText, /\?|out of 10/);
+          if (text === "The PPC reports are clear now") assert.match(result.whatsappReplyText, /reports are clear/i);
+          if (expected === "rating") assert.match(result.whatsappReplyText, /overall.*out of 10/i);
+        }
+        assert.equal(store._session.conversationState.ratingFeedbackPause, null);
+        assert.doesNotMatch(JSON.stringify(store._session.conversationState), /Invented leadership failure|Senior Involvement/i,
+          "response-writing facts must not enter the state; an unmentioned service placeholder is allowed");
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+        else process.env.GEMINI_API_KEY = priorKey;
+        store._session = priorSession;
+        calls.messages.length = 0;
+        calls.messages.push(...priorMessages);
+      }
+    });
+  }
+
   await scenario("an explicit rating survives a management-feedback interruption", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const rating = conversationFlow.acceptedOverallRating({
@@ -5870,6 +6026,46 @@ async function scenario(name, fn) {
     ], true);
     assert.strictEqual(rating, 4,
       "the recommendation answer and its correction must not replace overall CSAT");
+  });
+
+  await scenario("closing-window CSAT and recommendation corrections remain separate during transcript reconciliation", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    const transcript = [
+      { side: "srv", body: "Overall, how would you rate the work SRV Media delivered on this project, out of 10?" },
+      { side: "client", body: "7" },
+      { side: "srv", body: "On a scale of 0 to 10, how likely are you to recommend SRV Media to a friend or colleague?" },
+      { side: "client", body: "9" },
+      { side: "srv", body: "Thank you. Your overall rating of 7 out of 10 has been recorded. The 10-minute correction window remains open." },
+      { side: "client", body: "There should be a weekly report sent to us about spend" },
+      { side: "srv", body: "Thank you for that suggestion. We have recorded the weekly spend-report request." },
+      { side: "client", body: "no" },
+      { side: "srv", body: "Rating of 7 out of 10 remains recorded, and the original 10-minute window is still open." },
+      { side: "client", body: "change rating to 10" },
+      { side: "srv", body: "No problem — I have updated your overall rating to 10 out of 10." }
+    ];
+
+    assert.strictEqual(
+      conversationFlow.latestExplicitOverallRating(transcript, true),
+      10,
+      "an explicit CSAT correction must work even though the most recent score question was NPS"
+    );
+
+    for (const recommendationCorrection of [
+      "change recommend rating to 9",
+      "change recommendation rating to 9",
+      "take 5 for recommending SRV",
+      "set NPS to 8",
+      "my likelihood rating should be 6"
+    ]) {
+      assert.strictEqual(
+        conversationFlow.latestExplicitOverallRating([
+          ...transcript,
+          { side: "client", body: recommendationCorrection }
+        ], true),
+        10,
+        `recommendation wording must not rewrite CSAT: ${recommendationCorrection}`
+      );
+    }
   });
 
   await scenario("scale-first recommendation wording cannot replace project-end CSAT", async () => {
@@ -5962,7 +6158,8 @@ async function scenario(name, fn) {
     assert.match(turn.nextMessage.body, /rating of 7 out of 10/i);
     assert.match(turn.nextMessage.body, /next 10 minutes/i);
     assert.match(turn.nextMessage.body, /confidential review by the Directors/i);
-    assert.match(turn.nextMessage.body, /created the necessary action item and notified the Directors/i);
+    assert.match(turn.nextMessage.body, /recorded for constructive and discreet review/i);
+    assert.doesNotMatch(turn.nextMessage.body, /notified the Directors/i);
     assert.match(turn.nextMessage.body, /request a callback/i);
     assert.match(turn.nextMessage.body, /honesty, time and trust/i);
     assert.match(turn.nextMessage.body, /please take care/i);
@@ -6682,7 +6879,7 @@ async function scenario(name, fn) {
     ));
   });
 
-  await scenario("A billing observation is explored before the survey resumes", async () => {
+  await scenario("An actionable billing observation is acknowledged without another topic interview", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const state = { mentionedServices: {}, pendingQuestionType: "final_sweep" };
     conversationFlow.applyConversationInterruption(
@@ -6704,19 +6901,21 @@ async function scenario(name, fn) {
       overallRatingStillNeeded: false,
       npsStillNeeded: false
     }, state);
-    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Billing" });
-    const reply = conversationFlow.fallbackForAction(action, state, project);
+    assert.deepStrictEqual(action, { type: "final_sweep" });
+    const context = { observations: [{ topic: "Billing", detail: "Tax invoice is inaccurate", sentiment: "negative" }] };
+    const reply = conversationFlow.fallbackForAction(action, state, project, context);
     assert.ok(/sorry/i.test(reply));
+    assert.match(reply, /Tax invoice is inaccurate/i);
     assert.ok(/anything else you would like the Directors to know/i.test(reply));
     assert.ok(!/rate .*support/i.test(reply), "per-service ratings must never leak into this turn");
     const recorded = conversationFlow.recordRequiredQuestion(state, project, action);
     conversationFlow.setStateForRequiredAction(state, action, recorded);
     const retry = conversationFlow.fallbackForAction(action, state, project);
-    assert.ok(/before we move on/i.test(retry));
+    assert.ok(/before we finish/i.test(retry));
     assert.ok(!/sorry/i.test(retry), "do not apologise for the same issue again on a retry");
   });
 
-  await scenario("a calm senior-involvement request interrupts the rating question", async () => {
+  await scenario("an actionable senior meeting request is saved before returning to the pending rating", async () => {
     const { conversationFlow } = require("../src/server/api-handler");
     const state = {
       mentionedServices: {},
@@ -6746,7 +6945,12 @@ async function scenario(name, fn) {
       overallRatingStillNeeded: true,
       npsStillNeeded: false
     }, state);
-    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Senior Involvement" });
+    assert.deepStrictEqual(action, { type: "overall_rating" });
+    const reply = conversationFlow.fallbackForAction(action, state, project, { observations: [{
+      topic: "Senior Involvement", detail: "Client wants one senior meeting each month", kind: "request", sentiment: "neutral"
+    }] });
+    assert.match(reply, /recorded your request.*senior meeting/i);
+    assert.match(reply, /overall.*out of 10/i);
   });
 
   await scenario("AVP absence is always classified as Senior Involvement", async () => {
@@ -6774,8 +6978,9 @@ async function scenario(name, fn) {
       state,
       project
     );
-    assert.match(reply, /lack of senior involvement and communication/i);
-    assert.match(reply, /raise this with management/i);
+    assert.doesNotMatch(reply, /lack of senior involvement and communication/i,
+      "fallback must not manufacture an explanation from the topic label alone");
+    assert.match(reply, /recorded for review/i);
   });
 
   await scenario("that's it from my side answers a final sweep", async () => {
@@ -6824,12 +7029,11 @@ async function scenario(name, fn) {
       overallRatingStillNeeded: true,
       npsStillNeeded: false
     }, state);
-    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Review Meeting" });
-    const reply = conversationFlow.fallbackForAction(action, state, project);
+    assert.deepStrictEqual(action, { type: "service", serviceKey: "seo", name: "SEO" });
+    const reply = conversationFlow.fallbackForAction(action, state, project, { observations: [observation] });
     assert.match(reply, /recorded your request/i);
     assert.match(reply, /relevant team/i);
-    assert.match(reply, /anything else you would like the Directors to know/i);
-    assert.ok(!/how has SEO/i.test(reply), "the bot must not move to SEO before closing the request");
+    assert.match(reply, /how has SEO/i, "an actionable request must not force a second interview");
   });
 
   await scenario("a closing-window social-media update and senior meeting survive Gemini timeout", async () => {
@@ -6865,8 +7069,8 @@ async function scenario(name, fn) {
       overallRatingStillNeeded: false,
       npsStillNeeded: false
     }, state);
-    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Review Meeting" });
-    const reply = conversationFlow.fallbackForAction(action, state, project);
+    assert.deepStrictEqual(action, { type: "close" });
+    const reply = conversationFlow.fallbackForAction(action, state, project, { observations: [observation] });
     assert.match(reply, /social media is working well/i);
     assert.match(reply, /recorded your request.*relevant team/i);
     assert.ok(!/PPC/i.test(reply));
@@ -6958,9 +7162,9 @@ async function scenario(name, fn) {
       overallRatingStillNeeded: false,
       npsStillNeeded: false
     }, state);
-    assert.deepStrictEqual(action, { type: "observation_followup", topic: "Creative Process" });
+    assert.deepStrictEqual(action, { type: "final_sweep" });
     const reply = conversationFlow.fallbackForAction(action, state, scopedProject, conducted);
-    assert.match(reply, /sorry.*creative process.*back-and-forth/i);
+    assert.match(reply, /inconsisten\w*|amendments|feedback/i);
     assert.match(reply, /Aisha and Dev/i);
     assert.match(reply, /anything else.*Directors/i);
     assert.ok(!/remain active for the next 10 minutes/i.test(reply));
@@ -7521,7 +7725,7 @@ async function scenario(name, fn) {
     const state = JSON.parse(JSON.stringify(before));
     applyCaptured(state, project, conducted.captured);
     assert.ok(Object.values(state.mentionedServices).every((service) =>
-      service.status === "needs_service_followup"));
+      service.status === "captured"));
     conversationFlow.settleActionableFinalSweepFacts(state, before, conducted);
     assert.ok(Object.values(state.mentionedServices).every((service) =>
       service.status === "captured" && service.serviceFollowUpAnswered === true));

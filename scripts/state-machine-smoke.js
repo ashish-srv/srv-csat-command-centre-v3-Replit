@@ -225,7 +225,35 @@ scenario("Project-end broad feedback covers unmentioned services without inventi
     "unmentioned services must not be stored as positive or declined");
 });
 
-scenario("Project-end only follows up concerns actually raised", () => {
+scenario("A repeated project-end survey question is not accepted as the client's feedback", () => {
+  const text = "Great! Could you share your overall experience working with SRV Media across the full duration of the project?";
+  const reply = processWhatsAppReply({
+    session: newSession("project_end"),
+    project,
+    poc,
+    text,
+    geminiUnavailable: false,
+    interpretation: {
+      source: "gemini",
+      intent: "unclear",
+      sentiment: "positive",
+      rating: null,
+      serviceKeys: [],
+      explainsProblem: false,
+      isObservation: false
+    }
+  });
+
+  assert.strictEqual(reply.conversationState.state, STATES.WAITING_FOR_OPEN_FEEDBACK);
+  assert.notStrictEqual(reply.conversationState.overallRatingAsked, true,
+    "repeating our question must not skip the required whole-project feedback");
+  assert.notStrictEqual(reply.conversationState.projectEndReviewCaptured, true,
+    "the question must not be stored as the client's project review");
+  assert.strictEqual(reply.control.repeatedSurveyQuestion, true);
+  assert.match(reply.nextMessage.body, /project|experience/i);
+});
+
+scenario("Project-end records actionable concerns and clarifies only genuinely vague concerns", () => {
   const state = {
     sessionType: "project_end",
     mentionedServices: {},
@@ -238,12 +266,14 @@ scenario("Project-end only follows up concerns actually raised", () => {
   const checklist = buildChecklist(state, project);
   assert.strictEqual(state.mentionedServices.design.status, "captured",
     "positive project-end feedback must not start a service interview");
-  assert.strictEqual(state.mentionedServices.website.status, "needs_service_followup",
-    "an actual concern must receive its focused anything-else follow-up");
+  assert.strictEqual(state.mentionedServices.website.status, "captured",
+    "actionable project-end feedback must not start another service interview");
   assert.deepStrictEqual(
     checklist.servicesWaitingForAnythingElseAnswer.map((item) => item.serviceKey),
-    ["website"]
+    []
   );
+  applyCaptured(state, project, [{ serviceKey: "website", sentiment: "negative", summary: "The website needs improvement", needsFollowUp: true }]);
+  assert.strictEqual(state.mentionedServices.website.status, "needs_reason");
 });
 
 scenario("Project-end recommendation keeps decimals and never overwrites overall CSAT", () => {
@@ -1196,6 +1226,48 @@ scenario("Rating corrections follow intended meaning across varied wording", () 
     "an unrelated number must not become a correction");
 });
 
+scenario("Project-end closing-window corrections keep CSAT and recommendation in separate score streams", () => {
+  const done = run(newSession(), ["all good", "9", "no", "7"]);
+  assert.strictEqual(done.last.conversationState.state, STATES.CLOSING_GRACE);
+  assert.strictEqual(done.last.conversationState.overallRating, 7);
+  const projectEndClosingState = {
+    ...done.last.conversationState,
+    sessionType: "project_end",
+    npsScore: 9
+  };
+
+  const csatCorrection = processWhatsAppReply({
+    session: { ...newSession("project_end"), conversationState: projectEndClosingState },
+    project,
+    poc,
+    text: "change rating to 10"
+  });
+  assert.strictEqual(csatCorrection.conversationState.overallRating, 10);
+  assert.strictEqual(csatCorrection.conversationState.npsScore, 9);
+  assert.match(csatCorrection.nextMessage.body, /overall rating to 10 out of 10/i);
+
+  for (const text of [
+    "change recommend rating to 8",
+    "change recommendation rating to 8",
+    "set NPS to 8",
+    "my likelihood rating should be 8"
+  ]) {
+    const recommendationCorrection = processWhatsAppReply({
+      session: {
+        ...newSession("project_end"),
+        conversationState: JSON.parse(JSON.stringify(csatCorrection.conversationState))
+      },
+      project,
+      poc,
+      text
+    });
+    assert.strictEqual(recommendationCorrection.conversationState.overallRating, 10, text);
+    assert.strictEqual(recommendationCorrection.conversationState.npsScore, 8, text);
+    assert.match(recommendationCorrection.nextMessage.body, /recommendation rating to 8 out of 10/i, text);
+    assert.match(recommendationCorrection.nextMessage.body, /overall rating remains 10 out of 10/i, text);
+  }
+});
+
 scenario("Correction words cannot redirect non-rating feedback during the closing window", () => {
   const done = run(newSession(), ["all good", "9", "no", "6"]);
   const examples = [
@@ -1530,7 +1602,7 @@ scenario("G5 production checklist stops re-asking a declined service", () => {
   }
 });
 
-scenario("A new substantive point resets the service follow-up allowance", () => {
+scenario("A new substantive point is preserved without resetting the service follow-up allowance", () => {
   const service = {
     serviceKey: "ppc", serviceName: "PPC / Media", sentiment: "negative",
     status: "needs_service_followup", reasonText: "Lead volume is low",
@@ -1541,8 +1613,10 @@ scenario("A new substantive point resets the service follow-up allowance", () =>
     serviceKey: "ppc", sentiment: "negative",
     summary: "Lead quality is also poor", needsFollowUp: false
   }]);
-  assert.strictEqual(service.serviceFollowUpAskCount, 0);
-  assert.strictEqual(service.status, "needs_service_followup");
+  assert.strictEqual(service.serviceFollowUpAskCount, MAX_PROBES_PER_SERVICE);
+  assert.strictEqual(service.status, "captured");
+  assert.match(service.reasonText, /Lead volume is low/);
+  assert.match(service.reasonText, /Lead quality is also poor/);
 });
 
 scenario("G6 service complaints phrased as questions remain feedback", () => {

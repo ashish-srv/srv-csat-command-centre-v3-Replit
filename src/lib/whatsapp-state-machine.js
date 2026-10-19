@@ -164,7 +164,9 @@ function feedbackPointOverlap(left, right) {
   const b = tokens(right);
   if (!a.size || !b.size) return false;
   const shared = [...a].filter((token) => b.has(token)).length;
-  return shared >= 3 && shared / Math.min(a.size, b.size) >= 0.65;
+  // Related complaints are not duplicates merely because they name the same
+  // team. Only near-identical wording may replace an already saved point.
+  return shared >= 3 && shared / Math.min(a.size, b.size) >= 0.85;
 }
 
 function escapeRegex(value) {
@@ -538,6 +540,15 @@ function isQuestionToUs(text) {
   return /\b(when|why|what|who|how much|how many|can you|could you|will you|are you|is there|status|update on|cost|price|invoice|payment)\b/i.test(value);
 }
 
+function isFeedbackQuestionToUs(text) {
+  const source = String(text || "").trim();
+  if (!/\?\s*$/.test(source)) return false;
+  const asksForOurView = /\b(?:can|could|would|will)\s+you\b[^?]{0,45}\b(?:share|tell|describe|give|provide|rate)\b/i.test(source)
+    || /\bhow\s+(?:would|do|did)\s+you\b[^?]{0,35}\b(?:rate|describe|view|feel)\b/i.test(source);
+  const feedbackSubject = /\b(?:your\s+)?(?:overall\s+)?(?:experience|feedback|opinion|view|rating|score)\b/i.test(source);
+  return asksForOurView && feedbackSubject;
+}
+
 function isOutOfScope(text) {
   // Billing/payment/invoice complaints are valid management observations.
   // Questions about them still route through isQuestionToUs(), but a statement
@@ -660,12 +671,58 @@ function isDeferral(text) {
   const asksForTime = /\b(?:please\s+)?(?:allow|give)\s+me\s+(?:(?:a|one|another|some)\s+)?(?:day|time|while|moment)\b/i.test(source)
     || /\b(?:i|we)\s+(?:need|would\s+like)\s+(?:some\s+|more\s+)?time\b/i.test(source)
     || /\b(?:i|we)\s+(?:will|shall|can)\s+(?:come|get)\s+back\s+(?:with|to)\s+(?:the\s+|my\s+|you\s+)?(?:feedback|review|reviews|response)\b/i.test(source);
-  const notNow = /\b(?:i\s+am|i'?m|we\s+are|we'?re)\s+(?:currently\s+)?(?:busy|travell?ing|on leave|in a meeting|driving|out of office)\b/i.test(source)
+  const notNow = /\b(?:i\s+am|i'?m|we\s+are|we['’]re)\s+(?:currently\s+)?(?:busy|travell?ing|on leave|in a meeting|driving|out of office)\b/i.test(source)
     || /^\s*(?:busy|busy\s+in\s+a\s+meeting|not now|not right now|no time|currently\s+(?:busy|travell?ing|driving|in a meeting|out of office))(?:\s*(?:,|-)?\s*(?:now|right now|later|some other time|please|thanks))?\s*[.!]*\s*$/i.test(source)
     || /\b(?:i|we)\s+(?:don'?t|do not)\s+have\s+time\b/i.test(source)
     || /\b(?:i|we)\s+(?:can'?t|cannot)\s+(?:do|give|share|provide|answer)(?:\s+(?:it|this|feedback))?\s+now\b/i.test(source);
   const refusingNow = /\b(?:i|we)\s+(?:will not|won'?t|do ?n'?t want to|not going to)\b[^.!?]{0,30}\b(?:give|share|do|provide|answer)\b/i.test(source);
   return wantsLater || asksForTime || notNow || refusingNow;
+}
+
+// Completion is read from the latest client reply, independently of sentiment.
+// Require its quoted evidence so a stale model flag cannot end an interview.
+function completionScopeFor(text, interpretation) {
+  const scope = interpretation?.completionScope;
+  if (!["topic", "feedback", "conversation", "rating"].includes(scope)) return "none";
+  const normalize = (value) => String(value || "").toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, " ").trim();
+  const evidence = normalize(interpretation.completionEvidence);
+  return evidence && normalize(text).includes(evidence) ? scope : "none";
+}
+
+function clientRequestedDeferral(text, interpretation = null) {
+  if (completionScopeFor(text, interpretation) !== "none") return false;
+  // Past/third-party availability describes an experience, not a request to
+  // postpone. A separate actual "I will reply later" still takes precedence.
+  if (!isDeferral(text) && /\b(?:was|were|(?:team|manager|managers|they)\s+(?:is|are))\s+(?:busy|travell?ing|on leave|in a meeting|out of office)\b/i.test(text)) return false;
+  // When the semantic read says this is feedback, a lexical match must not
+  // overrule it. During an outage retain the conservative fallback above.
+  return interpretation
+    ? interpretation.deferRequested === true || interpretation.intent === "defer"
+    : isDeferral(text);
+}
+
+function finishFeedbackQuestions(conversationState, project, endConversation = false) {
+  conversationState.ratingFeedbackPause = null;
+  for (const configured of projectServices(project)) {
+    const service = ensureServiceState(conversationState, project, configured.serviceKey);
+    service.status = service.reasonText || service.points?.length || service.sentiment !== "neutral"
+      ? (hasServiceRating(service) ? "rated" : "captured") : "declined";
+    service.serviceFollowUpAnswered = true;
+  }
+  conversationState.pendingGeneralIssue = false;
+  conversationState.pendingObservation = null;
+  conversationState.pendingServiceKey = null;
+  conversationState.awaitingAppreciationPersonName = null;
+  conversationState.serviceScopeStatus = "skipped";
+  conversationState.projectEndReviewCaptured = conversationState.sessionType === "project_end"
+    || conversationState.projectEndReviewCaptured;
+  conversationState.readyForOverallRating = true;
+  conversationState.feedbackQuestionsComplete = true;
+  conversationState.askedForAnythingElse = true;
+  conversationState.anythingElseAnswered = true;
+  if (endConversation) conversationState.clientRequestedClose = true;
+  conversationState.pendingQuestionType = null;
+  return conversationState;
 }
 
 /**
@@ -1045,6 +1102,9 @@ function chooseWorstService(conversationState) {
 // ---------------------------------------------------------------------
 
 function nextQuestionFor(conversationState, project, poc) {
+  if (conversationState.clientRequestedClose) {
+    return { state: STATES.CLOSING_GRACE, text: "Thank you. Your feedback is recorded. This chat will remain open for 10 minutes in case you want to add or correct anything." };
+  }
   const salutation = (poc && (poc.salutation || poc.name)) || "there";
 
   const noServicesYet = !Object.keys(conversationState.mentionedServices).length;
@@ -1174,14 +1234,14 @@ function nextQuestionFor(conversationState, project, poc) {
     };
   }
 
-  if (!conversationState.readyForOverallRating && !hasOverallRating(conversationState)) {
+  if (!conversationState.readyForOverallRating && !hasOverallRating(conversationState) && !conversationState.overallRatingDeclined) {
     return {
       state: STATES.WAITING_FOR_MORE_SERVICES,
       text: "Thank you. Our team will work on this. Is there any other service you want us to focus on? If not, just reply no."
     };
   }
 
-  if (!hasOverallRating(conversationState)) {
+  if (!hasOverallRating(conversationState) && !conversationState.overallRatingDeclined) {
     const isProjectEnd = conversationState.sessionType === "project_end";
     conversationState.overallRatingAsked = true;
     conversationState.pendingQuestionType = "overall_rating";
@@ -1193,7 +1253,7 @@ function nextQuestionFor(conversationState, project, poc) {
     };
   }
 
-  if (conversationState.sessionType === "project_end" && conversationState.npsScore === null) {
+  if (conversationState.sessionType === "project_end" && conversationState.npsScore === null && !conversationState.npsDeclined) {
     conversationState.pendingQuestionType = "nps";
     return {
       state: STATES.WAITING_FOR_NPS,
@@ -1226,7 +1286,6 @@ function nextQuestionFor(conversationState, project, poc) {
  */
 function applyCaptured(conversationState, project, captured = [], overallRating = null, corrects = false) {
   for (const item of captured) {
-    let capturedNewPoint = false;
     // A correction REPLACES what they said before. Appending it would leave
     // both answers on record, so a client who said "no, make that 4" would
     // have a 6 and a 4 both counted, and an issue raised from a complaint they
@@ -1302,7 +1361,6 @@ function applyCaptured(conversationState, project, captured = [], overallRating 
 
       if (!covered) {
         service.points.push(summary);
-        capturedNewPoint = true;
       } else {
         // Same point, better wording — replace rather than keep both.
         service.points = service.points.map((point) => {
@@ -1333,43 +1391,26 @@ function applyCaptured(conversationState, project, captured = [], overallRating 
     // have to act on it. The model says when that is the case; the checklist
     // then keeps the service open so the conversation comes back to it.
     service.detailAnswered = !item.needsFollowUp;
-    if (item.needsFollowUp) {
+    if (item.needsFollowUp && Number(service.issueReasonAskCount || 0) < 1) {
       service.status = "needs_reason";
-    } else if (service.sentiment === "negative") {
-      // An actionable issue is not the end of this service. Acknowledge it,
-      // then explicitly ask whether there is anything else on the same service.
-      service.serviceFollowUpAnswered = false;
-      // A new substantive point deserves a fresh acknowledgement and one
-      // "anything else?" opportunity. Repeated paraphrases do not reset the
-      // cap and cannot create an endless loop.
-      if (capturedNewPoint) {
-        service.serviceFollowUpAskCount = 0;
-        service.followUpAsked = false;
-      }
-      service.status = "needs_service_followup";
     } else if (
-      conversationState.sessionType === "project_end"
-      && conversationState.serviceScopeStatus !== "service_by_service"
+      (conversationState.sessionType === "project_end"
+        && conversationState.serviceScopeStatus !== "service_by_service")
+      || service.serviceFollowUpAnswered
+      || Number(service.serviceFollowUpAskCount || 0) >= 1
+      || conversationState.feedbackQuestionsComplete
     ) {
-      // Positive and neutral project-end comments are already complete. The
-      // broad review must not turn into a service-by-service interview. A
-      // negative item still follows the branch above and receives a targeted
-      // acknowledgement/detail follow-up.
+      // Extra detail is unlimited; our optional follow-up is offered once.
+      // A detailed whole-project review goes to ratings, including concerns.
       service.serviceFollowUpAnswered = true;
       service.status = hasServiceRating(service) ? "rated" : "captured";
-    } else if (!service.serviceFollowUpAnswered || capturedNewPoint) {
+    } else {
       // Every service gets one natural "anything else on this service?" turn,
       // not only complaints. Without it, "it is fine" jumped immediately to
       // the next department and the client had no opening to add a qualifying
       // point. A refusal above remains final and is never forced open again.
       service.serviceFollowUpAnswered = false;
-      if (capturedNewPoint) {
-        service.serviceFollowUpAskCount = 0;
-        service.followUpAsked = false;
-      }
       service.status = "needs_service_followup";
-    } else {
-      service.status = hasServiceRating(service) ? "rated" : "captured";
     }
   }
 
@@ -1455,6 +1496,7 @@ function overallRatingQuestion(conversationState, project) {
  * never says it would leave the session open for ever.
  */
 function isEverythingCovered(conversationState, project) {
+  if (conversationState.clientRequestedClose) return true;
   settleExhaustedServiceProbes(conversationState);
   if (conversationState.serviceScopeStatus === "awaiting_choice") return false;
   const services = Object.values(conversationState.mentionedServices || {});
@@ -1490,9 +1532,9 @@ function isEverythingCovered(conversationState, project) {
 
   const hasOverall = conversationState.overallRating !== null
     && conversationState.overallRating !== undefined;
-  if (!hasOverall) return false;
+  if (!hasOverall && !conversationState.overallRatingDeclined) return false;
 
-  if (conversationState.sessionType === "project_end" && conversationState.npsScore === null) {
+  if (conversationState.sessionType === "project_end" && conversationState.npsScore === null && !conversationState.npsDeclined) {
     return false;
   }
   return true;
@@ -1595,8 +1637,8 @@ function buildChecklist(conversationState, project) {
     projectEndReviewCaptured: projectEndOverall,
     serviceScopeChoiceStillNeeded,
     stillToAsk: [
-      ...(servicesFinished && hasOverall
-        && (!isProjectEnd || conversationState.npsScore !== null)
+      ...(servicesFinished && (hasOverall || conversationState.overallRatingDeclined)
+        && (!isProjectEnd || conversationState.npsScore !== null || conversationState.npsDeclined)
         && !anythingElseAnswered
         ? [askedForAnythingElse
           ? "wait for their answer to the final management question"
@@ -1616,12 +1658,12 @@ function buildChecklist(conversationState, project) {
       })),
     // The ONLY rating we ask for. Per-service ratings turned the conversation
     // into a form, which is what made clients disengage.
-    overallRatingStillNeeded: !hasOverall && servicesFinished,
-    npsStillNeeded: isProjectEnd && hasOverall && conversationState.npsScore === null,
+    overallRatingStillNeeded: !conversationState.clientRequestedClose && !hasOverall && !conversationState.overallRatingDeclined && servicesFinished,
+    npsStillNeeded: !conversationState.clientRequestedClose && isProjectEnd && (hasOverall || conversationState.overallRatingDeclined) && conversationState.npsScore === null && !conversationState.npsDeclined,
     cycleType: isProjectEnd ? "project end" : "monthly pulse",
     turnsSoFar: conversationState.turnCount || 0,
-    readyToClose: servicesFinished && anythingElseAnswered && hasOverall
-      && (!isProjectEnd || conversationState.npsScore !== null)
+    readyToClose: servicesFinished && anythingElseAnswered && (hasOverall || conversationState.overallRatingDeclined)
+      && (!isProjectEnd || conversationState.npsScore !== null || conversationState.npsDeclined)
   };
 }
 
@@ -1805,6 +1847,12 @@ function currentPendingQuestion(conversationState, project, poc) {
   const serviceKey = conversationState.pendingServiceKey;
   const name = serviceKey ? serviceName(project, serviceKey) : null;
   const type = conversationState.pendingQuestionType;
+
+  if (type === "rating_feedback") {
+    return conversationState.ratingFeedbackPause?.ratingType === "nps"
+      ? "Would you like to add anything else, or shall we move to the recommendation rating?"
+      : "Would you like to add anything else, or shall we move to the overall rating?";
+  }
 
   if (type === "project_end_review") return projectEndReviewQuestion(project);
 
@@ -2185,6 +2233,25 @@ function processWhatsAppReply({
     });
   }
 
+  // Occasionally a client pastes or repeats the survey question back to us.
+  // It is still a question, not their project experience. A positive courtesy
+  // word such as "Great" must not make it look like completed feedback and
+  // advance directly to CSAT.
+  if (isFeedbackQuestionToUs(text)) {
+    const resume = nextQuestionFor(conversationState, project, poc);
+    conversationState.pendingServiceKey = resume.pendingServiceKey || null;
+    conversationState.lastQuestionAsked = resume.text;
+    return plainTurn({
+      conversationState, project, poc, text, guardrails,
+      state: resume.state,
+      body: resume.text,
+      control: {
+        allowAiRephrase: false,
+        repeatedSurveyQuestion: true
+      }
+    });
+  }
+
   // --- G6 client asks us something unrelated to feedback.
   // Billing, invoices, contracts, named people and internal processes are
   // legitimate feedback observations. Let Gemini read those before deciding;
@@ -2227,7 +2294,7 @@ function processWhatsAppReply({
   // Checked first: a deferral is a complete answer in itself. Letting it reach
   // the capture path is how "I am busy now" became an Account Management
   // complaint — a synonym matched inside a sentence that was not feedback.
-  if ((isDeferral(text) || interpretation?.deferRequested === true)
+  if (clientRequestedDeferral(text, interpretation)
     && (interpretation || geminiUnavailable)) {
     conversationState.deferredAt = new Date().toISOString();
     conversationState.repeatCount = 0;
@@ -2349,9 +2416,7 @@ function processWhatsAppReply({
     yes: interpretation ? interpretation.intent === "affirmative" : false,
     no: interpretation ? interpretation.intent === "negative" : false,
     wantsToSayMore: interpretation ? interpretation.intent === "more_detail" : false,
-    later: interpretation
-      ? interpretation.intent === "defer" || interpretation.deferRequested === true
-      : false,
+    later: Boolean(interpretation) && clientRequestedDeferral(text, interpretation),
     sentiment: interpretation ? interpretation.sentiment : null,
     rating: interpretation && interpretation.rating !== null ? interpretation.rating : null
   };
@@ -2403,13 +2468,14 @@ function processWhatsAppReply({
     || conversationState.overallRatingAsked === true
     || conversationState.pendingQuestionType === "overall_rating"
   );
-  const expectsNps = priorState === STATES.WAITING_FOR_NPS;
+  const expectsNps = priorState === STATES.WAITING_FOR_NPS
+    || (conversationState.ratingFeedbackPause?.ratingType === "nps" && conversationState.npsScore == null);
 
   let rating = null;
   let npsAnswer = null;
 
   if (detectedNumber) {
-    if (expectsNps) {
+    if (expectsNps && (numberIsAnswer || isRatingCorrectionReply(text))) {
       if (
         detectedNumber.value >= 0
         && detectedNumber.value <= 10
@@ -2527,7 +2593,6 @@ function processWhatsAppReply({
       service.reasonTags = [...new Set([...(service.reasonTags || []), ...reasons])];
       service.detailAnswered = true;
       service.noteNeedsAck = true;
-      service.serviceFollowUpAskCount = 0;
       // A niggle mentioned after praise is worth capturing, but on its own it
       // is not a complaint. Only a low rating turns a praised service into an
       // issue for an owner to action.
@@ -2731,6 +2796,10 @@ function processWhatsAppReply({
     || Boolean(isUnambiguous(text))
     || (geminiUnavailable && keywordsCaptured);
 
+  const completionScope = completionScopeFor(text, interpretation);
+  if (["feedback", "conversation"].includes(completionScope)) {
+    finishFeedbackQuestions(conversationState, project, completionScope === "conversation");
+  }
   const materialProgress = conversationProgressSignature(conversationState) !== progressBefore;
   const next = nextQuestionFor(conversationState, project, poc);
   if (next.state === STATES.CLOSING_GRACE) conversationState.pendingQuestionType = null;
@@ -2825,7 +2894,8 @@ function processWhatsAppReply({
     const closingLine = conversationState.sessionType === "project_end"
       ? "Thank you again for your honesty, time and trust. We appreciate the opportunity to have worked with you and wish you every success ahead."
       : "Thank you again for your honesty, time and trust. Please take care, and we look forward to connecting with you again next month.";
-    next.text = `Thank you, ${salutation}. Your feedback and rating of ${rating} out of 10 have been successfully recorded for confidential review by the Directors.\n\nIf your feedback includes a concern or an area for improvement, the system has created the necessary action item and notified the Directors. It will be handled constructively and discreetly.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
+    const recorded = rating == null ? "Your feedback has" : `Your feedback and rating of ${rating} out of 10 have`;
+    next.text = `Thank you, ${salutation}. ${recorded} been successfully recorded for confidential review by the Directors.\n\nYour concerns and suggestions are recorded for constructive and discreet review.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
   }
   conversationState.pendingServiceKey = next.pendingServiceKey || null;
   conversationState.pendingNegativeServices = negativeServices(conversationState);
@@ -2895,6 +2965,7 @@ module.exports = {
   applyCaptured,
   applyServiceScopeDecision,
   applyTurnProgress,
+  finishFeedbackQuestions,
   isEverythingCovered,
   soundsLikeFarewell,
   isMoveOnReply,
@@ -2910,6 +2981,7 @@ module.exports = {
     // Exported for regression tests. These are deliberately conservative
     // timeout fallbacks; natural language still belongs to Gemini.
     isAffirmative, isNegativeSkip, isNonSpecificContinuation, isPositiveOverallReply,
-    isVagueDetailResponse, isDeferral, isResumption, isOutOfScope
+    isVagueDetailResponse, isDeferral, isResumption, isOutOfScope,
+    isFeedbackQuestionToUs, completionScopeFor, clientRequestedDeferral
   }
 };

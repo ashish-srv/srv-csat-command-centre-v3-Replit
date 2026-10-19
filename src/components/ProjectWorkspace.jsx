@@ -121,6 +121,8 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
   const [cycleId, setCycleId] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [messages, setMessages] = useState([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesError, setMessagesError] = useState(null);
   const [toast, setToast] = useState("");
   const [issueModal, setIssueModal] = useState(null);
   const [showAllIssues, setShowAllIssues] = useState(false);
@@ -133,9 +135,13 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
   const [manualWhatsappSending, setManualWhatsappSending] = useState(false);
   const [automationSaving, setAutomationSaving] = useState("");
   const timelineRef = useRef(null);
+  const conversationRef = useRef(null);
   const issuesRef = useRef(null);
   const workspaceRequestRef = useRef(0);
   const messageRequestRef = useRef(0);
+  const appliedNavigationRef = useRef(-1);
+  const scrolledNavigationRef = useRef(-1);
+  const navigationRef = useRef(null);
 
   const [cluster, setCluster] = useState("");
   const [client, setClient] = useState("");
@@ -144,13 +150,20 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
   const [completion, setCompletion] = useState("");
   const [range, setRange] = useState({ from: "", to: "", basis: "started" });
 
-  const allProjects = dashboard?.projects || [];
+  const allProjects = useMemo(() => dashboard?.projects
+    || (workspace?.project ? [workspace.project] : []), [dashboard, workspace?.project]);
   const messagingEnabled = dashboard?.messaging?.enabled !== false;
 
   const projectKey = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get("project") || params.get("client") || allProjects[0]?.key || "";
   }, [allProjects, locationTick]);
+
+  const params = new URLSearchParams(window.location.search);
+  const requestedCycleId = params.get("cycle") || "";
+  const requestedSessionId = params.get("session") || "";
+  const requestedSection = params.get("section") || "";
+  navigationRef.current = { projectKey, cycleId: requestedCycleId, sessionId: requestedSessionId, locationTick };
 
   // A selected project has one client and one cluster. Keep those filters in
   // sync so the bar never says "All clients" while showing a single project's
@@ -197,25 +210,9 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
     if (candidate.key !== projectKey) pushProject(candidate.key);
   }
 
-  // Cluster/client selection is navigation, not only dropdown decoration. The
-  // old project used to remain loaded when it fell outside the chosen client,
-  // so its CSAT, POCs and conversations appeared under the new filter.
-  useEffect(() => {
-    const currentAllowed = selectableProjects.some((project) => project.key === projectKey);
-    if (!selectableProjects.length) {
-      const current = allProjects.find((project) => project.key === projectKey);
-      if (current) {
-        setCluster(current.clusterName || "");
-        setClient(current.clientName || "");
-        showToast("That filter combination has no project. The current project's client and cluster were restored.");
-      }
-      return;
-    }
-    if (!currentAllowed) {
-      pushProject(selectableProjects[0].key);
-      return;
-    }
-  }, [allProjects, cluster, client, projectKey, selectableProjects]);
+  // selectCluster/selectClient navigate explicitly. An effect must not push
+  // the previous filter's first project while a sidebar link is synchronizing
+  // these filters to a different client.
 
   function showToast(message) {
     setToast(message);
@@ -232,28 +229,13 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
     setError(null);
     try {
       const data = await apiGet(`/api/projects/${encodeURIComponent(key)}/workspace`);
-      const params = new URLSearchParams(window.location.search);
-      const requestedCycleId = params.get("cycle");
-      const requestedSessionId = params.get("session");
-      const requestedCycle = (data.cycles || []).find((cycle) =>
-        cycle.id === requestedCycleId
-        || (cycle.sessions || []).some((session) => session.id === requestedSessionId)
-      );
-      const firstCycle = requestedCycle || (data.cycles || [])[0];
-      const firstSession = firstCycle
-        ? (firstCycle.sessions || []).find((session) => session.id === requestedSessionId)
-          || (firstCycle.sessions || [])[0]
-        : (data.latestSession || null);
-      const firstMessages = firstSession ? await loadMessages(firstSession.id) : [];
       // Project/filter changes can start another request before this one
       // finishes. Ignore a late response instead of putting the previous
       // client's POCs, cycles and scores back on screen.
-      if (requestId !== workspaceRequestRef.current) return;
+      if (requestId !== workspaceRequestRef.current || navigationRef.current.projectKey !== key) return;
       if (data.project?.key !== key) throw new Error("The server returned a different project workspace.");
       setWorkspace(data);
-      setCycleId(firstCycle ? firstCycle.id : "");
-      setSessionId(firstSession ? firstSession.id : "");
-      setMessages(firstMessages);
+      applyWorkspaceNavigation(data);
     } catch (loadError) {
       if (requestId === workspaceRequestRef.current) setError(loadError);
     } finally {
@@ -267,7 +249,66 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
     return data.messages || [];
   }
 
-  useEffect(() => { loadWorkspace(projectKey); }, [projectKey]);
+  async function loadConversation(id, data = null) {
+    const requestId = messageRequestRef.current + 1;
+    messageRequestRef.current = requestId;
+    setMessagesError(null);
+    if (!id || (data?.latestSession?.id === id && Array.isArray(data.messages))) {
+      setMessages(id ? data.messages : []);
+      setMessagesLoading(false);
+      return;
+    }
+    setMessages([]);
+    setMessagesLoading(true);
+    try {
+      const nextMessages = await loadMessages(id);
+      if (requestId === messageRequestRef.current) setMessages(nextMessages);
+    } catch (loadError) {
+      if (requestId === messageRequestRef.current) setMessagesError(loadError);
+    } finally {
+      if (requestId === messageRequestRef.current) setMessagesLoading(false);
+    }
+  }
+
+  function applyWorkspaceNavigation(data, useEmbeddedMessages = true) {
+    const target = navigationRef.current;
+    const availableCycles = data.cycles || [];
+    const targetCycle = availableCycles.find((cycle) =>
+      (cycle.sessions || []).some((session) => session.id === target.sessionId))
+      || availableCycles.find((cycle) => cycle.id === target.cycleId)
+      || availableCycles[0];
+    const targetSession = targetCycle
+      ? (targetCycle.sessions || []).find((session) => session.id === target.sessionId)
+        || (targetCycle.sessions || [])[0]
+      : data.latestSession;
+    appliedNavigationRef.current = target.locationTick;
+    if (target.cycleId || target.sessionId) {
+      // A reply link must remain visible even after a previous date/type/POC
+      // filter excluded its cycle or its author.
+      setCycleTypes([]);
+      setQuickOutcomes([]);
+      setCompletion("");
+      setRange({ from: "", to: "", basis: "started" });
+      setFeedbackPocId("");
+    }
+    setCycleId(targetCycle?.id || "");
+    setSessionId(targetSession?.id || "");
+    loadConversation(targetSession?.id || "", useEmbeddedMessages ? data : null);
+  }
+
+  useEffect(() => {
+    loadWorkspace(projectKey);
+    return () => {
+      workspaceRequestRef.current += 1;
+      messageRequestRef.current += 1;
+    };
+  }, [projectKey]);
+
+  useEffect(() => {
+    if (loading || workspace?.project?.key !== projectKey
+      || appliedNavigationRef.current === locationTick) return;
+    applyWorkspaceNavigation(workspace, false);
+  }, [workspace, projectKey, locationTick, requestedCycleId, requestedSessionId, loading]);
 
   useEffect(() => {
     setFeedbackPocId("");
@@ -279,11 +320,18 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
   }, [sessionId]);
 
   useEffect(() => {
-    if (loading || !workspace) return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("section") !== "issues") return;
-    window.setTimeout(() => issuesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
-  }, [loading, workspace, locationTick]);
+    if (loading || workspace?.project?.key !== projectKey
+      || appliedNavigationRef.current !== locationTick
+      || scrolledNavigationRef.current === locationTick) return;
+    const target = requestedSection === "issues" ? issuesRef.current
+      : ["tracker", "conversation"].includes(requestedSection) ? conversationRef.current : null;
+    if (!target) return;
+    const timer = window.setTimeout(() => {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      scrolledNavigationRef.current = locationTick;
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loading, workspace, projectKey, locationTick, requestedSection, cycleId, sessionId]);
 
 
   // Land on the newest reply, not the opening question.
@@ -371,18 +419,12 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
     if (feedbackPocId && !matchingPocSession) setFeedbackPocId("");
     const first = matchingPocSession || sessions[0] || null;
     setSessionId(first ? first.id : "");
-    const requestId = messageRequestRef.current + 1;
-    messageRequestRef.current = requestId;
-    const nextMessages = first ? await loadMessages(first.id) : [];
-    if (requestId === messageRequestRef.current) setMessages(nextMessages);
+    await loadConversation(first?.id || "");
   }
 
   async function selectSession(id) {
     setSessionId(id);
-    const requestId = messageRequestRef.current + 1;
-    messageRequestRef.current = requestId;
-    const nextMessages = await loadMessages(id);
-    if (requestId === messageRequestRef.current) setMessages(nextMessages);
+    await loadConversation(id);
   }
 
   async function selectFeedbackPoc(id) {
@@ -617,11 +659,6 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
     }
   }
 
-  if (
-    loading
-    || !dashboard
-    || (workspace?.project?.key && workspace.project.key !== projectKey)
-  ) return <LoadingBlock label="Loading project workspace" />;
   if (error) {
     return (
       <div className="error-block">
@@ -630,6 +667,9 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
         <Button icon={RefreshCw} variant="primary" onClick={() => loadWorkspace(projectKey)}>Try again</Button>
       </div>
     );
+  }
+  if (loading || (workspace?.project?.key && workspace.project.key !== projectKey)) {
+    return <LoadingBlock label="Loading project workspace" />;
   }
   if (!workspace?.project) return <EmptyState title="No project selected" text="Choose a project from the filter above." />;
 
@@ -1525,6 +1565,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
         </div>
       </Panel>
 
+      <div ref={conversationRef} className="section-anchor" id="project-conversation">
       <Panel
         title="Conversation"
         badge={selectedSession ? formatSessionOutcome(selectedSession) : "No session"}
@@ -1563,7 +1604,13 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
           </div>
         }
       >
-        {messages.length ? (
+        {messagesLoading ? <LoadingBlock label="Loading conversation" /> : messagesError ? (
+          <div className="error-block" role="alert">
+            <strong>Could not load this conversation</strong>
+            <p>{messagesError.message}</p>
+            <Button icon={RefreshCw} onClick={() => loadConversation(sessionId)}>Try again</Button>
+          </div>
+        ) : messages.length ? (
           <div className="message-timeline wide" ref={timelineRef}>
             {messages.map((message) => (
               <div key={message.id} className={`message ${message.side || "srv"}`}>
@@ -1630,6 +1677,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
           </div>
         ) : null}
       </Panel>
+      </div>
 
       <div ref={issuesRef} className="section-anchor">
       <Panel

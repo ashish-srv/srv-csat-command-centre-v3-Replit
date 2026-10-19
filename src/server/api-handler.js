@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const { createStore } = require("../lib/store");
 const { MAX_REMINDERS, nextQuickCheckinAt } = require("../lib/supabase-store");
-const { processWhatsAppReply, getConversationState, buildChecklist, applyCaptured, applyServiceScopeDecision, applyTurnProgress, isEverythingCovered, soundsLikeFarewell, isMoveOnReply, overallRatingQuestion, projectEndReviewQuestion, buildAnalysis, detectors, STATES, GUARDRAILS, CLOSING_GRACE_MS, DEFERRAL_REPLY, SERVICE_SCOPE_DECISIONS, SERVICE_SCOPE_QUESTION } = require("../lib/whatsapp-state-machine");
+const { processWhatsAppReply, getConversationState, buildChecklist, applyCaptured, applyServiceScopeDecision, applyTurnProgress, finishFeedbackQuestions, isEverythingCovered, soundsLikeFarewell, isMoveOnReply, overallRatingQuestion, projectEndReviewQuestion, buildAnalysis, detectors, STATES, GUARDRAILS, CLOSING_GRACE_MS, DEFERRAL_REPLY, SERVICE_SCOPE_DECISIONS, SERVICE_SCOPE_QUESTION } = require("../lib/whatsapp-state-machine");
 const { offScriptReply, reviewIssues, readTone, readNps, interpretReply, conductTurn, predictSatisfaction, cleanRepeatedText, extractExplicitAppreciations, hasSatisfactionEvidence, ALERT_CONFIDENCE_THRESHOLD } = require("../lib/gemini");
 const { emitAutomation } = require("../lib/n8n");
 const { importAdminWorkbook } = require("../lib/admin-import");
@@ -212,6 +212,7 @@ async function projectEndFeedbackStarted(store, project) {
 }
 
 function requiredConversationAction(checklist, conversationState) {
+  if (conversationState.clientRequestedClose) return { type: "close" };
   const pendingServiceKey = conversationState.pendingServiceKey;
   const pendingFirst = (items = []) => items.find((item) => item.serviceKey === pendingServiceKey) || items[0];
   if (conversationState.pendingGeneralIssue) return { type: "general_issue_detail" };
@@ -242,6 +243,10 @@ function requiredConversationAction(checklist, conversationState) {
   }
   if (checklist.servicesNotYetDiscussedWithKeys?.length) {
     return { type: "service", ...checklist.servicesNotYetDiscussedWithKeys[0] };
+  }
+  const ratingPause = conversationState.ratingFeedbackPause;
+  if (ratingPause && (ratingPause.ratingType === "nps" ? checklist.npsStillNeeded : checklist.overallRatingStillNeeded)) {
+    return { type: "rating_feedback", ratingType: ratingPause.ratingType, offerChoice: !ratingPause.choiceAsked };
   }
   if (checklist.overallRatingStillNeeded) return { type: "overall_rating" };
   if (checklist.npsStillNeeded) return { type: "nps" };
@@ -676,13 +681,51 @@ function reconcilePendingServiceArtifacts(conversationState, stateBefore, captur
  * there are recorded and acknowledged, then one inclusive follow-up remains.
  * Only a genuinely vague point stays open for clarification.
  */
-function settleActionableFinalSweepFacts(conversationState, stateBefore, conducted = {}) {
-  if (pendingQuestionTypeFor(stateBefore) !== "final_sweep") return conversationState;
+function settleActionableFinalSweepFacts(conversationState, stateBefore, conducted = {}, text = "", interpretation = null) {
+  const appreciationKeys = new Set((conducted.appreciations || []).map((item) => item.serviceKey).filter(Boolean));
+  const isAppreciationFollowUp = (key) => conversationState.awaitingAppreciationPersonName?.serviceKey === key
+    || (stateBefore.state === STATES.CLOSING_GRACE && appreciationKeys.has(key));
+  const pendingType = pendingQuestionTypeFor(stateBefore);
+  const completionScope = detectors.completionScopeFor(text, interpretation);
+  const hasNewFacts = (conducted.captured || []).length > 0 || (conducted.observations || []).length > 0
+    || (conducted.appreciations || []).length > 0;
+  const declinedTopic = ["topic", "rating"].includes(completionScope)
+    || (completionScope === "none" && interpretation?.intent === "negative" && !hasNewFacts);
+  if (declinedTopic && pendingType === "overall_rating") conversationState.overallRatingDeclined = true;
+  if (declinedTopic && pendingType === "nps") conversationState.npsDeclined = true;
+  if (declinedTopic && ["issue_reason", "service_followup"].includes(pendingType)) {
+    const service = conversationState.mentionedServices?.[stateBefore.pendingServiceKey];
+    if (service) {
+      service.status = service.reasonText ? "captured" : "declined";
+      service.serviceFollowUpAnswered = true;
+      service.detailDeclined = true;
+    }
+  }
+  const directToRating = ["overall_rating", "nps", "final_sweep", "rating_feedback"].includes(pendingType)
+    || Boolean(stateBefore.ratingFeedbackPause)
+    || [STATES.WAITING_FOR_OVERALL_RATING, STATES.WAITING_FOR_NPS, STATES.CLOSING_GRACE].includes(stateBefore.state)
+    || (conversationState.sessionType === "project_end" && conversationState.serviceScopeStatus !== "service_by_service");
+  const suppliedKeys = (conducted.captured || []).map((item) => item.serviceKey);
+  const changedTopic = (conducted.observations || []).length > 0
+    || (suppliedKeys.length > 0 && !suppliedKeys.includes(stateBefore.pendingServiceKey));
+  if (pendingType === "issue_reason" && changedTopic) {
+    const previous = conversationState.mentionedServices?.[stateBefore.pendingServiceKey];
+    if (previous?.status === "needs_reason") {
+      previous.status = "captured";
+      previous.serviceFollowUpAnswered = true;
+      previous.detailDeclined = true;
+    }
+  }
 
   for (const item of conducted.captured || []) {
     if (!item.serviceKey || item.needsFollowUp === true) continue;
+    if (isAppreciationFollowUp(item.serviceKey)) continue;
     const service = conversationState.mentionedServices?.[item.serviceKey];
     if (!service || service.status !== "needs_service_followup") continue;
+    const previous = stateBefore.mentionedServices?.[item.serviceKey];
+    if (!directToRating && pendingType !== "service_followup"
+      && !previous?.serviceFollowUpAnswered && !previous?.serviceFollowUpAsked
+      && !Number(previous?.serviceFollowUpAskCount || 0)) continue;
     service.serviceFollowUpAnswered = true;
     service.status = service.rating !== null && service.rating !== undefined
       ? "rated"
@@ -699,7 +742,53 @@ function settleActionableFinalSweepFacts(conversationState, stateBefore, conduct
   if (hasActionableObservation && conversationState.pendingObservation?.stage === "followup") {
     conversationState.pendingObservation = null;
   }
+  if (directToRating) {
+    for (const service of Object.values(conversationState.mentionedServices || {})) {
+      if (isAppreciationFollowUp(service.serviceKey)) continue;
+      if (service.status !== "needs_service_followup") continue;
+      service.serviceFollowUpAnswered = true;
+      service.status = service.rating != null ? "rated" : "captured";
+    }
+    if (conversationState.pendingObservation?.stage === "followup") conversationState.pendingObservation = null;
+  }
+  updateRatingFeedbackPause(conversationState, stateBefore, conducted, text, interpretation);
   return conversationState;
+}
+
+// This is only a conversational pause around a rating already requested. It
+// never supplies facts or scores and never restarts a service interview.
+function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpretation = null) {
+  if (state.sessionType === "quick_checkin" || state.closingGraceExpiresAt
+    || [STATES.CLOSING_GRACE, STATES.COMPLETED, STATES.HANDED_OFF, STATES.OPTED_OUT].includes(before.state)) {
+    state.ratingFeedbackPause = null;
+    return;
+  }
+  const pending = pendingQuestionTypeFor(before);
+  const previousPause = before.ratingFeedbackPause;
+  const ratingType = previousPause?.ratingType || (["overall_rating", "nps"].includes(pending) ? pending : null);
+  if (!ratingType) return;
+  const score = ratingType === "nps" ? state.npsScore : state.overallRating;
+  if (score != null || state.clientRequestedClose || (ratingType === "nps" ? state.npsDeclined : state.overallRatingDeclined)) {
+    state.ratingFeedbackPause = null;
+    return;
+  }
+  const suppliedFacts = (facts.captured || []).length || (facts.observations || []).length || (facts.appreciations || []).length;
+  const completion = detectors.completionScopeFor(text, interpretation);
+  if (completion === "rating") {
+    if (ratingType === "nps") state.npsDeclined = true;
+    else state.overallRatingDeclined = true;
+    state.ratingFeedbackPause = null;
+    return;
+  }
+  const finished = ["feedback", "conversation"].includes(completion)
+    || (!suppliedFacts && (completion === "topic" || interpretation?.intent === "negative"
+      || interpretation?.intent === "affirmative" || isMoveOnReply(text)
+      || soundsLikeFarewell(text) || detectors.isNegativeSkip(text) || detectors.isAffirmative(text)));
+  if (finished) {
+    state.ratingFeedbackPause = null;
+  } else if (suppliedFacts || interpretation?.intent === "more_detail") {
+    state.ratingFeedbackPause = previousPause ? { ...previousPause } : { ratingType, choiceAsked: false };
+  }
 }
 
 function issueOwnershipScore(service) {
@@ -792,10 +881,7 @@ function baseFallbackForAction(action, conversationState, project, context = {})
     if (action.topic === "Billing") {
       return "I am sorry to hear about the billing concern. We have recorded it for review by the relevant team. Is there anything else you would like the Directors to know?";
     }
-    if (action.topic === "Senior Involvement") {
-      return `I am sorry to hear about the lack of senior involvement and communication. We will raise this with management and ask the relevant leaders to address it. Is there anything else about Senior Involvement we should know?`;
-    }
-    return `I am sorry to hear that. Our team will look into it. Is there anything else about ${action.topic} we should know?`;
+    return "Your feedback is recorded for review. Is there anything else you would like the Directors to know?";
   }
   if (action.type === "appreciation") {
     // Retained only for an older session that was already waiting on this
@@ -805,11 +891,51 @@ function baseFallbackForAction(action, conversationState, project, context = {})
   if (action.type === "final_sweep") {
     return "Before we finish, is there anything else you would like the Directors to know—such as an issue, an area for improvement, or any appreciation you would like us to record? If not, just reply no.";
   }
+  if (action.type === "rating_feedback") {
+    if (!action.offerChoice) return "";
+    return action.ratingType === "nps"
+      ? "Would you like to add anything else, or shall we move to the recommendation rating?"
+      : "Would you like to add anything else, or shall we move to the overall rating?";
+  }
   if (action.type === "overall_rating") return overallRatingQuestion(conversationState, project);
   if (action.type === "nps") {
     return "Lastly, how likely are you to recommend SRV Media to someone in your network, out of 10?";
   }
   return "Thank you. Your feedback and overall rating are recorded. This chat will remain open for 10 minutes in case you want to correct or add anything.";
+}
+
+function latestConcernFacts(context = {}) {
+  return [
+    ...(context.captured || []).filter((item) => item.sentiment === "negative")
+      .map((item) => ({ key: `service:${item.serviceKey}`, detail: item.summary })),
+    ...(context.observations || []).filter((item) => item.sentiment === "negative" && item.kind !== "appreciation")
+      .map((item) => ({ key: `observation:${item.topic}`, detail: item.detail }))
+  ].filter((item) => String(item.detail || "").trim());
+}
+
+function rememberAcknowledgedConcerns(conversationState, facts = {}) {
+  const keys = latestConcernFacts(facts).map((item) => item.key);
+  if (keys.length) conversationState.acknowledgedConcernTopics = [...new Set([
+    ...(conversationState.acknowledgedConcernTopics || []), ...keys
+  ])].slice(-40);
+}
+
+function concernAcknowledgement(context, conversationState) {
+  const facts = latestConcernFacts(context);
+  if (!facts.length) return "";
+  const acknowledged = conversationState.acknowledgedConcernTopics || [];
+  const alreadyAcknowledged = facts.every((item) => acknowledged.includes(item.key));
+  const details = [...new Set(facts.map((item) => String(item.detail).replace(/\s+/g, " ").trim()))]
+    .slice(0, 3).map((detail) => detail.slice(0, 220).replace(/[.;\s]+$/, ""));
+  return `${alreadyAcknowledged ? "Thank you for the additional detail." : "I am sorry that these aspects of your experience did not meet expectations."} I have recorded: ${details.join("; ")}. Your feedback is saved for review.`;
+}
+
+function requestAcknowledgement(context = {}) {
+  const requests = (context.observations || []).filter((item) => item.kind === "request" && item.detail);
+  if (!requests.length) return "";
+  const positiveLead = requests.some((item) => item.positiveContext === "Social Media")
+    ? "Glad to hear that social media is working well. " : "";
+  return `${positiveLead}I have recorded your request for the relevant team to review: ${requests.map((item) => String(item.detail).slice(0, 220).replace(/[.;\s]+$/, "")).slice(0, 2).join("; ")}.`;
 }
 
 function fallbackForAction(action, conversationState, project, context = {}) {
@@ -844,14 +970,22 @@ function fallbackForAction(action, conversationState, project, context = {}) {
     && !conversationState.awaitingAppreciationPersonName
     ? `Is there anything else you would like to add about ${action.name}? If that is all, just reply no.`
     : baseFallbackForAction(action, conversationState, project, context);
-  return acknowledgement ? `${acknowledgement} ${next}` : next;
+  const concern = !["issue_reason", "service_followup", "observation_reason"].includes(action.type)
+    ? concernAcknowledgement(context, conversationState) : "";
+  const request = requestAcknowledgement(context);
+  const otherDetails = action.type === "rating_feedback" && !concern && !request && !acknowledgement
+    ? [...new Set([...(context.captured || []).map((item) => item.summary), ...(context.observations || []).map((item) => item.detail)]
+      .filter(Boolean))].slice(0, 2).map((detail) => String(detail).slice(0, 220)).join("; ") : "";
+  const recorded = otherDetails ? `Thank you. I have recorded your additional feedback: ${otherDetails.replace(/[.;\s]+$/, "")}.` : "";
+  return [concern, request, acknowledgement, recorded, next].filter(Boolean).join(" ")
+    || "Thank you. I have added that to your recorded feedback.";
 }
 
 function closingGraceMessage(poc, conversationState = {}, context = {}) {
   const salutation = (poc && (poc.salutation || poc.name)) || "there";
   const rating = conversationState.overallRating;
   const ratingText = rating === null || rating === undefined
-    ? "your overall rating"
+    ? "feedback"
     : `rating of ${rating} out of 10`;
   if (conversationState.reopenedDuringClosingGrace) {
     const appreciation = (context.appreciations || [])[0];
@@ -864,12 +998,16 @@ function closingGraceMessage(poc, conversationState = {}, context = {}) {
     const recorded = appreciation
       ? "We will share your kind words with the relevant team, and I have added your appreciation to your recorded feedback."
       : "I have added that to your recorded feedback.";
-    return `${acknowledgement} ${recorded} ${ratingText[0].toUpperCase()}${ratingText.slice(1)} remains recorded, and the original 10-minute window is still open if you want to add or correct anything else.`;
+    const addedConcern = concernAcknowledgement(context, conversationState);
+    const addedRequest = requestAcknowledgement(context);
+    return `${[addedConcern, addedRequest, acknowledgement].filter(Boolean).join(" ")} ${recorded} ${ratingText[0].toUpperCase()}${ratingText.slice(1)} remains recorded, and the original 10-minute window is still open if you want to add or correct anything else.`;
   }
   const closingLine = conversationState.sessionType === "project_end"
     ? "Thank you again for your honesty, time and trust. We appreciate the opportunity to have worked with you and wish you every success ahead."
     : "Thank you again for your honesty, time and trust. Please take care, and we look forward to connecting with you again next month.";
-  return `Thank you, ${salutation}. Your feedback and ${ratingText} have been successfully recorded for confidential review by the Directors.\n\nIf your feedback includes a concern or an area for improvement, the system has created the necessary action item and notified the Directors. It will be handled constructively and discreetly.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
+  const recorded = rating == null ? "Your feedback has" : `Your feedback and ${ratingText} have`;
+  const acknowledgement = [concernAcknowledgement(context, conversationState), requestAcknowledgement(context), appreciationAcknowledgement(context, {}, conversationState)].filter(Boolean).join(" ");
+  return `${acknowledgement ? `${acknowledgement}\n\n` : ""}Thank you, ${salutation}. ${recorded} been successfully recorded for confidential review by the Directors.\n\nYour concerns and suggestions are recorded for constructive and discreet review.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
 }
 
 function numericScore(value) {
@@ -1020,12 +1158,25 @@ function recordRequiredQuestion(conversationState, project, action) {
     const service = conversationState.mentionedServices?.[action.serviceKey];
     if (service) service.noteNeedsAck = false;
   }
+  if (action.type === "observation_reason") {
+    const topic = String(action.topic || "").toLowerCase();
+    conversationState.observationReasonAskCounts = {
+      ...(conversationState.observationReasonAskCounts || {}),
+      [topic]: Number(conversationState.observationReasonAskCounts?.[topic] || 0) + 1
+    };
+  }
+  if (action.type === "rating_feedback" && conversationState.ratingFeedbackPause && action.offerChoice) {
+    conversationState.ratingFeedbackPause.choiceAsked = true;
+  }
   conversationState.pendingQuestionType = action.type === "close" ? null : action.type;
   return markers;
 }
 
 function setStateForRequiredAction(conversationState, action, recordedQuestion) {
-  if (recordedQuestion.askedForProjectEndReview) {
+  if (action.type === "rating_feedback") {
+    conversationState.state = action.ratingType === "nps" ? STATES.WAITING_FOR_NPS : STATES.WAITING_FOR_OVERALL_RATING;
+    conversationState.pendingServiceKey = null;
+  } else if (recordedQuestion.askedForProjectEndReview) {
     conversationState.state = STATES.WAITING_FOR_OPEN_FEEDBACK;
     conversationState.pendingServiceKey = null;
   } else if (recordedQuestion.askedForServiceScope) {
@@ -1107,6 +1258,7 @@ function acceptedOverallRating(conversationState, conducted, text = "") {
   // question has genuinely been asked, retain an explicit rating from the
   // latest client reply instead of asking for the same number again.
   const answeringNps = conversationState.state === STATES.WAITING_FOR_NPS
+    || conversationState.ratingFeedbackPause?.ratingType === "nps"
     || pendingQuestionTypeFor(conversationState) === "nps";
   if (!conversationState.overallRatingAsked || answeringNps) return null;
 
@@ -1145,6 +1297,14 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
   for (const message of candidates) {
     const body = String(message.body || "").trim();
     if (message.side === "srv") {
+      // Confirmations such as "updated your overall rating to 10" describe a
+      // stored value; they do not ask the client which score their next reply
+      // belongs to. Only an actual question (or an explicit waiting-state
+      // marker on legacy messages) may change the context for a bare number.
+      const state = message.metadata?.stateAfter || message.metadata?.state;
+      const asksScoreQuestion = /\?\s*$/.test(body)
+        || [STATES.WAITING_FOR_OVERALL_RATING, STATES.WAITING_FOR_NPS].includes(state);
+      if (!asksScoreQuestion) continue;
       const asksNps = /\b(?:recommend|recommendation|nps|likely)\w*\b/i.test(body)
         && /(?:\b0\s*(?:to|-)\s*10\b|\bout of 10\b)/i.test(body);
       const asksOverall = /\boverall\b/i.test(body)
@@ -1158,20 +1318,29 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
       continue;
     }
     if (message.side !== "client") continue;
+    // Recommendation/NPS corrections form a separate score stream. Check
+    // this before the generic word "rating": "change recommend rating to 9"
+    // contains both, but must never be allowed to rewrite CSAT.
+    const recommendationDirected = detectors.isRecommendationRatingReply(body)
+      || /\b(?:recommend|recommendation|nps|likelihood)\w*\b/i.test(body);
+    if (recommendationDirected) continue;
+
     const explicitlyOverall = /\boverall\b.{0,45}\b(?:rating|rate|score|csat|\d|zero|one|two|three|four|five|six|seven|eight|nine|ten)\b|\b(?:rating|score|csat)\b.{0,45}\boverall\b/i.test(body);
-    // Once the bot has asked for recommendation likelihood, an ordinary
-    // number answers NPS. Only wording that explicitly says "overall rating"
-    // is allowed to alter CSAT after that point.
-    if (ratingContext === "nps" && !explicitlyOverall) continue;
     const read = detectors.detectRatingCorrection(body);
     if (!read) continue;
     if (/\b(?:day|days|week|weeks|month|months|campaign|campaigns|lead|leads|report|reports)\b/i.test(body)
       && !read.scale
       && !/\b(?:rating|raiting|score|csat|rate)\b/i.test(body)) continue;
     const direct = /^\s*(?:\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*(?:\/|out of)\s*(?:5|10))?\s*[.!]*\s*$/i.test(body);
-    const explicit = detectors.isRatingCorrectionReply(body)
+    const explicitCorrection = detectors.isRatingCorrectionReply(body);
+    const explicitlyCsatCorrection = /\b(?:overall|csat|rating|raiting)\b/i.test(body);
+    const explicit = explicitCorrection
       || /\b(?:out of|overall rating|rating|raiting|csat)\b/i.test(body);
     if (!direct && !explicit) continue;
+    // A clearly worded CSAT/rating correction is authoritative even after the
+    // NPS question. A bare number or a generic "take 5" inherits the NPS
+    // question instead; neither may be pulled backward into overall CSAT.
+    if (ratingContext === "nps" && !explicitlyOverall && !explicitlyCsatCorrection) continue;
     const normalized = read.scale === 5 ? read.value * 2 : read.value;
     if (normalized < 0 || normalized > 10 || (read.scale && ![5, 10].includes(read.scale))) continue;
     latest = normalized;
@@ -1227,7 +1396,8 @@ function validatedAnswerMarkers(stateBefore, conducted, text, interpretation = n
   const pendingServiceKey = stateBefore.pendingServiceKey || null;
   const explicitlyFinished = isMoveOnReply(text)
     || soundsLikeFarewell(text)
-    || interpretation?.intent === "negative";
+    || interpretation?.intent === "negative"
+    || detectors.completionScopeFor(text, interpretation) !== "none";
   const capturedServiceKeys = (conducted.captured || [])
     .map((item) => item.serviceKey)
     .filter(Boolean);
@@ -1251,7 +1421,8 @@ function validatedAnswerMarkers(stateBefore, conducted, text, interpretation = n
     answeredAnythingElse: pendingType === "final_sweep" && explicitlyFinished,
     completedServiceFollowUpKeys: pendingType === "service_followup"
       && pendingServiceKey
-      && (explicitlyFinished || movedToAnotherService)
+      && (explicitlyFinished || movedToAnotherService
+        || (conducted.captured || []).length > 0 || (conducted.observations || []).length > 0)
       ? [pendingServiceKey]
       : []
   };
@@ -1261,7 +1432,8 @@ function applyConversationInterruption(conversationState, stateBefore, interpret
   const pendingType = pendingQuestionTypeFor(stateBefore);
   const explicitlyFinished = isMoveOnReply(text)
     || soundsLikeFarewell(text)
-    || interpretation?.intent === "negative";
+    || interpretation?.intent === "negative"
+    || detectors.completionScopeFor(text, interpretation) !== "none";
 
   if (["observation_reason", "observation_followup"].includes(pendingType) && explicitlyFinished) {
     conversationState.pendingObservation = null;
@@ -1275,7 +1447,7 @@ function applyConversationInterruption(conversationState, stateBefore, interpret
   if (pendingType === "general_issue_detail" && suppliedFeedback) {
     conversationState.pendingGeneralIssue = false;
   }
-  if (pendingType === "observation_followup" && suppliedFeedback) {
+  if (["observation_reason", "observation_followup"].includes(pendingType) && suppliedFeedback) {
     // They answered "anything else?" by raising a new point. Follow their
     // lead instead of forcing an explicit no on the previous topic.
     conversationState.pendingObservation = null;
@@ -1286,13 +1458,15 @@ function applyConversationInterruption(conversationState, stateBefore, interpret
   if (actionableObservations.length) {
     const latest = actionableObservations[actionableObservations.length - 1];
     conversationState.pendingGeneralIssue = false;
-    conversationState.pendingObservation = {
+    const topicKey = String(latest.topic || "").toLowerCase();
+    const reasonAlreadyAsked = Number(conversationState.observationReasonAskCounts?.[topicKey] || 0) >= 1;
+    conversationState.pendingObservation = latest.needsFollowUp && !reasonAlreadyAsked ? {
       topic: latest.topic,
       stage: latest.needsFollowUp ? "reason" : "followup",
       acknowledged: false,
       responseKind: latest.kind === "request" ? "request" : "feedback",
       positiveContext: latest.positiveContext || null
-    };
+    } : null;
   } else if (
     interpretation?.intent === "more_detail"
     && !(conducted.captured || []).length
@@ -1317,8 +1491,10 @@ function applyPendingIssueInterpretation(conversationState, stateBefore, interpr
   if (!service) return false;
   service.sentiment = "negative";
   service.detailAnswered = true;
-  service.serviceFollowUpAnswered = false;
-  service.status = "needs_service_followup";
+  const covered = conversationState.sessionType === "project_end"
+    || Number(service.serviceFollowUpAskCount || 0) >= 1 || service.serviceFollowUpAnswered;
+  service.serviceFollowUpAnswered = Boolean(covered);
+  service.status = covered ? "captured" : "needs_service_followup";
   return true;
 }
 
@@ -1353,6 +1529,11 @@ function messageMatchesRequiredAction(action, message) {
   }
   if (action.type === "final_sweep") {
     return /\b(?:anything else|directors?|management|issue|area for improvement|appreciation)\b/i.test(text);
+  }
+  if (action.type === "rating_feedback") {
+    if (!action.offerChoice) return !/[?？]/.test(text) && !/\b(?:rate|rating|score|recommend)\w*\b/i.test(text);
+    const ratingName = action.ratingType === "nps" ? "recommendation" : "overall";
+    return text.endsWith(`Would you like to add anything else, or shall we move to the ${ratingName} rating?`);
   }
   if (action.type === "overall_rating") {
     return /\b(?:rate|rating)\b/i.test(text)
@@ -1431,9 +1612,11 @@ function normalizeLegacyServiceFollowups(conversationState) {
   let waitingForFollowUp = false;
   for (const service of Object.values(conversationState.mentionedServices || {})) {
     if (service.status !== "needs_rating") continue;
-    service.status = "needs_service_followup";
-    service.serviceFollowUpAnswered = false;
-    waitingForFollowUp = true;
+    const covered = service.serviceFollowUpAnswered || Number(service.serviceFollowUpAskCount || 0) >= 1
+      || (conversationState.sessionType === "project_end" && conversationState.serviceScopeStatus !== "service_by_service");
+    service.status = covered ? "captured" : "needs_service_followup";
+    service.serviceFollowUpAnswered = Boolean(covered);
+    if (!covered) waitingForFollowUp = true;
   }
   const missing = (conversationState.missingFields || [])
     .filter((field) => field !== "service_rating" && field !== "service_followup");
@@ -1761,6 +1944,7 @@ function groundLatestReplyInterpretation(interpretation, text, project = {}) {
 
   return {
     ...interpretation,
+    deferRequested: detectors.clientRequestedDeferral(text, interpretation),
     serviceKeys,
     captured,
     observations,
@@ -1776,7 +1960,16 @@ function fallbackRoleAppreciations(text, project = {}) {
   const praiseCue = /\b(?:approachable|responsive|supportive|helpful|patient|understanding|cooperative|available|smooth(?:ly)?|easy coordination|great support|excellent support)\b/i;
   if (!roleCue.test(source) || !praiseCue.test(source)) return [];
 
-  const segment = source.split(/(?<=[.!?])\s+|\n+/).find((part) => roleCue.test(part) && praiseCue.test(part)) || source;
+  const hasPositiveRolePraise = (part) => roleCue.test(part)
+    && [...part.matchAll(new RegExp(praiseCue.source, "ig"))].some((match) => {
+      const prefix = part.slice(0, match.index);
+      // A lexical outage fallback must not praise an account manager for
+      // being "never available" or "not responsive or helpful". Semantic
+      // appreciations from the authoritative read are handled separately.
+      return !/\b(?:not|never|hardly|rarely|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t)\b(?:\s+[a-z]+){0,3}\s*$/i.test(prefix);
+    });
+  const segment = source.split(/(?<=[.!?])\s+|\n+/).find(hasPositiveRolePraise);
+  if (!segment) return [];
   const afterRole = segment.match(/\b(?:pocs?|account managers?|project managers?|relationship managers?)\b\s*[,;:-]?\s*([^.!?]{0,180})/i)?.[1] || "";
   const ignored = new Set([
     "The", "Our", "Your", "Their", "And", "But", "Or", "Initially", "Now", "Always",
@@ -3391,6 +3584,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   let replyProvider = "state_machine";
   let replyModel = null;
   let replyError = null;
+  let latestReplyFacts = interpretation;
 
   // A deferral is already a complete, safe control response. Gemini may have
   // been needed to understand unusual wording, but it must not generate a
@@ -3581,8 +3775,11 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         turn.conversationState, stateBefore, interpretation, conducted, text
       );
       settleActionableFinalSweepFacts(
-        turn.conversationState, stateBefore, conducted
+        turn.conversationState, stateBefore, conducted, text, interpretation
       );
+      if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) {
+        finishFeedbackQuestions(turn.conversationState, project, detectors.completionScopeFor(text, interpretation) === "conversation");
+      }
       // First record only what THIS client reply answered. The checklist then
       // selects the next action; outgoing-question markers are accepted only
       // when they match that action.
@@ -3615,10 +3812,10 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       const requiredService = requiredAction.serviceKey
         ? turn.conversationState.mentionedServices?.[requiredAction.serviceKey]
         : null;
-      const needsConcernAcknowledgement = ["issue_reason", "service_followup"].includes(requiredAction.type)
-        && requiredService?.sentiment === "negative";
-      const hasConcernAcknowledgement = /\b(?:sorry|hear you|thank you for (?:raising|explaining|sharing|flagging)|appreciate you (?:raising|explaining|sharing|flagging)|thank you for letting us know)\b/i.test(conducted.text)
-        && /\b(?:look into|review|work on|share (?:this|it) with|take this forward)\b/i.test(conducted.text);
+      const latestConcerns = latestConcernFacts(conducted);
+      const needsConcernAcknowledgement = latestConcerns.length > 0
+        || (["issue_reason", "service_followup"].includes(requiredAction.type) && requiredService?.sentiment === "negative");
+      const hasConcernAcknowledgement = /\b(?:sorry|hear you|noted|recorded|concerns?|issues?|improv\w*|review|thank you for (?:raising|explaining|flagging))\b/i.test(conducted.text);
       const needsAppreciationAcknowledgement = Boolean(conducted.appreciations?.length)
         && !responseAcknowledgesAppreciation(conducted.text);
       const unsupportedResponseTopic = responseIntroducesUnsupportedTopic(
@@ -3630,7 +3827,10 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       );
       const machineWordedAction = (needsConcernAcknowledgement && !hasConcernAcknowledgement)
         || needsAppreciationAcknowledgement
-        || unsupportedResponseTopic;
+        || (requiredAction.type === "rating_feedback"
+          && !/\b(?:thank|noted|recorded|added|appreciat\w*|sorry|hear you)\b/i.test(conducted.text))
+        || unsupportedResponseTopic
+        || /\b(?:(?:have|has|already)\s+(?:notified|alerted|emailed)|(?:directors|management|team)\s+(?:have|has)\s+been\s+(?:notified|alerted|informed))\b/i.test(conducted.text);
 
       if (actionRejected || machineWordedAction) {
         if (actionRejected) {
@@ -3640,6 +3840,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         conducted.readyToClose = requiredAction.type === "close";
       }
       const recordedQuestion = recordRequiredQuestion(turn.conversationState, project, requiredAction);
+      latestReplyFacts = conducted;
 
       // The score is re-read from the whole conversation at the end anyway, so
       // a correction simply changes what that reading sees. What must not
@@ -3788,8 +3989,13 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       settleActionableFinalSweepFacts(
         turn.conversationState,
         stateBefore,
-        fallbackConducted
+        fallbackConducted,
+        text,
+        interpretation
       );
+      if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) {
+        finishFeedbackQuestions(turn.conversationState, project, detectors.completionScopeFor(text, interpretation) === "conversation");
+      }
       const answerMarkers = validatedAnswerMarkers(stateBefore, fallbackConducted, text, interpretation);
       const suppliedFinalSweepFeedback = pendingQuestionTypeFor(stateBefore) === "final_sweep"
         && Boolean(
@@ -3832,6 +4038,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         fallbackConducted
       );
       const recordedQuestion = recordRequiredQuestion(turn.conversationState, project, requiredAction);
+      latestReplyFacts = fallbackConducted;
       setStateForRequiredAction(turn.conversationState, requiredAction, recordedQuestion);
       if (requiredAction.type === "close") {
         turn.conversationState.state = STATES.CLOSING_GRACE;
@@ -3870,6 +4077,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   // really send, otherwise the repeat guard compares a future reply with an
   // internal draft the client never saw and can falsely trigger a handoff.
   turn.conversationState.lastQuestionAsked = replyText;
+  rememberAcknowledgedConcerns(turn.conversationState, latestReplyFacts || {});
 
   // The conductor and timeout fallback may have grounded, restored or merged
   // service facts after the preliminary state-machine pass built its analysis.
@@ -4182,6 +4390,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         ? {
           intent: interpretation.intent,
           deferRequested: interpretation.deferRequested === true,
+          completionScope: detectors.completionScopeFor(text, interpretation),
+          completionEvidence: interpretation.completionEvidence || null,
           serviceScope: interpretation.serviceScope,
           sentiment: interpretation.sentiment,
           serviceKeys: interpretation.serviceKeys,
@@ -7736,6 +7946,8 @@ module.exports = {
     actionMatches,
     messageMatchesRequiredAction,
     fallbackForAction,
+    closingGraceMessage,
+    rememberAcknowledgedConcerns,
     recordRequiredQuestion,
     setStateForRequiredAction,
     acceptedOverallRating,
@@ -7830,7 +8042,7 @@ function quickCheckinDetailDecision(text, interpretation) {
   if (quickCheckinMeetingReferenceWithoutDetail(text)) return "meeting_reference";
   if (quickCheckinAcknowledgementReply(text)) return "acknowledgement";
 
-  if (interpretation?.deferRequested || interpretation?.intent === "defer") return "defer";
+  if (interpretation && detectors.clientRequestedDeferral(text, interpretation)) return "defer";
   const hasStructuredNegativeFeedback = (
     (Array.isArray(interpretation?.concerns) && interpretation.concerns.length > 0)
     || (Array.isArray(interpretation?.captured)
@@ -7841,6 +8053,7 @@ function quickCheckinDetailDecision(text, interpretation) {
   const hasSubstantiveNegativeFeedback = hasStructuredNegativeFeedback
     || (interpretation?.sentiment === "negative" && interpretation?.explainsProblem === true);
   if (hasSubstantiveNegativeFeedback) return "feedback";
+  if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) return "covered";
   if (interpretation?.intent === "negative") return "covered";
   if (interpretation?.intent === "affirmative") return "acknowledgement";
   if (interpretation?.intent === "off_topic" || interpretation?.intent === "rating") return "off_topic";
@@ -8089,7 +8302,7 @@ function enrichQuickCheckinInterpretation(text, project, interpretation = {}) {
   };
 }
 
-function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText, project = {}) {
+function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText, project = {}, additional = false) {
   const name = poc.salutation || poc.name;
   const concernPoints = quickCheckinConcernPoints(interpretation, { includeSummary: false });
   const appreciation = appreciationAcknowledgement({
@@ -8100,7 +8313,7 @@ function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText, pr
     return `Thank you, ${name}.${appreciationText} Your feedback has been recorded for confidential management review. ${windowText}`;
   }
   const numbered = concernPoints.map((point, index) => `${index + 1}) ${point}`).join(" ");
-  return `Thank you for sharing this candidly, ${name}. I’m sorry that the experience has been disappointing. I have specifically noted: ${numbered}.${appreciationText} Your feedback has been recorded for confidential management review. ${windowText}`;
+  return `${additional ? `Thank you for the additional detail, ${name}.` : `Thank you for sharing this candidly, ${name}. I’m sorry that the experience has been disappointing.`} I have specifically noted: ${numbered}.${appreciationText} Your feedback has been recorded for confidential management review. ${windowText}`;
 }
 
 async function handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil }) {
@@ -8201,7 +8414,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
         poc,
         recordedInterpretation,
         "The original 10-minute window remains open if you would like to add or correct anything else.",
-        project
+        project,
+        state.quickCheckinOutcome === "feedback_shared"
       );
     }
   } else if (allGood) {

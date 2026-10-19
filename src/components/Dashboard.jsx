@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Power, RefreshCw, X } from "lucide-react";
 import { apiGet, apiWriteWithAdminPin } from "../api";
 import { cycleInRange, DateRange, FilterBar, MultiSelect } from "./Filters.jsx";
@@ -11,6 +11,9 @@ import ReportDownloads from "./ReportDownloads.jsx";
 import { hasPermission } from "../permissions";
 
 const RISK_OPTIONS = ["High", "Watch", "Low", "Not scored"];
+// Stable empty inputs keep filter-cleanup effects from repeatedly updating
+// state while the Dashboard is waiting for its first response.
+const EMPTY_LIST = Object.freeze([]);
 const RESPONSE_LABELS = {
   awaiting: "Awaiting First Reply",
   partial: "Partial Response",
@@ -160,7 +163,7 @@ function ProjectRow({ project, cycles, sessions, expanded, onToggle, onOpenProje
   );
 }
 
-export default function Dashboard({ dashboard, onReload, onOpenProject, currentUser = null }) {
+export default function Dashboard({ dashboard, locationTick = 0, onReload, onOpenProject, currentUser = null }) {
   const [clusters, setClusters] = useState([]);
   const [clients, setClients] = useState([]);
   const [projectNames, setProjectNames] = useState([]);
@@ -180,10 +183,26 @@ export default function Dashboard({ dashboard, onReload, onOpenProject, currentU
   const [messagingError, setMessagingError] = useState("");
   const [messagingSaving, setMessagingSaving] = useState(false);
   const [reportError, setReportError] = useState("");
+  const attentionNavigationRef = useRef(null);
 
-  const allProjects = dashboard?.projects || [];
-  const allCycles = dashboard?.cycles || [];
-  const allResponseSessions = dashboard?.responseTracker || dashboard?.responseQueue || [];
+  useEffect(() => {
+    if (!dashboard || attentionNavigationRef.current === locationTick) return;
+    const section = new URLSearchParams(window.location.search).get("section");
+    if (!["dashboard-open-issues", "dashboard-open-cycles"].includes(section)) return;
+    // Rail totals cover every project. A stale client/date selection must not
+    // hide the items the user just asked to see.
+    setClusters([]); setClients([]); setProjectNames([]); setRisks([]); setStatuses([]);
+    setRange({ from: "", to: "", basis: "started" });
+    const timer = window.setTimeout(() => {
+      document.getElementById(section)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      attentionNavigationRef.current = locationTick;
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [dashboard, locationTick]);
+
+  const allProjects = dashboard?.projects || EMPTY_LIST;
+  const allCycles = dashboard?.cycles || EMPTY_LIST;
+  const allResponseSessions = dashboard?.responseTracker || dashboard?.responseQueue || EMPTY_LIST;
   const messagingEnabled = dashboard?.messaging?.enabled !== false;
   const canControlMessaging = hasPermission(currentUser, "messaging_controls");
 
