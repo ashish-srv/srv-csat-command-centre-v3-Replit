@@ -5882,16 +5882,28 @@ async function scenario(name, fn) {
         const result = JSON.parse(response.body);
         assert.strictEqual(response.statusCode, 201);
         assert.strictEqual(result.state, "waiting_for_overall_rating", text);
-        if (index === 1) {
+        if (index === 0) {
           assert.match(result.whatsappReplyText, /Would you like to add anything else, or shall we move to the overall rating\?$/);
+          assert.doesNotMatch(result.whatsappReplyText, /out of 10|on a scale/i);
+        } else if (index === 1) {
+          assert.doesNotMatch(result.whatsappReplyText, /\?|out of 10|on a scale/i);
           assert.doesNotMatch(result.whatsappReplyText, /appreciat|kind words/i, "never available is a complaint, not praise");
         } else assert.match(result.whatsappReplyText, /overall.*out of 10/i);
+        assert.doesNotMatch(result.whatsappReplyText, /the client|I have recorded:/i);
         assert.doesNotMatch(result.whatsappReplyText, /take your time|anything else about PPC|Senior Involvement/i);
         assert.strictEqual(result.session.conversationState.overallRating, null);
       }
       assert.match(store._session.conversationState.mentionedServices.ppc.reasonText, /32 admissions/);
       assert.match(store._session.conversationState.mentionedServices.ppc.reasonText, /never available for the review/);
       assert.strictEqual(store._session.conversationState.feedbackQuestionsComplete, true);
+      for (const [index, [text, csat, nps]] of [["5", 5, null], ["0", 5, 0], ["change rating to 3", 3, 0], ["and nps rating to 4", 3, 4]].entries()) {
+        const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text, providerMessageId: `wamid.history-arun-score-${index}` });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201);
+        assert.equal(result.session.conversationState.overallRating, csat, text);
+        assert.equal(result.session.conversationState.npsScore, nps, text);
+        assert.doesNotMatch(result.whatsappReplyText, /anything else about PPC|Senior Involvement|the client|I have recorded:/i);
+      }
     } finally {
       global.fetch = priorFetch;
       if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
@@ -5901,6 +5913,61 @@ async function scenario(name, fn) {
       store._session = priorSession;
     }
   });
+
+  for (const variant of ["natural choice", "premature numeric question", "internal summary"]) {
+    await scenario(`overall review preserves a client-facing acknowledgement with ${variant}`, async () => {
+      const priorKey = process.env.GEMINI_API_KEY;
+      const priorFetch = global.fetch;
+      const priorSession = store._session;
+      const priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      const text = "The PPC campaign was never optimized and acquisition costs were too high. We got only 32 admissions.";
+      const acknowledgement = "I am sorry the campaign results fell short, particularly the high acquisition costs and lack of optimisation.";
+      const naturalMessage = `${acknowledgement} Is there anything else you would like to share before we move to an overall rating?`;
+      const writer = {
+        acknowledgement,
+        message: variant === "natural choice" ? naturalMessage
+          : variant === "internal summary" ? "The client emphasizes poor campaign results. How would you rate us out of 10?"
+          : `${acknowledgement} How would you rate us out of 10?`,
+        askedForRatingTransition: variant === "natural choice",
+        askedForOverallRating: variant !== "natural choice",
+        captured: [{ serviceKey: "website", summary: "Invented website failure", sentiment: "negative" }]
+      };
+      global.fetch = async (_url, options) => {
+        const input = JSON.parse(options?.body || "{}").input || "";
+        const result = input.includes("Task: interpret ONE client reply") ? {
+          intent: "feedback", sentiment: "negative", serviceScope: "overall_feedback", explainsProblem: true,
+          serviceFeedback: [{ serviceHint: "PPC / Media", summary: text, sentiment: "negative", needsFollowUp: false }]
+        } : writer;
+        return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+      };
+      store._session = {
+        id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+        status: "started", completionStatus: "no_response", sessionType: "project_end",
+        conversationState: { state: "waiting_for_open_feedback", sessionType: "project_end", pendingQuestionType: "project_end_review", projectEndReviewAsked: true }
+      };
+      try {
+        const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text, providerMessageId: `wamid.opening-quality-${variant}` });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201);
+        assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+        assert.doesNotMatch(result.whatsappReplyText, /the client|I have recorded:|out of 10|on a scale|website/i);
+        if (variant === "natural choice") assert.equal(result.whatsappReplyText, naturalMessage);
+        assert.equal(result.session.conversationState.pendingQuestionType, "rating_feedback");
+        assert.equal(result.session.conversationState.overallRating, null);
+        assert.equal(result.session.conversationState.npsScore, null);
+        assert.doesNotMatch(JSON.stringify(result.session.conversationState), /Invented website failure/);
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
+        else process.env.GEMINI_API_KEY = priorKey;
+        calls.messages.length = 0;
+        calls.messages.push(...priorMessages);
+        store._session = priorSession;
+      }
+    });
+  }
 
   for (const responseTimeout of [false, true]) {
     await scenario(`feedback-to-rating choice works through the API with ${responseTimeout ? "a response-writer timeout" : "a conflicting response-writer question"}`, async () => {
@@ -5954,7 +6021,7 @@ async function scenario(name, fn) {
           assert.doesNotMatch(result.whatsappReplyText, /Senior Involvement|Invented leadership/i);
           if (expected === "choice") assert.match(result.whatsappReplyText, /Would you like to add anything else, or shall we move to the overall rating\?$/);
           if (expected === "acknowledgement") assert.doesNotMatch(result.whatsappReplyText, /\?|out of 10/);
-          if (text === "The PPC reports are clear now") assert.match(result.whatsappReplyText, /reports are clear/i);
+          if (text === "The PPC reports are clear now") assert.match(result.session.conversationState.mentionedServices.ppc.reasonText, /reports are clear/i);
           if (expected === "rating") assert.match(result.whatsappReplyText, /overall.*out of 10/i);
         }
         assert.equal(store._session.conversationState.ratingFeedbackPause, null);
@@ -6395,7 +6462,7 @@ async function scenario(name, fn) {
       });
       const payload = JSON.parse(response.body);
       assert.strictEqual(response.statusCode, 201);
-      assert.match(payload.whatsappReplyText, /overall.*rate|rate.*overall/i);
+      assert.match(payload.whatsappReplyText, /anything else.*overall rating/i);
       assert.doesNotMatch(payload.whatsappReplyText, /missed.*department|department.*missed/i);
       assert.doesNotMatch(payload.whatsappReplyText, /services one by one|How has .* been for you/i);
       assert.strictEqual(payload.session.conversationState.projectEndReviewCaptured, true);
@@ -6902,10 +6969,10 @@ async function scenario(name, fn) {
       npsStillNeeded: false
     }, state);
     assert.deepStrictEqual(action, { type: "final_sweep" });
-    const context = { observations: [{ topic: "Billing", detail: "Tax invoice is inaccurate", sentiment: "negative" }] };
+    const context = { latestClientText: "Your billings are inaccurate", acknowledgement: "I am sorry about the inaccuracies in the tax invoice.", observations: [{ topic: "Billing", detail: "Tax invoice is inaccurate", sentiment: "negative" }] };
     const reply = conversationFlow.fallbackForAction(action, state, project, context);
     assert.ok(/sorry/i.test(reply));
-    assert.match(reply, /Tax invoice is inaccurate/i);
+    assert.match(reply, /inaccuracies in the tax invoice/i);
     assert.ok(/anything else you would like the Directors to know/i.test(reply));
     assert.ok(!/rate .*support/i.test(reply), "per-service ratings must never leak into this turn");
     const recorded = conversationFlow.recordRequiredQuestion(state, project, action);
@@ -6949,7 +7016,8 @@ async function scenario(name, fn) {
     const reply = conversationFlow.fallbackForAction(action, state, project, { observations: [{
       topic: "Senior Involvement", detail: "Client wants one senior meeting each month", kind: "request", sentiment: "neutral"
     }] });
-    assert.match(reply, /recorded your request.*senior meeting/i);
+    assert.match(reply, /recorded your request.*relevant team/i);
+    assert.doesNotMatch(reply, /Client wants|I have recorded:/i);
     assert.match(reply, /overall.*out of 10/i);
   });
 
@@ -7128,6 +7196,7 @@ async function scenario(name, fn) {
     // whose structured arrays accidentally omit everything the client raised.
     const conducted = {
       text: "Thank you for sharing your feedback.",
+      acknowledgement: "I am sorry the agreed amendments were not applied consistently, leading to avoidable rework.",
       captured: [],
       observations: [],
       appreciations: [],

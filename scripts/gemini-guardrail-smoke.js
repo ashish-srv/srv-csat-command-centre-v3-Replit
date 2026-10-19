@@ -194,19 +194,24 @@ const turn = {
       prompts.push(JSON.parse(options.body).input);
       return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
         intent: "negative", completionScope: "feedback", completionEvidence: "That covers everything",
+        acknowledgement: "Thank you for explaining your experience.",
         message: "Thank you. How would you rate the project overall, out of 10?"
       }) }) };
     };
     try {
       const project = { name: "Prompt test", services: [{ serviceKey: "account", name: "Account Management" }] };
       await interpretReply({ project, question: "Anything else?", text: "That covers everything" });
-      await conductTurn({ project, checklist: { overallRatingStillNeeded: true }, preferredAction: { type: "overall_rating" } });
+      const response = await conductTurn({ project, checklist: { overallRatingStillNeeded: true }, preferredAction: { type: "overall_rating" } });
+      assert.equal(response.acknowledgement, "Thank you for explaining your experience.");
       assert.equal(prompts.length, 2);
       assert.match(prompts[0], /completionEvidence must quote the EXACT current words/);
       assert.match(prompts[0], /were busy.*not.*we are busy/);
       assert.match(prompts[1], /Additional\s+detail answers that invitation/);
       assert.match(prompts[1], /missing scores stay empty/);
       assert.match(prompts[1], /Do not interview each named team/);
+      assert.match(prompts[1], /before the first numeric CSAT/);
+      assert.match(prompts[1], /Natural paraphrases are welcome/);
+      assert.match(prompts[1], /never an additional source of facts/);
       assert.doesNotMatch(prompts[1], /dig until it would be|Move on only when they say no/);
     } finally {
       global.fetch = priorFetch;

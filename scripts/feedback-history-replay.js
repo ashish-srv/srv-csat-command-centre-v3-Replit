@@ -30,7 +30,7 @@ function review(type = "project_end", customProject = project) {
   const turns = [];
   return {
     get state() { return session.conversationState; }, turns,
-    turn(text, extraction = null) {
+    turn(text, extraction = null, writing = {}) {
       const before = JSON.parse(JSON.stringify(session.conversationState));
       const interpretation = extraction ? flow.groundLatestReplyInterpretation(extraction, text, customProject) : null;
       const turn = sm.processWhatsAppReply({
@@ -44,7 +44,7 @@ function review(type = "project_end", customProject = project) {
         turns.push({ text, ...result });
         return result;
       }
-      const context = { text: "", captured: [], observations: [], appreciations: [] };
+      const context = { text: "", ...writing, captured: [], observations: [], appreciations: [] };
       flow.enrichConductedWithDeterministicFacts(context, text, customProject, interpretation, {
         protectSubstantiveConcern: true,
         allowLanguageOnly: before.pendingQuestionType === "final_sweep"
@@ -71,6 +71,7 @@ function review(type = "project_end", customProject = project) {
         ? flow.closingGraceMessage(poc, turn.conversationState, context)
         : flow.fallbackForAction(action, turn.conversationState, customProject, context);
       flow.rememberAcknowledgedConcerns(turn.conversationState, context);
+      turn.conversationState.lastQuestionAsked = message;
       if (action.type === "close") {
         turn.conversationState.state = sm.STATES.CLOSING_GRACE;
         turn.conversationState.closingGraceExpiresAt ||= new Date(Date.now() + sm.CLOSING_GRACE_MS).toISOString();
@@ -96,8 +97,11 @@ scenario("Arun: detailed review, third-party busy complaint, further concerns, t
     fact("account", "There was no professional approach right from day one. You had put some interns to manage who never understood what needs to be done."),
     fact("campaign", "Cost of acquisition for admission was 1.9 lacs; we got only 32 admissions. It was never optimized.")
   ], serviceScope: "overall_feedback" }));
-  assert.equal(opening.action.type, "overall_rating");
-  assert.match(opening.message, /1.9|32/);
+  assert.equal(opening.action.type, "rating_feedback");
+  assert.equal(opening.action.offerChoice, true);
+  assert.match(opening.message, /add anything else.*overall rating/);
+  assert.doesNotMatch(opening.message, /on a scale|out of 10|I have recorded:/i);
+  assert.match(chat.state.mentionedServices.campaign.reasonText, /1.9|32/);
   const added = [
     "This kind of activities Inver had seen",
     "I know your all big accounts. but that does not mean that whatever do is accepted",
@@ -109,11 +113,12 @@ scenario("Arun: detailed review, third-party busy complaint, further concerns, t
     "keep on doing what they want without any result",
     "The leadership failed to set it right throughout the season. I have lost complete faith and trust and will never look to work again and will not recommend to others."
   ];
-  for (const [index, text] of added.entries()) {
+  for (const text of added) {
     const next = chat.turn(text, read({ captured: [fact("account", text)] }));
     assert.equal(next.action.type, "rating_feedback", text);
-    assert.equal(next.action.offerChoice, index === 0);
+    assert.equal(next.action.offerChoice, false);
     assert.doesNotMatch(next.message, /take your time|anything else about Account Management/i);
+    assert.doesNotMatch(next.message, /I have recorded:|the client|on a scale|out of 10/i);
     assert.equal(chat.state.npsScore, null, "unwillingness to recommend is not a stated numeric NPS");
     assert.match(chat.state.mentionedServices.account.reasonText, new RegExp(text.slice(0, 15)));
   }
@@ -147,7 +152,7 @@ scenario("a genuine clarification is asked once; switching topic preserves the o
 scenario("Shravya/Aashish: 9 CSAT, 10 NPS, detailed creative-process concern and named POC appreciation", () => {
   const chat = review();
   const opening = "It has been a great year working with SRV, and I have had a great experience with the team so far. Looking forward to another fruitful and successful year ahead!";
-  assert.equal(chat.turn(opening, read({ sentiment: "positive", serviceScope: "overall_feedback" })).action.type, "overall_rating");
+  assert.equal(chat.turn(opening, read({ sentiment: "positive", serviceScope: "overall_feedback" })).action.type, "rating_feedback");
   chat.turn("9"); chat.turn("10");
   assert.equal(chat.state.overallRating, 9);
   assert.equal(chat.state.npsScore, 10);
@@ -155,7 +160,7 @@ scenario("Shravya/Aashish: 9 CSAT, 10 NPS, detailed creative-process concern and
   const next = chat.turn(long, read({
     observations: [{ topic: "Creative Process", detail: "The team and I had aligned on common feedback across multiple creatives, but there was back and forth because changes were not consistently implemented by the designer.", sentiment: "negative", needsFollowUp: false }],
     appreciations: [{ subject: "Sammar and Moulik", detail: "Sammar initially and now Moulik, have always been approachable and responsive making coordination smooth throughout.", serviceKey: "account" }]
-  }));
+  }), { acknowledgement: "I am sorry the agreed creative changes were not applied consistently." });
   assert.equal(next.action.type, "final_sweep");
   assert.match(next.message, /Sammar.*Moulik/);
   assert.match(next.message, /creative|changes|designer/i);
@@ -170,7 +175,7 @@ scenario("Yuvraj: 5 CSAT, 0 NPS and a staffing concern are acknowledged without 
   const chat = review();
   chat.turn("No", read({ intent: "negative", serviceScope: "overall_feedback" }));
   chat.turn("5"); chat.turn("0");
-  const next = chat.turn("Don't hire interns", read({ observations: [{ topic: "Staffing", detail: "Don't hire interns", sentiment: "negative", needsFollowUp: false }] }));
+  const next = chat.turn("Don't hire interns", read({ observations: [{ topic: "Staffing", detail: "Don't hire interns", sentiment: "negative", needsFollowUp: false }] }), { acknowledgement: "I am sorry the use of interns did not meet your expectations." });
   assert.equal(next.action.type, "final_sweep");
   assert.match(next.message, /interns/i);
   assert.equal(chat.state.overallRating, 5);
@@ -180,12 +185,13 @@ scenario("Yuvraj: 5 CSAT, 0 NPS and a staffing concern are acknowledged without 
 scenario("rating interruption: weekly spend reports stay reporting feedback and the pending rating resumes", () => {
   const chat = review();
   chat.turn("Overall the project went well", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+  chat.turn("That's all", read({ intent: "negative", completionScope: "feedback", completionEvidence: "That's all" }));
   for (const [index, text] of ["There should be a weekly report sent to us about spend", "I would like to add that the team should share spend reports with us"].entries()) {
     const next = chat.turn(text, read({ observations: [{ topic: "Spend Reporting", detail: text, sentiment: "neutral", kind: "request", needsFollowUp: false }] }));
     assert.equal(next.action.type, "rating_feedback");
     assert.equal(next.action.offerChoice, index === 0);
     assert.equal(chat.state.overallRating, null);
-    assert.match(next.message, /spend reports?|weekly report/i);
+    assert.ok(next.facts.observations.some((item) => /spend reports?|weekly report/i.test(item.detail)));
     assert.doesNotMatch(next.message, /Senior Involvement|meeting request/i);
   }
 });
@@ -216,7 +222,7 @@ scenario("a client may decline a requested score without being trapped at the nu
   const chat = review();
   chat.turn("Overall the project went well", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
   const decline = "I prefer not to give a number";
-  const next = chat.turn(decline, read({ intent: "negative", completionScope: "topic", completionEvidence: decline }));
+  const next = chat.turn(decline, read({ intent: "negative", completionScope: "rating", completionEvidence: decline }));
   assert.equal(next.action.type, "nps");
   assert.equal(chat.state.overallRating, null);
   chat.turn("no", read({ intent: "negative" }));
@@ -230,9 +236,9 @@ scenario("additional concerns on the same topic are acknowledged without another
   assert.match(first.message, /sorry/i);
   const second = chat.turn("The account manager also misses agreed reviews", read({ captured: [fact("account", "The account manager also misses agreed reviews")] }));
   assert.doesNotMatch(second.message, /sorry/i);
-  assert.match(second.message, /misses agreed reviews/i);
+  assert.match(chat.state.mentionedServices.account.reasonText, /misses agreed reviews/i);
   assert.equal(second.action.type, "rating_feedback");
-  assert.equal(second.action.offerChoice, true);
+  assert.equal(second.action.offerChoice, false);
 });
 
 scenario("a completion flag without current-message evidence cannot discard a concern", () => {
@@ -329,7 +335,7 @@ scenario("closing-window spend reporting and five unrelated improvement points p
   const originalDeadline = chat.state.closingGraceExpiresAt;
   const request = "would like to add- there should be weekly report to be sent about spend";
   const spend = chat.turn(request, read({ observations: [{ topic: "Spend Reporting", detail: request, kind: "request", sentiment: "neutral", needsFollowUp: false }] }));
-  assert.match(spend.message, /weekly report/);
+  assert.ok(spend.facts.observations.some((item) => /weekly report/.test(item.detail)));
   assert.doesNotMatch(spend.message, /Senior Involvement|meeting request|send the correct number/i);
   const points = [
     ["Proactivity", "Team needs to be more proactive in terms sharing performance improvement recommendations, rather than client highlighting things"],
@@ -355,7 +361,8 @@ scenario("overall praise is acknowledged and goes to CSAT without a missed-depar
   for (const text of ["India's Best agency. Keep it up.", "Working together has been a pleasure and we value the partnership", "The experience has been excellent across the year"]) {
     const chat = review();
     const next = chat.turn(text, read({ sentiment: "positive", serviceScope: "overall_feedback", appreciations: [{ subject: "SRV Team", detail: text }] }));
-    assert.equal(next.action.type, "overall_rating");
+    assert.equal(next.action.type, "rating_feedback");
+    assert.equal(next.action.offerChoice, true);
     assert.match(next.message, /thank you|kind words/i);
     assert.doesNotMatch(next.message, /missed.*department|department.*missed|anything else about/i);
   }
@@ -497,8 +504,92 @@ scenario("positive or neutral additions before rating receive an acknowledgement
   const text = "The campaign reports are clear now";
   const next = chat.turn(text, read({ sentiment: "positive", captured: [fact("campaign", text, "positive")] }));
   assert.equal(next.action.type, "rating_feedback");
-  assert.match(next.message, /reports are clear/);
-  assert.match(next.message, /Would you like to add anything else/);
+  assert.match(chat.state.mentionedServices.campaign.reasonText, /reports are clear/);
+  assert.doesNotMatch(next.message, /I have recorded:|the client|on a scale|out of 10/i);
+});
+
+scenario("short emotional continuation without extracted service facts still pauses an unanswered score", () => {
+  const chat = review();
+  chat.turn("Overall the project failed to meet our expectations", read({ serviceScope: "overall_feedback" }));
+  const added = chat.turn("This kind of activities I never had seen", read({ explainsProblem: false }));
+  assert.equal(added.action.type, "rating_feedback");
+  assert.equal(added.action.offerChoice, false);
+  assert.doesNotMatch(added.message, /rate|rating|out of 10|on a scale|I have recorded:|the client/i);
+  assert.equal(chat.state.overallRating, null);
+  assert.equal(chat.turn("That is everything", read({ intent: "negative", completionScope: "feedback", completionEvidence: "That is everything" })).action.type, "overall_rating");
+});
+
+scenario("rating transition accepts natural alternatives but not direct numeric or wrong-score questions", () => {
+  const action = { type: "rating_feedback", ratingType: "overall_rating", offerChoice: true };
+  for (const text of [
+    "Is there anything else you would like to share before we move to an overall rating?",
+    "Would you like to share more feedback, or proceed to the overall score?",
+    "You can add anything further, or we can move to the rating when you are ready."
+  ]) assert.equal(flow.messageMatchesRequiredAction(action, text), true, text);
+  for (const text of ["How would you rate us out of 10?", "Anything else about Account Management?", "Anything else, or shall we move to the recommendation rating?"]) {
+    assert.equal(flow.messageMatchesRequiredAction(action, text), false, text);
+  }
+});
+
+scenario("a bare acknowledgement after a note-only reply is not treated as finished feedback", () => {
+  const chat = review();
+  chat.turn("Overall our campaign experience was disappointing", read({ serviceScope: "overall_feedback" }));
+  chat.turn("Our requests were also ignored", read({ captured: [fact("account", "Our requests were also ignored")] }));
+  const acknowledgement = chat.turn("okay", read({ intent: "affirmative", sentiment: "neutral", explainsProblem: false }));
+  assert.equal(acknowledgement.action.type, "rating_feedback");
+  assert.equal(acknowledgement.action.offerChoice, false);
+  assert.doesNotMatch(acknowledgement.message, /out of 10|on a scale/);
+  const finished = "That covers everything I wanted to say";
+  assert.equal(chat.turn(finished, read({ intent: "negative", completionScope: "feedback", completionEvidence: finished })).action.type, "overall_rating");
+  const direct = review();
+  direct.turn("Overall our campaign experience was disappointing", read({ serviceScope: "overall_feedback" }));
+  assert.equal(direct.turn("okay", read({ intent: "affirmative", sentiment: "neutral", explainsProblem: false })).action.type, "overall_rating", "the same acknowledgement can accept an immediately preceding transition choice");
+});
+
+scenario("retrospective complaints are not manufactured into neutral requests across message bubbles", () => {
+  for (const text of [
+    "They were never available for the review\nNever did what we want",
+    "They were never available for the review Never did what we want",
+    "They never did what we wanted in the review",
+    "We asked for weekly reports but they never sent them",
+    "Please note that nobody attended the review",
+    "The review should have happened last week"
+  ]) {
+    assert.equal(flow.isExplicitActionRequest(text), false, text);
+    const observation = flow.observationFromInterpretation(read({ isObservation: true }), text);
+    if (observation) {
+      assert.equal(observation.kind, "feedback", text);
+      assert.equal(observation.sentiment, "negative", text);
+    }
+  }
+  for (const text of ["We want a weekly spend report", "Could you arrange a review meeting?", "There should be weekly reports about spend", "Please send us the invoice"]) {
+    assert.equal(flow.isExplicitActionRequest(text), true, text);
+  }
+});
+
+scenario("safe reply-writing acknowledgement survives a corrected next action without importing its facts", () => {
+  const chat = review();
+  const text = "Our words stand in the market. Others look at me for the feedback and opinion of the agency";
+  const acknowledgement = "We recognise that your experience with SRV affects the confidence with which you can recommend us to others.";
+  const next = chat.turn(text, read({ serviceScope: "overall_feedback", observations: [{ topic: "Management Feedback", detail: "The client emphasizes that their opinion and feedback about the agency carry weight in the market and influence others", sentiment: "negative", needsFollowUp: false }] }), { acknowledgement });
+  assert.ok(next.message.startsWith(acknowledgement));
+  assert.doesNotMatch(next.message, /the client|I have recorded:/i);
+  assert.equal(next.action.type, "rating_feedback");
+});
+
+scenario("internal summaries and unsupported acknowledgement claims never reach clients via a fallback", () => {
+  const text = "Leadership ignored our requests for reviews";
+  const context = { latestClientText: text, captured: [], observations: [{ topic: "Senior Involvement", detail: "The client says leadership ignored reviews", sentiment: "negative" }], appreciations: [] };
+  for (const acknowledgement of [
+    "The client emphasizes their dissatisfaction.",
+    "I have recorded: Leadership ignored reviews.",
+    "The Directors have been notified.",
+    "Your invoice issue has been recorded.",
+    "I have fixed the problem."
+  ]) {
+    const message = flow.fallbackForAction({ type: "rating_feedback", ratingType: "overall_rating", offerChoice: false }, {}, project, { ...context, acknowledgement });
+    assert.doesNotMatch(message, /the client|I have recorded:|have been notified|invoice|fixed the problem/i);
+  }
 });
 
 for (const [status, name, error] of results) console.log(`${status}  ${name}${error ? `\n${error}` : ""}`);

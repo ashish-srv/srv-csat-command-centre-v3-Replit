@@ -34,19 +34,34 @@ covered. No schema migration or n8n workflow change is required for this update.
 | Messages after any closed feedback flow | Substantive follow-up routes to handoff; missing/failed delivery is not described as successful |
 | Other wording and custom services | Semantic completion, score refusal, topic changes, billing/access/reporting requests and Influencer Marketing |
 
-## Feedback Added During a Rating Question
+## Overall Review and Feedback Added During a Rating Question
 
-The already-requested rating remains pending, but substantive new feedback
-takes precedence. Acknowledge it and offer once:
+A useful whole-project review receives an acknowledgement and one opportunity
+to finish sharing before the first numeric CSAT question. An explicit completion
+or volunteered score can proceed directly. The same pause applies when more
+feedback interrupts an already-requested rating. Acknowledge it and offer once:
 
 > Would you like to add anything else, or shall we move to the overall rating?
 
 Use recommendation rating only when the pending question is project-end NPS.
-More details are acknowledged without another question after every message.
+More details, including short emotional continuations without a new structured
+service fact, are acknowledged without another question after every message.
 Natural completion resumes the numeric question; feedback supplied instead of
 that number starts another feedback opportunity. A volunteered valid score can
 still be accepted. An explicit refusal to give a score is distinct from saying
 there is no more feedback and leaves the score empty.
+
+A bare acknowledgement is contextual: it can accept an immediately preceding
+feedback-to-rating choice, but does not declare feedback finished after a
+note-only acknowledgement. Explicit completion still resumes the missing score.
+
+The response-writing call supplies a separate optional client-facing
+acknowledgement. Safe wording can be retained when its proposed next question
+needs correction; it cannot contribute facts. Internal third-person notes and
+verbatim complaint lists are not copied into fallback replies. Natural
+feedback-to-rating invitations are accepted without requiring an exact sentence.
+Retrospective complaints are not turned into prospective requests merely by
+combining words such as "review" and "we want" from separate clauses.
 
 The pause is per-session JSON state, not a new evidence source. It does not
 change extraction, allow response-writing facts to enter the state, apply to
@@ -92,3 +107,15 @@ send WhatsApp messages or email, use a live model, or modify production data.
 They verify application routing and persistence behaviour, not every possible
 future model interpretation. Production delivery still depends on deployed
 code, credentials and active workflows.
+
+## Pending Work — Not Implemented
+
+- One-hour rating reminder: consider sending one gentle reminder for the missing
+  overall CSAT after an hour of client inactivity, only when meaningful overall
+  feedback is already recorded. Do not apply to unanswered openings, greetings,
+  automated replies, acknowledgement-only replies, quick check-ins, an explicit
+  postponement or refusal, or human-managed conversations. New client feedback
+  resets the inactivity clock. Do not close the session, fill a score or start
+  the ten-minute closing window. Keep the existing post-rating six-hour policy
+  separate. The user requested this remain on the pending-work list until they
+  ask to implement it; no scheduled Codex notification was requested.
