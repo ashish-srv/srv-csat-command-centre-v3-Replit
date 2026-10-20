@@ -309,7 +309,7 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
     }
     setSaving("pocs");
     try {
-      await apiWrite(`/api/admin/projects/${encodeURIComponent(project.id)}/pocs`, {
+      const result = await apiWrite(`/api/admin/projects/${encodeURIComponent(project.id)}/pocs`, {
         pocs: pocRows.map((row) => ({
           ...row,
           contactWhatsapp: String(row.contactWhatsapp || "").replace(/\D/g, ""),
@@ -317,7 +317,7 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
         })),
         removedIds: removedPocIds
       }, "PUT");
-      await finishSave(`Project POCs saved${removedPocIds.length ? `; ${removedPocIds.length} removed from future sends` : ""}.`);
+      await finishSave(`Project POCs saved${result.removed ? `; ${result.removed} removed from this project` : ""}.`);
       setRemovedPocIds([]);
     } catch (error) {
       showToast(error.message);
@@ -413,7 +413,7 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                             <Field label="Influence (%)"><input type="number" min="0" max="100" step="0.01" disabled={!poc.active} value={poc.active ? poc.weightPercentage : 0} onChange={(event) => updatePoc(index, { weightPercentage: event.target.value })} /></Field>
                             <Field label="Active"><SearchableSelect value={poc.active ? "yes" : "no"} onChange={(event) => { const active = event.target.value === "yes"; updatePoc(index, { active, weightPercentage: active ? poc.weightPercentage : 0 }); }}><option value="yes">Yes</option><option value="no">No</option></SearchableSelect></Field>
                           </div>
-                          <button type="button" className="icon-button danger" onClick={() => removePoc(index)} aria-label={`Remove ${poc.name || `POC ${index + 1}`} from future sends`} title="Remove from this project’s future sends"><Trash2 size={15} aria-hidden="true" /></button>
+                          <button type="button" className="icon-button danger" onClick={() => removePoc(index)} aria-label={`Remove ${poc.name || `POC ${index + 1}`} from this project`} title="Remove this project's POC assignment; preserve past feedback"><Trash2 size={15} aria-hidden="true" /></button>
                         </div>
                       ))}
                       {!pocRows.length ? <EmptyState title="No POCs in this draft" text="The project can be saved without an active POC, but feedback cannot be sent." /> : null}
@@ -425,7 +425,7 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                       <Button onClick={resetDrafts}>Reset changes</Button>
                       <Button variant="primary" icon={Save} onClick={savePocs} disabled={saving === "pocs"}>{saving === "pocs" ? "Saving…" : "Save all POCs"}</Button>
                     </div>
-                    <p className="form-note">Removing an existing POC excludes it from future sends but preserves its historical feedback. Active feedback sessions retain the influence captured when they started.</p>
+                    <p className="form-note">Remove deletes the assignment from this project's current POC list and stops its open sessions. Historical feedback, recorded scores and assignments on other projects are preserved. Set Active to No instead to keep a POC listed but pause future sends.</p>
                   </div>
                 </details>
               ) : null}

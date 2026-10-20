@@ -37,13 +37,14 @@ class ComponentHarness {
       if (!listeners.has(name)) listeners.set(name, new Set());
       listeners.get(name).add(callback);
     };
-    this.dispatch = (name) => { for (const fn of listeners.get(name) || []) fn(); };
+    this.dispatch = (name, event = {}) => { for (const fn of listeners.get(name) || []) fn(event); };
     this.setUrl = (value) => {
       const parsed = new URL(value, "https://test.invalid");
       this.window.location = { pathname: parsed.pathname, search: parsed.search };
     };
     this.window = {
       innerWidth: 1200,
+      innerHeight: 800,
       scrollY: 350,
       scrollTo: (options) => this.scrolls.push(options.top),
       requestAnimationFrame: (fn) => { const key = Symbol(); this.timers.set(key, fn); return key; },
@@ -143,6 +144,7 @@ class ComponentHarness {
         const ref = node.props.ref;
         if (!ref.current) ref.current = {
           scrollTop: 0, scrollHeight: 100,
+          contains: () => false,
           getBoundingClientRect: () => ({ top: 100, bottom: 140, left: 30, width: 300 }),
           scrollIntoView: () => this.scrolls.push(node.props.id || node.type)
         };

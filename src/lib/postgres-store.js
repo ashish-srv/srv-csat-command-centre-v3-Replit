@@ -203,6 +203,24 @@ class PostgresStore extends SupabaseStore {
     this.pool = options.pool || getSharedPool();
   }
 
+  async saveProjectPocBatch(projectId, prepared, removedIds) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // A project lock serializes competing full-list saves for this project.
+      await client.query('SELECT id FROM public.projects WHERE id = $1 FOR UPDATE', [projectId]);
+      const transaction = new PostgresStore({ pool: client });
+      const result = await SupabaseStore.prototype.saveProjectPocBatch.call(transaction, projectId, prepared, removedIds);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async hydrateRelations(table, rows, select) {
     const selections = relationSelections(select);
     if (!rows.length || !selections.length) return rows;

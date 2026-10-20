@@ -189,6 +189,7 @@ function toClientPoc(row, level = null) {
     salutation: row.salutation || row.name,
     honorific: row.honorific,
     active: row.active,
+    removedAt: row.removed_at || null,
     levelId: row.poc_level_id,
     levelName: level ? level.name : null,
     weight: level ? Number(level.weight) : 1,
@@ -574,11 +575,11 @@ class SupabaseStore {
     return rows.map((row) => toService(row, owners.get(row.internal_poc_id) || null));
   }
 
-  async pocsForProject(projectId, { activeOnly = true } = {}) {
+  async pocsForProject(projectId, { activeOnly = true, includeRemoved = false } = {}) {
     const levels = await this.pocLevels();
     const activeFilter = activeOnly ? "&active=is.true" : "";
     const rows = await this.request("client_pocs", {
-      query: `project_id=eq.${encodeURIComponent(projectId)}${activeFilter}&order=name.asc`
+      query: `project_id=eq.${encodeURIComponent(projectId)}${activeFilter}${includeRemoved ? "" : "&removed_at=is.null"}&order=name.asc`
     });
     return rows.map((row) => toClientPoc(row, levels.get(row.poc_level_id) || null));
   }
@@ -653,7 +654,7 @@ class SupabaseStore {
     if (!normalized) return [];
     const levels = await this.pocLevels();
     const rows = await this.request("client_pocs", {
-      query: `contact_whatsapp=eq.${encodeURIComponent(normalized)}&active=is.true&select=*&order=updated_at.desc&limit=20`
+      query: `contact_whatsapp=eq.${encodeURIComponent(normalized)}&active=is.true&removed_at=is.null&select=*&order=updated_at.desc&limit=20`
     });
     return rows.map((row) => toClientPoc(row, levels.get(row.poc_level_id) || null));
   }
@@ -1600,7 +1601,7 @@ class SupabaseStore {
     // The POC population is the one that actually received this cycle. A POC
     // deactivated afterward must not disappear from the historical weighting.
     const sessionPocIds = new Set(sessions.map((session) => session.clientPocId));
-    const pocs = (await this.pocsForProject(projectId, { activeOnly: false }))
+    const pocs = (await this.pocsForProject(projectId, { activeOnly: false, includeRemoved: true }))
       .filter((poc) => sessionPocIds.has(poc.id));
     const sessionWeights = new Map(sessions.map((session) => [session.clientPocId, session.pocWeight]));
     const weightedPocs = pocs.map((poc) => ({
@@ -2123,10 +2124,10 @@ class SupabaseStore {
   async getDueReminderTargets(nowIso = new Date().toISOString()) {
     const levels = await this.pocLevels();
     const rows = await this.request("feedback_sessions", {
-      query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,no_response,partial)&select=*,client_pocs(name,salutation,honorific,contact_whatsapp,contact_email,poc_level_id,weight_percentage),feedback_cycles(cycle_type),projects(project_key,name)&order=reminder_due_at.asc`
+      query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,no_response,partial)&select=*,client_pocs(name,salutation,honorific,contact_whatsapp,contact_email,poc_level_id,weight_percentage,removed_at),feedback_cycles(cycle_type),projects(project_key,name)&order=reminder_due_at.asc`
     });
 
-    return rows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin").map((row) => ({
+    return rows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin" && !row.client_pocs?.removed_at).map((row) => ({
       session: toSession(row, this.sessionExtras(row)),
       poc: row.client_pocs
         ? toClientPoc(
@@ -2338,7 +2339,7 @@ class SupabaseStore {
         activeStatus: row.active_status
       })),
       projects: projects.map((row) => toProject(row)),
-      clientPocs: clientPocRows.map((row) => {
+      clientPocs: clientPocRows.filter((row) => !row.removed_at).map((row) => {
         const poc = toClientPoc(row, levelsById.get(row.poc_level_id) || null);
         const project = projectsById.get(row.project_id) || null;
         const client = project ? clientsById.get(project.client_id) || null : null;
@@ -2354,6 +2355,10 @@ class SupabaseStore {
           clusterId: client?.cluster_id || null
         };
       }),
+      // Kept separate exclusively for explicit permanent Data Cleanup. Normal
+      // lists, copy pickers, controls and exports consume only clientPocs.
+      removedClientPocs: clientPocRows.filter((row) => row.removed_at)
+        .map((row) => toClientPoc(row, levelsById.get(row.poc_level_id) || null)),
       projectServices: projectServiceRows.map((row) => toService(row)),
       pocLevels: pocLevelRows.map((row) => ({ id: row.id, name: row.name, weight: Number(row.weight) })),
       departments: departments.map((row) => ({ id: row.id, name: row.name })),
@@ -2423,7 +2428,7 @@ class SupabaseStore {
   }
 
   /** Every POC and service for one client, across all of its projects. */
-  async getClientDetail(clientId) {
+  async getClientDetail(clientId, { includeRemoved = false } = {}) {
     const clientRows = await this.request("clients", {
       query: `id=eq.${encodeURIComponent(clientId)}&select=*,clusters(id,name)&limit=1`
     });
@@ -2440,7 +2445,7 @@ class SupabaseStore {
 
     const levels = await this.pocLevels();
     const [pocRows, serviceRows, catalogRows] = await Promise.all([
-      this.request("client_pocs", { query: `${inList}order=name.asc` }),
+      this.request("client_pocs", { query: `${inList}${includeRemoved ? "" : "removed_at=is.null&"}order=name.asc` }),
       this.request("project_services", { query: `${inList}order=name.asc` }),
       this.request("service_catalog", { query: "select=id,service_key,name,active" })
     ]);
@@ -3228,10 +3233,46 @@ class SupabaseStore {
 
     const rows = await this.request("client_pocs", {
       method: "PATCH",
-      query: `id=eq.${encodeURIComponent(pocId)}`,
+      query: `id=eq.${encodeURIComponent(pocId)}&removed_at=is.null`,
       body
     });
     return rows.length ? toClientPoc(rows[0], levels.get(rows[0].poc_level_id) || null) : null;
+  }
+
+  async removeProjectPocs(projectId, pocIds = []) {
+    const ids = [...new Set(pocIds.filter(Boolean))];
+    if (!ids.length) return 0;
+    const idFilter = ids.map((id) => encodeURIComponent(id)).join(",");
+    const rows = await this.request("client_pocs", {
+      method: "PATCH",
+      query: `project_id=eq.${encodeURIComponent(projectId)}&id=in.(${idFilter})&removed_at=is.null&select=id`,
+      // Retain the old percentage for legacy sessions without a snapshot.
+      // Removed assignments are excluded from every current POC population.
+      body: { active: false, removed_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      prefer: "return=representation"
+    });
+    if (rows.length !== ids.length) throw new Error("The POC list changed. Refresh this project before saving again.");
+    const sessions = await this.request("feedback_sessions", {
+      query: `project_id=eq.${encodeURIComponent(projectId)}&client_poc_id=in.(${idFilter})&status=in.(started,partial,no_response,needs_attention)&select=*,feedback_cycles(cycle_type)`
+    });
+    for (const row of sessions) {
+      if (!sessionIsTerminal(toSession(row, this.sessionExtras(row)))) {
+        await this.stopSessionForCycle(row.id, { reason: "POC removed from this project" });
+      }
+    }
+    return rows.length;
+  }
+
+  async saveProjectPocBatch(projectId, prepared, removedIds) {
+    // PostgresStore wraps this entire operation in a transaction.
+    const removed = await this.removeProjectPocs(projectId, removedIds);
+    const pocs = [];
+    for (const row of prepared) {
+      const saved = row.id ? await this.updateClientPoc(row.id, row) : await this.createClientPoc(row);
+      if (!saved) throw new Error("A POC was changed or removed. Refresh this project before saving again.");
+      pocs.push(saved);
+    }
+    return { pocs, removed };
   }
 
   async deleteClientPocs(pocIds = []) {
@@ -3393,7 +3434,7 @@ class SupabaseStore {
     const value = digits(phone);
     if (!value) return null;
     const rows = await this.request("client_pocs", {
-      query: `contact_whatsapp=eq.${encodeURIComponent(value)}&select=id,name,project_id&limit=5`
+      query: `contact_whatsapp=eq.${encodeURIComponent(value)}&removed_at=is.null&select=id,name,project_id&limit=5`
     });
     return rows.find((row) => row.id !== exceptId) || null;
   }
@@ -3403,7 +3444,7 @@ class SupabaseStore {
     const value = digits(phone);
     if (!value || !projectId) return null;
     const rows = await this.request("client_pocs", {
-      query: `contact_whatsapp=eq.${encodeURIComponent(value)}&project_id=eq.${encodeURIComponent(projectId)}&select=id,name,project_id&limit=50`
+      query: `contact_whatsapp=eq.${encodeURIComponent(value)}&project_id=eq.${encodeURIComponent(projectId)}&removed_at=is.null&select=id,name,project_id&limit=50`
     });
     for (const row of rows) {
       if (row.id === exceptId) continue;
@@ -3421,7 +3462,7 @@ class SupabaseStore {
     const clusters = await this.request("clusters", { query: "select=*&order=name.asc" });
     const clients = await this.request("clients", { query: "select=id,client_key,name,cluster_id&order=name.asc" });
     const [activePocRows, scheduleEventRows, projectServiceNameRows] = await Promise.all([
-      this.request("client_pocs", { query: "active=is.true&select=id,project_id,name,contact_whatsapp" }),
+      this.request("client_pocs", { query: "active=is.true&removed_at=is.null&select=id,project_id,name,contact_whatsapp" }),
       this.request("automation_events", {
         query: "event_type=in.(cycle_start_skipped,quick_checkin_start_skipped)&select=*&order=created_at.desc&limit=200"
       }),
@@ -4120,7 +4161,7 @@ class SupabaseStore {
       this.request("project_performance_audit", { query: "select=*&order=changed_at.desc&limit=500" }),
       this.request("internal_pocs", { query: "select=*&order=name.asc" }),
       this.request("project_services", { query: "select=id,project_id,service_catalog_id,service_key,name&order=name.asc" }),
-      this.request("client_pocs", { query: "select=id,project_id,name,designation,contact_email,contact_whatsapp,active&order=name.asc" }),
+      this.request("client_pocs", { query: "removed_at=is.null&select=id,project_id,name,designation,contact_email,contact_whatsapp,active&order=name.asc" }),
       this.request("service_catalog", { query: "active=is.true&select=id,service_key,name,active&order=name.asc" }),
       this.request("performance_reference_values", { query: "select=*&order=category.asc,sort_order.asc,value.asc" }),
       this.listServiceChangeRequests()

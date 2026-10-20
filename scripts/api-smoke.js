@@ -38,6 +38,8 @@ const calls = {
   clearedProjectIssues: [],
   deletedProjectCycles: [],
   deletedClientPocs: [],
+  removedProjectPocs: [],
+  savedPocBatches: [],
   deletedProjects: [],
   deletedClients: [],
   updatedProjects: [],
@@ -586,11 +588,16 @@ const store = {
     return { id, ...input };
   },
   createClientPoc: async (input) => {
-    const created = { id: `poc_new_${calls.createdPocs.length + 1}`, ...input };
+    const created = { ...input, id: `poc_new_${calls.createdPocs.length + 1}` };
     calls.createdPocs.push(created);
     return created;
   },
   updateClientPoc: async (id, input) => (id === "poc_1" ? { id, ...input } : null),
+  removeProjectPocs: async (projectId, ids) => { calls.removedProjectPocs.push({ projectId, ids }); return ids.length; },
+  saveProjectPocBatch: async function (projectId, prepared, removedIds) {
+    calls.savedPocBatches.push({ projectId, prepared, removedIds });
+    return SupabaseStore.prototype.saveProjectPocBatch.call(this, projectId, prepared, removedIds);
+  },
   deleteClientPocs: async (ids) => { calls.deletedClientPocs.push([...ids]); return { pocsDeleted: ids.length, cyclesRecalculated: 1, emptyCyclesDeleted: 0 }; },
   deleteProjects: async (ids) => { calls.deletedProjects.push([...ids]); return { projectsDeleted: ids.length }; },
   deleteClients: async (ids) => { calls.deletedClients.push([...ids]); return { clientsDeleted: ids.length }; },
@@ -4632,6 +4639,61 @@ async function scenario(name, fn) {
     assert.strictEqual(payload.pocs[0].weightPercentage, 100);
     assert.strictEqual(payload.pocs[0].levelId, "important");
     assert.strictEqual(payload.pocs[0].birthDate, "1988-04-18");
+  });
+
+  await scenario("removing project POCs removes only the selected assignment, not its feedback history", async () => {
+    const hardDeletes = calls.deletedClientPocs.length;
+    const res = await req("PUT", "/api/admin/projects/prj_1/pocs", { pocs: [], removedIds: [poc.id] }, PIN);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(JSON.parse(res.body).removed, 1);
+    assert.deepStrictEqual(calls.removedProjectPocs.at(-1), { projectId: project.id, ids: [poc.id] });
+    assert.strictEqual(calls.deletedClientPocs.length, hardDeletes);
+  });
+
+  await scenario("removing the same POC twice counts it only once", async () => {
+    const res = await req("PUT", "/api/admin/projects/prj_1/pocs", { pocs: [], removedIds: [poc.id, poc.id] }, PIN);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(JSON.parse(res.body).removed, 1);
+  });
+
+  await scenario("POC removal cannot affect an assignment on another project", async () => {
+    const before = calls.savedPocBatches.length;
+    const res = await req("PUT", "/api/admin/projects/prj_1/pocs", { pocs: [], removedIds: ["poc_other_project"] }, PIN);
+    assert.strictEqual(res.statusCode, 400);
+    assert.strictEqual(calls.savedPocBatches.length, before);
+  });
+
+  await scenario("a POC cannot be both retained and removed in the same save", async () => {
+    const before = calls.savedPocBatches.length;
+    const res = await req("PUT", "/api/admin/projects/prj_1/pocs", { pocs: [poc], removedIds: [poc.id] }, PIN);
+    assert.strictEqual(res.statusCode, 400);
+    assert.strictEqual(calls.savedPocBatches.length, before);
+  });
+
+  await scenario("removed project POCs cannot be reactivated from a stale Control Centre", async () => {
+    const previousGet = store.getClientPocById;
+    store.getClientPocById = async () => ({ ...poc, removedAt: "2026-10-20T00:00:00Z" });
+    try {
+      const res = await req("PUT", "/api/admin/pocs/bulk-control", { updates: [{ id: poc.id, active: true, weightPercentage: 100 }] }, PIN);
+      assert.strictEqual(res.statusCode, 409);
+      const patch = await req("PATCH", `/api/admin/pocs/${poc.id}`, { active: true }, PIN);
+      assert.strictEqual(patch.statusCode, 409);
+    } finally { store.getClientPocById = previousGet; }
+  });
+
+  await scenario("a removed assignment can be replaced by the same number in one project save", async () => {
+    const res = await req("PUT", "/api/admin/projects/prj_1/pocs", {
+      pocs: [{ ...poc, id: undefined, name: "Replacement" }], removedIds: [poc.id]
+    }, PIN);
+    assert.strictEqual(res.statusCode, 200);
+    const payload = JSON.parse(res.body);
+    assert.strictEqual(payload.removed, 1);
+    assert.ok(payload.pocs[0].id && payload.pocs[0].id !== poc.id);
+  });
+
+  await scenario("editing a POC cannot move its historical assignment to another project", async () => {
+    const res = await req("PATCH", `/api/admin/pocs/${poc.id}`, { projectId: "different-project" }, PIN);
+    assert.strictEqual(res.statusCode, 400);
   });
 
   await scenario("an active client POC can be saved before their WhatsApp number is known", async () => {

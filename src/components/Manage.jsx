@@ -902,7 +902,7 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
         Active POC influence total: <strong>{activeWeightTotal}%</strong> {!rows.some((row) => row.active) ? "— allowed; future sends are paused" : Math.abs(activeWeightTotal - 100) <= 0.01 ? "— ready to save" : "— adjust to exactly 100%"}
       </p>
       <p className="form-note">
-        Normal and Important are tags only. The percentage entered for each POC directly controls that person's share of the project CSAT. Nothing is written until Save all POCs. Removing an existing POC safely makes it inactive, so future cycles and reminders stop while past feedback remains available.
+        Normal and Important are tags only. The percentage entered for each POC directly controls that person's share of the project CSAT. Nothing is written until Save all POCs. Removing deletes the assignment from this project's current POC list and stops its open sessions. Past feedback and assignments on other projects are preserved. To keep a POC listed but pause future sends, set Active to No instead.
       </p>
       <div className="button-row">
         <Button onClick={onCancel}>Cancel</Button>
@@ -2518,7 +2518,7 @@ export default function Manage({ onReload, currentUser = null }) {
 
   async function savePocBatch() {
     const rows = pocBatch?.rows || [];
-    const project = (detail?.projects || []).find((item) => item.id === pocBatch?.projectId);
+    const project = pageScopedProjects().find((item) => item.id === pocBatch?.projectId);
     if (!project) {
       showToast("Select a project first.");
       return;
@@ -2567,16 +2567,20 @@ export default function Manage({ onReload, currentUser = null }) {
     }
     setSaving(true);
     try {
-      await apiWrite(
+      const projectId = pocBatch.projectId;
+      const scrollY = window.scrollY;
+      const result = await apiWrite(
         `/api/admin/projects/${encodeURIComponent(pocBatch.projectId)}/pocs`,
         { pocs: rows, removedIds: pocBatch.removedIds || [] },
         "PUT"
       );
-      const removedCount = (pocBatch.removedIds || []).length;
-      setPocBatch(null);
+      setPocBatch((current) => current?.projectId === projectId
+        ? { ...current, rows: result.pocs, removedIds: [] }
+        : current);
       await loadAll(clientId);
       onReload();
-      showToast(`All project POCs saved${removedCount ? `; ${removedCount} removed from future sends` : ""}.`);
+      window.requestAnimationFrame(() => window.scrollTo({ top: scrollY }));
+      showToast(`Project POCs saved${result.removed ? `; ${result.removed} removed from this project` : ""}.`);
     } catch (saveError) {
       showToast(saveError.message);
     } finally {
@@ -2855,13 +2859,14 @@ export default function Manage({ onReload, currentUser = null }) {
     || compareManageText(left.name, right.name)
   ));
   const clientPocNeedle = clientPocSearch.trim().toLowerCase();
+  const pocEditorScope = sortedScopedClientPocs.filter((poc) => !pocBatch?.projectId || poc.projectId === pocBatch.projectId);
   const displayedScopedClientPocs = clientPocNeedle
-    ? sortedScopedClientPocs.filter((poc) => {
+    ? pocEditorScope.filter((poc) => {
       const project = visibleProjectsById.get(poc.projectId);
       return [poc.name, poc.designation, poc.contactWhatsapp, poc.contactEmail, poc.levelName, project?.name, project?.key]
         .some((value) => String(value || "").toLowerCase().includes(clientPocNeedle));
     })
-    : sortedScopedClientPocs;
+    : pocEditorScope;
   const projectServiceNeedle = projectServiceSearch.trim().toLowerCase();
   const serviceEditorScope = sortedScopedProjectServices.filter((service) => !serviceBatch?.projectId || service.projectId === serviceBatch.projectId);
   const displayedScopedProjectServices = projectServiceNeedle
@@ -2887,7 +2892,7 @@ export default function Manage({ onReload, currentUser = null }) {
     .sort((left, right) => compareManageText(left.name || left.key, right.name || right.key));
   const cleanupProjectIds = new Set(cleanupProjects.map((project) => project.id));
   const cleanupProjectsById = new Map(cleanupProjects.map((project) => [project.id, project]));
-  const cleanupPocs = (directory?.clientPocs || [])
+  const cleanupPocs = [...(directory?.clientPocs || []), ...(directory?.removedClientPocs || [])]
     .filter((poc) => cleanupProjectIds.has(poc.projectId))
     .sort((left, right) => (
       compareManageText(cleanupProjectsById.get(left.projectId)?.name, cleanupProjectsById.get(right.projectId)?.name)
@@ -4427,7 +4432,7 @@ export default function Manage({ onReload, currentUser = null }) {
                           ? current.filter((id) => id !== poc.id)
                           : [...current, poc.id])}
                       />
-                      <span><strong>{poc.name}</strong><small>{project?.name || "Unknown project"} · {poc.active ? "active" : "inactive"}</small></span>
+                      <span><strong>{poc.name}</strong><small>{project?.name || "Unknown project"} · {poc.removedAt ? "removed — history only" : poc.active ? "active" : "inactive"}</small></span>
                     </label>
                   );
                 })}

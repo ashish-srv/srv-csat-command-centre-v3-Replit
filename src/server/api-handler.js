@@ -5796,6 +5796,7 @@ async function handleApiRequest(request) {
 
     const project = await store.getProjectById(session.projectId);
     const poc = await store.getClientPocById(session.clientPocId);
+    if (!poc || poc.removedAt) return error(409, "This POC has been removed from the project");
     if (session.sessionType === "quick_checkin") {
       return handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel: "web" });
     }
@@ -6030,12 +6031,14 @@ async function handleApiRequest(request) {
       return error(409, `All ${MAX_REMINDERS} reminders have already been sent. The final 24-hour response window is active.`);
     }
 
+    const poc = await store.getClientPocById(existing.clientPocId);
+    if (!poc || poc.removedAt) return error(409, "This POC has been removed from the project");
+
     const finalRatingReminder = shouldUseFinalRatingReminder(existing);
     const session = await store.markNoResponse(sessionId, {
       askForOverallRating: finalRatingReminder
     });
     const project = await store.getProjectById(session.projectId);
-    const poc = await store.getClientPocById(session.clientPocId);
     const resumeUrl = buildResumeUrl(baseUrl, project, session);
 
     await notifyAutomation(store, "no_response", {
@@ -6136,6 +6139,7 @@ async function handleApiRequest(request) {
 
     const project = await store.getProjectById(session.projectId);
     const poc = await store.getClientPocById(session.clientPocId);
+    if (!poc || poc.removedAt) return error(409, "This POC has been removed from the project");
     const automatedReplyReason = automatedWhatsappReplyReason(text);
     if (automatedReplyReason) {
       return recordAutomatedWhatsappReply(store, session, poc, body, text, automatedReplyReason);
@@ -7491,14 +7495,18 @@ async function handleApiRequest(request) {
   if (method === "PUT" && projectPocsMatch) {
     const projectId = decodeURIComponent(projectPocsMatch[1]);
     const requested = Array.isArray(body.pocs) ? body.pocs : [];
-    const removedIds = Array.isArray(body.removedIds) ? body.removedIds.map(String) : [];
+    const removedIds = [...new Set((Array.isArray(body.removedIds) ? body.removedIds : []).map(String))];
     if (requested.length > 50) return error(400, "A project can contain at most 50 POCs in one save");
+    if (removedIds.length > 50) return error(400, "Remove no more than 50 project POCs in one save");
 
     const directory = await store.getDirectory();
     const project = (directory.projects || []).find((item) => item.id === projectId);
     if (!project) return error(404, "Project not found");
     const current = await store.pocsForProject(projectId, { activeOnly: false });
     const currentById = new Map(current.map((poc) => [poc.id, poc]));
+    const invalidRemoval = removedIds.find((id) => !currentById.has(id));
+    if (invalidRemoval) return error(400, "A removed POC does not belong to this project", invalidRemoval);
+    const removedSet = new Set(removedIds);
     const levels = typeof store.pocLevels === "function" ? await store.pocLevels() : null;
     const seenIds = new Set();
     const seenPhones = new Set();
@@ -7512,6 +7520,7 @@ async function handleApiRequest(request) {
       const phone = String(row.contactWhatsapp || "").replace(/\D/g, "");
       const weightPercentage = active ? Number(row.weightPercentage) : 0;
       if (id && !currentById.has(id)) return error(400, `POC ${index + 1}: record does not belong to this project`);
+      if (id && removedSet.has(id)) return error(400, `POC ${index + 1}: a record cannot be saved and removed together`);
       if (id && seenIds.has(id)) return error(400, `POC ${index + 1}: record appears more than once`);
       if (!String(row.name || "").trim()) return error(400, `POC ${index + 1}: name is required`);
       if (!validOptionalIsoDate(row.birthDate)) return error(400, `POC ${index + 1}: birthday must be YYYY-MM-DD`);
@@ -7527,7 +7536,7 @@ async function handleApiRequest(request) {
       }
       if (phone) {
         const conflict = await pocWhatsappConflict(store, phone, projectId, id || null);
-        if (conflict?.kind === "same_project") {
+        if (conflict?.kind === "same_project" && !removedSet.has(conflict.owner?.id)) {
           return error(409, `POC ${index + 1}: WhatsApp number is already configured on this project`, conflict.owner?.name);
         }
         seenPhones.add(phone);
@@ -7540,19 +7549,7 @@ async function handleApiRequest(request) {
     if (prepared.some((row) => row.active) && Math.abs(activeWeightTotal - 100) > 0.01) {
       return error(400, `Active POC influence must total exactly 100%; the current total is ${Math.round(activeWeightTotal * 100) / 100}%`);
     }
-    const invalidRemoval = removedIds.find((id) => !currentById.has(id));
-    if (invalidRemoval) return error(400, "A removed POC does not belong to this project", invalidRemoval);
-
-    const saved = [];
-    for (const row of prepared) {
-      saved.push(row.id
-        ? await store.updateClientPoc(row.id, row)
-        : await store.createClientPoc(row));
-    }
-    for (const pocId of removedIds) {
-      if (!seenIds.has(pocId)) await store.updateClientPoc(pocId, { active: false, weightPercentage: 0 });
-    }
-    return json(200, { pocs: saved, removed: removedIds.length });
+    return json(200, await store.saveProjectPocBatch(projectId, prepared, removedIds));
   }
 
   if (method === "PUT" && pathname === "/api/admin/pocs/bulk-control") {
@@ -7570,6 +7567,7 @@ async function handleApiRequest(request) {
       seen.add(id);
       const current = await store.getClientPocById(id);
       if (!current) return error(404, "Client POC not found", id);
+      if (current.removedAt) return error(409, "This POC has been removed from the project", id);
       const active = item.active !== false;
       const weightPercentage = active ? Number(item.weightPercentage) : 0;
       if (active && (!Number.isFinite(weightPercentage) || weightPercentage <= 0 || weightPercentage > 100)) {
@@ -7943,6 +7941,12 @@ async function handleApiRequest(request) {
   const pocUpdateMatch = pathname.match(/^\/api\/admin\/pocs\/([^/]+)$/);
   if (method === "PATCH" && pocUpdateMatch) {
     const pocId = decodeURIComponent(pocUpdateMatch[1]);
+    const currentPoc = await store.getClientPocById(pocId);
+    if (!currentPoc) return error(404, "POC not found");
+    if (currentPoc.removedAt) return error(409, "This POC has been removed from the project");
+    if (body.projectId !== undefined && body.projectId !== currentPoc.projectId) {
+      return error(400, "A POC cannot be moved to another project. Copy it into that project's POC list instead.");
+    }
     if (!validOptionalIsoDate(body.birthDate)) return error(400, "Birthday must be YYYY-MM-DD");
     if (body.contactWhatsapp !== undefined) {
       const phone = String(body.contactWhatsapp || "").replace(/\D/g, "");
@@ -7976,7 +7980,7 @@ async function handleApiRequest(request) {
     if (!clientId) return error(400, "Client is required");
     if (!pocIds.length) return error(400, "Select at least one client POC to delete");
     if (pocIds.length > 100) return error(400, "At most 100 client POCs can be deleted at once");
-    const detail = await store.getClientDetail(clientId);
+    const detail = await store.getClientDetail(clientId, { includeRemoved: true });
     if (!detail) return error(404, "Client not found");
     const allowed = new Set((detail.pocs || []).map((poc) => poc.id));
     if (pocIds.some((id) => !allowed.has(id))) return error(400, "One or more selected POCs do not belong to this client");

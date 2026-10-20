@@ -5526,7 +5526,7 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
 .searchable-select .filter-label:empty { display: none; }
 .searchable-select .filter-trigger { min-height: 42px; width: 100%; text-align: left; }
 .filter-trigger:disabled { opacity: .55; cursor: not-allowed; }
-.filter-menu-portal { display: flex; flex-direction: column; overflow: hidden; background: #fff; border: 1px solid #bac9de; border-radius: 9px; box-shadow: 0 10px 35px #182d4d30; }
+.filter-menu-portal { top: auto; bottom: auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: #fff; border: 1px solid #bac9de; border-radius: 9px; box-shadow: 0 10px 35px #182d4d30; }
 .filter-menu-portal .filter-search, .filter-menu-portal .filter-menu-actions { flex-shrink: 0; }
 .filter-menu-portal .filter-option-list { min-height: 0; overflow-y: auto; }
 .filter-option:disabled { opacity: .5; cursor: not-allowed; }

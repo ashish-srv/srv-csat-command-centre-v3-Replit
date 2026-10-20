@@ -121,6 +121,7 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState(null);
   const menuRef = useRef(null);
+  const searchRef = useRef(null);
 
   function closeMenu() {
     setOpen(false);
@@ -128,15 +129,34 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
   }
 
   const ref = useRef(null);
+  function positionMenu() {
+    const rect = ref.current?.getBoundingClientRect();
+    if (!rect) return;
+    const viewportHeight = window.innerHeight || 800;
+    const viewportWidth = window.innerWidth || 1200;
+    const width = Math.min(Math.max(rect.width, 280), viewportWidth - 24);
+    const below = viewportHeight - rect.bottom;
+    const openAbove = below < 220 && rect.top > below;
+    // Both edges must be explicit: .filter-menu's normal top rule otherwise
+    // places upward-opening portalled menus below the entire viewport.
+    setPosition({ position: "fixed", top: openAbove ? "auto" : rect.bottom + 4, bottom: openAbove ? viewportHeight - rect.top + 4 : "auto", left: Math.max(12, Math.min(rect.left, viewportWidth - width - 12)), width, maxHeight: Math.min(400, Math.max(100, (openAbove ? rect.top : below) - 16)), zIndex: 10000 });
+  }
+  useEffect(() => {
+    if (open && !disabled) searchRef.current?.focus?.({ preventScroll: true });
+  }, [open, disabled]);
   useEffect(() => {
     function outside(event) {
       if (!ref.current?.contains(event.target) && !menuRef.current?.contains(event.target)) closeMenu();
     }
-    const closeOnScroll = (event) => { if (!menuRef.current?.contains(event.target)) closeMenu(); };
+    const reposition = (event) => {
+      // Resize targets Window, which is not a DOM Node accepted by contains().
+      if (!event?.target?.nodeType || !menuRef.current?.contains(event.target)) positionMenu();
+    };
     document.addEventListener("mousedown", outside);
-    window.addEventListener("resize", closeMenu);
-    if (portal && open) window.addEventListener("scroll", closeOnScroll, true);
-    return () => { document.removeEventListener("mousedown", outside); window.removeEventListener("resize", closeMenu); window.removeEventListener("scroll", closeOnScroll, true); };
+    const onResize = portal ? reposition : closeMenu;
+    window.addEventListener("resize", onResize);
+    if (portal && open) window.addEventListener("scroll", reposition, true);
+    return () => { document.removeEventListener("mousedown", outside); window.removeEventListener("resize", onResize); window.removeEventListener("scroll", reposition, true); };
   }, [portal, open]);
   const selectedOption = options.find((option) => String(option.value) === String(value));
   const normalizedQuery = query.trim().toLowerCase();
@@ -154,7 +174,7 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
         <div ref={menuRef} className={`filter-menu filter-menu-single ${portal ? "filter-menu-portal" : ""}`} style={portal ? position : undefined}>
           <label className="filter-search">
             <Search size={14} aria-hidden="true" />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${String(label || "options").toLowerCase()}`} aria-label={`Search ${label || "options"}`} autoFocus
+            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${String(label || "options").toLowerCase()}`} aria-label={`Search ${label || "options"}`}
               onKeyDown={(event) => { if (event.key === "Escape") closeMenu(); if (event.key === "Backspace" && !query && allowClear) { event.preventDefault(); choose(""); } }} />
             {query ? <button type="button" onClick={() => setQuery("")} aria-label="Clear search"><X size={12} /></button> : null}
           </label>
@@ -174,13 +194,7 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
         className={`filter-trigger ${value ? "active" : ""}`}
         disabled={disabled}
         onClick={() => {
-          const rect = ref.current?.getBoundingClientRect();
-          if (rect) {
-            const width = Math.min(Math.max(rect.width, 280), window.innerWidth - 24);
-            const below = (window.innerHeight || 800) - rect.bottom;
-            const openAbove = below < 220 && rect.top > below;
-            setPosition({ position: "fixed", ...(openAbove ? { bottom: (window.innerHeight || 800) - rect.top + 4 } : { top: rect.bottom + 4 }), left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)), width, maxHeight: Math.min(400, Math.max(100, (openAbove ? rect.top : below) - 16)), zIndex: 10000 });
-          }
+          positionMenu();
           setOpen((current) => !current);
         }}
         onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && allowClear && !disabled) { event.preventDefault(); choose(""); } if (event.key === "Escape") closeMenu(); }}
