@@ -2735,6 +2735,7 @@ async function projectIdVisibleToAppAccess(store, projectId, appAccess) {
 
 function projectUserRouteAllowed(access, method, pathname) {
   if (method === "GET" && pathname === "/api/project-performance") return hasAppPermission(access, "project_performance");
+  if (method === "GET" && /^\/api\/project-performance\/[^/]+\/zoho-password$/.test(pathname)) return hasAppPermission(access, "project_performance");
   if (method === "PUT" && /^\/api\/project-performance\/[^/]+$/.test(pathname)) return hasAppPermission(access, "edit_project_performance");
   if (method === "POST" && pathname === "/api/project-performance/projects") return hasAppPermission(access, "add_projects");
   if (method === "POST" && /^\/api\/project-performance\/projects\/[^/]+\/service-change-requests$/.test(pathname)) {
@@ -5401,6 +5402,16 @@ async function handleApiRequest(request) {
     });
   }
 
+  const zohoPasswordMatch = pathname.match(/^\/api\/project-performance\/([^/]+)\/zoho-password$/);
+  if (method === "GET" && zohoPasswordMatch) {
+    const projectId = decodeURIComponent(zohoPasswordMatch[1]);
+    if (!await projectIdVisibleToAppAccess(store, projectId, appAccess)) return error(403, "This project is not assigned to you");
+    try {
+      const response = json(200, { password: await store.getProjectZohoPassword(projectId) });
+      response.headers["cache-control"] = "no-store";
+      return response;
+    } catch { return error(503, "Unable to reveal stored credential", "Check the credential encryption configuration"); }
+  }
   const projectPerformanceMatch = pathname.match(/^\/api\/project-performance\/([^/]+)$/);
   if (method === "PUT" && projectPerformanceMatch) {
     const projectId = decodeURIComponent(projectPerformanceMatch[1]);
@@ -5457,7 +5468,8 @@ async function handleApiRequest(request) {
       && Number(profile.fxRateToInr) <= 0) {
       return error(400, "FX rate must be greater than zero");
     }
-    const links = profile.links || {};
+    if (profile.zohoPassword !== undefined && (typeof profile.zohoPassword !== "string" || profile.zohoPassword.length > 2000)) return error(400, "Zoho password must be text of 2,000 characters or fewer");
+    const links = { ...(profile.links || {}), zohoDashboard: profile.zohoDashboardLink };
     for (const [name, value] of Object.entries(links)) {
       if (!value) continue;
       try {
@@ -5476,6 +5488,7 @@ async function handleApiRequest(request) {
     for (const [index, kpi] of body.kpis.entries()) {
       const kpiName = String(kpi.kpiName || "").trim();
       if (!kpiName) return error(400, `KPI ${index + 1} needs a name`);
+      if (kpi.comment !== undefined && (typeof kpi.comment !== "string" || kpi.comment.length > 2000)) return error(400, `KPI ${index + 1} comment must be text of 2,000 characters or fewer`);
       if (!allowedKpiNames.has(kpiName) && !existingKpiNames.has(kpiName)) return error(400, `KPI ${index + 1} name must be selected from the active standard KPI list`);
       if (!["number", "percent", "currency", "ratio"].includes(kpi.unit || "number")) {
         return error(400, `KPI ${index + 1} unit is invalid`);

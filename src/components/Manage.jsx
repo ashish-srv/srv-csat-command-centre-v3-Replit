@@ -4,7 +4,7 @@ import { apiAdminGet, apiGet, apiWrite, apiWriteWithAdminPin, hasAdminPin, setAd
 import { formatCycleType, formatDate, formatDateTime, formatPocWeightShare } from "../format";
 import { downloadPocControlWorkbook } from "../lib/poc-control-workbook.mjs";
 import { parseCsatWorkbook } from "../lib/workbook-import";
-import { FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
+import { SearchableSelect, FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, ErrorBlock, LoadingBlock, Panel } from "./Ui.jsx";
 import {
   APP_PERMISSION_LABELS, defaultPermissions, hasPermission, permissionsForRole
@@ -205,10 +205,10 @@ function ServiceCatalogForm({ value, onChange, onSave, onCancel, saving }) {
         </Field>
         {!isNew ? (
           <Field label="Available for new projects">
-            <select value={value.active ? "yes" : "no"} onChange={(event) => onChange({ ...value, active: event.target.value === "yes" })}>
+            <SearchableSelect value={value.active ? "yes" : "no"} onChange={(event) => onChange({ ...value, active: event.target.value === "yes" })}>
               <option value="yes">Yes</option>
               <option value="no">No — archived</option>
-            </select>
+            </SearchableSelect>
           </Field>
         ) : null}
       </div>
@@ -285,10 +285,10 @@ function InternalPocForm({ value, clusters, departments, subDepartments, people,
           options={people.filter((person) => person.id !== value.id).map((person) => ({ value: person.id, label: person.name }))}
           onChange={(reportingManagerId) => onChange({ ...value, reportingManagerId })} />
         <Field label="Active">
-          <select value={value.active ? "yes" : "no"} onChange={(event) => onChange({ ...value, active: event.target.value === "yes" })}>
+          <SearchableSelect value={value.active ? "yes" : "no"} onChange={(event) => onChange({ ...value, active: event.target.value === "yes" })}>
             <option value="yes">Yes</option>
             <option value="no">No</option>
-          </select>
+          </SearchableSelect>
         </Field>
       </div>
       <div className="button-row">
@@ -427,17 +427,17 @@ function ClientBatchForm({ rows, clusters, onChange, onSave, onCancel, saving })
                 <input value={row.key} readOnly />
               </Field>
               <Field label="Cluster">
-                <select value={row.clusterId} onChange={(event) => updateRow(index, { clusterId: event.target.value })}>
+                <SearchableSelect value={row.clusterId} onChange={(event) => updateRow(index, { clusterId: event.target.value })}>
                   <option value="">Not set</option>
                   {clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.name}</option>)}
-                </select>
+                </SearchableSelect>
               </Field>
               <Field label="Status">
-                <select value={row.activeStatus} onChange={(event) => updateRow(index, { activeStatus: event.target.value })}>
+                <SearchableSelect value={row.activeStatus} onChange={(event) => updateRow(index, { activeStatus: event.target.value })}>
                   <option value="active">active</option>
                   <option value="paused">paused</option>
                   <option value="closed">closed</option>
-                </select>
+                </SearchableSelect>
               </Field>
             </div>
           </div>
@@ -506,10 +506,10 @@ function InternalPocBatchForm({ rows, clusters, departments, subDepartments, peo
                   options={people.filter((person) => person.id !== row.id).map((person) => ({ value: person.id, label: person.name }))}
                   onChange={(reportingManagerId) => updateRow(index, { reportingManagerId })} />
                 <Field label="Active">
-                  <select value={row.active ? "yes" : "no"} onChange={(event) => updateRow(index, { active: event.target.value === "yes" })}>
+                  <SearchableSelect value={row.active ? "yes" : "no"} onChange={(event) => updateRow(index, { active: event.target.value === "yes" })}>
                     <option value="yes">Yes</option>
                     <option value="no">No</option>
-                  </select>
+                  </SearchableSelect>
                 </Field>
               </div>
               {adding ? (
@@ -718,11 +718,11 @@ function PocControlCentre({ rows, levels, clusters, onChange, onSave, saving }) 
             <input value={row.salutation || ""} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, salutation: event.target.value } : item))} placeholder={row.name || "Salutation"} aria-label={`Salutation for ${row.name}`} />
             <span>{row.clientName || "--"}</span>
             <span><strong>{row.projectName || "--"}</strong><small>{row.projectKey || ""}</small></span>
-            <select value={row.levelId || ""} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, levelId: event.target.value } : item))} aria-label={`POC tag for ${row.name}`}>
+            <SearchableSelect value={row.levelId || ""} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, levelId: event.target.value } : item))} aria-label={`POC tag for ${row.name}`}>
               <option value="">Select tag</option>
               {levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}
-            </select>
-            <select value={row.active ? "active" : "inactive"} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, active: event.target.value === "active", weightPercentage: event.target.value === "active" ? item.weightPercentage : 0 } : item))}><option value="active">Active</option><option value="inactive">Inactive</option></select>
+            </SearchableSelect>
+            <SearchableSelect value={row.active ? "active" : "inactive"} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, active: event.target.value === "active", weightPercentage: event.target.value === "active" ? item.weightPercentage : 0 } : item))}><option value="active">Active</option><option value="inactive">Inactive</option></SearchableSelect>
             <input type="number" min="0" max="100" step="0.01" disabled={!row.active} value={row.active ? row.weightPercentage ?? "" : 0} onChange={(event) => onChange(rows.map((item) => item.id === row.id ? { ...item, weightPercentage: event.target.value } : item))} />
           </div>
         ))}
@@ -809,7 +809,7 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
       </div>
       <div className="form-grid service-project-picker">
         <Field label="Project" hint="the draft below contains every POC saved on this project">
-          <select value={value.projectId} onChange={(event) => {
+          <SearchableSelect value={value.projectId} onChange={(event) => {
             setCopyNotice("");
             onChange({
               projectId: event.target.value,
@@ -820,13 +820,13 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
           }}>
             <option value="">Select a project</option>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Copy POCs from another project" hint="adds only POCs not already present in this draft">
-          <select value={value.copySourceProjectId || ""} disabled={!value.projectId} onChange={(event) => onChange({ ...value, copySourceProjectId: event.target.value })}>
+          <SearchableSelect value={value.copySourceProjectId || ""} disabled={!value.projectId} onChange={(event) => onChange({ ...value, copySourceProjectId: event.target.value })}>
             <option value="">Select source project</option>
             {projects.filter((project) => project.id !== value.projectId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
+          </SearchableSelect>
         </Field>
       </div>
       <div className="button-row copy-project-structure-actions">
@@ -857,10 +857,10 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
                   <input value={row.salutation} onChange={(event) => updateRow(index, { salutation: event.target.value })} />
                 </Field>
                 <Field label="POC tag" hint="descriptive only; it does not calculate influence">
-                  <select value={row.levelId} onChange={(event) => updateRow(index, { levelId: event.target.value })}>
+                  <SearchableSelect value={row.levelId} onChange={(event) => updateRow(index, { levelId: event.target.value })}>
                     <option value="">Select Normal or Important</option>
                     {levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}
-                  </select>
+                  </SearchableSelect>
                 </Field>
                 <Field label="CSAT influence (%)" hint={row.active ? "all active POCs on this project must total 100%" : "inactive POCs always have 0% influence"}>
                   <input
@@ -874,13 +874,13 @@ function PocBatchForm({ value, projects, pocs, levels, onChange, onSave, onCance
                   />
                 </Field>
                 <Field label="Active">
-                  <select value={row.active ? "yes" : "no"} onChange={(event) => {
+                  <SearchableSelect value={row.active ? "yes" : "no"} onChange={(event) => {
                     const active = event.target.value === "yes";
                     updateRow(index, { active, weightPercentage: active ? row.weightPercentage : 0 });
                   }}>
                     <option value="yes">Yes — include in future sends</option>
                     <option value="no">No — exclude from future sends</option>
-                  </select>
+                  </SearchableSelect>
                 </Field>
               </div>
               <button type="button" className="icon-button danger" onClick={() => removeRow(index)} aria-label={`Remove POC ${index + 1}`}>
@@ -946,7 +946,7 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
       </div>
       <div className="form-grid service-project-picker">
         <Field label="Project" hint="the list below contains all services saved on this project">
-          <select value={value.projectId} onChange={(event) => {
+          <SearchableSelect value={value.projectId} onChange={(event) => {
             setCopyNotice("");
             onChange({
               projectId: event.target.value,
@@ -956,13 +956,13 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
           }}>
             <option value="">Select a project</option>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Copy services from another project" hint="copies service, owner and KPI structure without history">
-          <select value={value.copySourceProjectId || ""} disabled={!value.projectId} onChange={(event) => onChange({ ...value, copySourceProjectId: event.target.value })}>
+          <SearchableSelect value={value.copySourceProjectId || ""} disabled={!value.projectId} onChange={(event) => onChange({ ...value, copySourceProjectId: event.target.value })}>
             <option value="">Select source project</option>
             {projects.filter((project) => project.id !== value.projectId).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
+          </SearchableSelect>
         </Field>
       </div>
       <div className="button-row copy-project-structure-actions">
@@ -977,7 +977,7 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
             <div className="batch-editor-row" key={row.id || `new-service-${index}`}>
               <div className="form-grid">
                 <Field label={`Service ${index + 1}`}>
-                  <select value={row.serviceCatalogId || ""} onChange={(event) => {
+                  <SearchableSelect value={row.serviceCatalogId || ""} onChange={(event) => {
                     const selected = serviceCatalog.find((item) => item.id === event.target.value);
                     updateRow(index, {
                       serviceCatalogId: event.target.value,
@@ -989,16 +989,16 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
                     {serviceCatalog.filter((item) => item.active || item.id === row.serviceCatalogId).map((item) => (
                       <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                 </Field>
                 <Field label="Generated service key" hint="automatic and not editable">
                   <input value={generatedKey} readOnly placeholder="generated_automatically" />
                 </Field>
                 <Field label="Owner (internal POC)" hint="alerts go to this person's reporting manager">
-                  <select value={row.internalPocId || ""} onChange={(event) => updateRow(index, { internalPocId: event.target.value })}>
+                  <SearchableSelect value={row.internalPocId || ""} onChange={(event) => updateRow(index, { internalPocId: event.target.value })}>
                     <option value="">Not set</option>
                     {people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
-                  </select>
+                  </SearchableSelect>
                 </Field>
                 <Field label="KPIs">
                   <input value={row.kpis || ""} onChange={(event) => updateRow(index, { kpis: event.target.value })} />
@@ -1047,17 +1047,17 @@ function ClientForm({ value, clusters, onChange, onSave, onCancel, saving }) {
           <input value={value.key} readOnly placeholder="generated-from-name" />
         </Field>
         <Field label="Cluster">
-          <select value={value.clusterId || ""} onChange={(event) => onChange({ ...value, clusterId: event.target.value })}>
+          <SearchableSelect value={value.clusterId || ""} onChange={(event) => onChange({ ...value, clusterId: event.target.value })}>
             <option value="">Not set</option>
             {clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.name}</option>)}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Status">
-          <select value={value.activeStatus} onChange={(event) => onChange({ ...value, activeStatus: event.target.value })}>
+          <SearchableSelect value={value.activeStatus} onChange={(event) => onChange({ ...value, activeStatus: event.target.value })}>
             <option value="active">active</option>
             <option value="paused">paused</option>
             <option value="closed">closed</option>
-          </select>
+          </SearchableSelect>
         </Field>
       </div>
       <div className="button-row">
@@ -1099,10 +1099,10 @@ function ProjectForm({ value, clients, onChange, onSave, onCancel, saving }) {
       </div>
       <div className="form-grid">
         <Field label="Client">
-          <select value={value.clientId} onChange={(event) => onChange({ ...value, clientId: event.target.value })}>
+          <SearchableSelect value={value.clientId} onChange={(event) => onChange({ ...value, clientId: event.target.value })}>
             <option value="">Select a client</option>
             {clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Project name">
           <input value={value.name} onChange={(event) => onChange({
@@ -1121,11 +1121,11 @@ function ProjectForm({ value, clients, onChange, onSave, onCancel, saving }) {
           />
         </Field>
         <Field label="Status">
-          <select value={value.activeStatus} onChange={(event) => onChange({ ...value, activeStatus: event.target.value })}>
+          <SearchableSelect value={value.activeStatus} onChange={(event) => onChange({ ...value, activeStatus: event.target.value })}>
             <option value="active">active — scheduler can start cycles</option>
             <option value="paused">paused — no new scheduled cycles</option>
             <option value="closed">closed — project finished</option>
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Start date">
           <input type="date" value={value.startDate || ""} onChange={(event) => onChange({ ...value, startDate: event.target.value })} />
@@ -1215,7 +1215,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
       <h4>1. Project</h4>
       <div className="form-grid">
         <Field label="Client">
-          <select value={value.project.clientId || ""} onChange={(event) => {
+          <SearchableSelect value={value.project.clientId || ""} onChange={(event) => {
             const nextClientId = event.target.value;
             onChange({
               ...value,
@@ -1232,15 +1232,15 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
                 {client.name}{client.activeStatus && client.activeStatus !== "active" ? ` - ${client.activeStatus}` : ""}
               </option>
             ))}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Copy from an existing project" hint="copies POCs, services, owners and KPIs only; history and schedules are never copied">
-          <select value={value.copyProjectId || ""} disabled={!value.project.clientId} onChange={(event) => copyProject(event.target.value)}>
+          <SearchableSelect value={value.copyProjectId || ""} disabled={!value.project.clientId} onChange={(event) => copyProject(event.target.value)}>
             <option value="">Start with a blank project</option>
             {(copySource?.projects || []).map((project) => (
               <option key={project.id} value={project.id}>{project.name}</option>
             ))}
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Project name">
           <input value={value.project.name} onChange={(event) => updateProject({ name: event.target.value })} />
@@ -1249,11 +1249,11 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
           <input value={value.project.key} onChange={(event) => updateProject({ key: event.target.value })} />
         </Field>
         <Field label="Status">
-          <select value={value.project.activeStatus} onChange={(event) => updateProject({ activeStatus: event.target.value })}>
+          <SearchableSelect value={value.project.activeStatus} onChange={(event) => updateProject({ activeStatus: event.target.value })}>
             <option value="active">active</option>
             <option value="paused">paused</option>
             <option value="closed">closed</option>
-          </select>
+          </SearchableSelect>
         </Field>
         <Field label="Start date">
           <input type="date" value={value.project.startDate} onChange={(event) => updateProject({ startDate: event.target.value })} />
@@ -1285,10 +1285,10 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
               <Field label="Birthday" hint="optional"><input type="date" value={poc.birthDate || ""} onChange={(event) => updatePoc(index, { birthDate: event.target.value })} /></Field>
               <Field label="Salutation"><input value={poc.salutation || ""} onChange={(event) => updatePoc(index, { salutation: event.target.value })} /></Field>
               <Field label="POC tag" hint="descriptive only">
-                <select value={poc.levelId || ""} onChange={(event) => updatePoc(index, { levelId: event.target.value })}>
+                <SearchableSelect value={poc.levelId || ""} onChange={(event) => updatePoc(index, { levelId: event.target.value })}>
                   <option value="">Select Normal or Important</option>
                   {levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}
-                </select>
+                </SearchableSelect>
               </Field>
               <Field label="CSAT influence (%)" hint="all POCs on this project must total 100%">
                 <input
@@ -1302,13 +1302,13 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
                 />
               </Field>
               <Field label="Active" hint="inactive POCs are copied for reference but receive no feedback">
-                <select value={poc.active !== false ? "yes" : "no"} onChange={(event) => {
+                <SearchableSelect value={poc.active !== false ? "yes" : "no"} onChange={(event) => {
                   const active = event.target.value === "yes";
                   updatePoc(index, { active, weightPercentage: active ? poc.weightPercentage : 0 });
                 }}>
                   <option value="yes">Yes — include in future sends</option>
                   <option value="no">No — keep inactive</option>
-                </select>
+                </SearchableSelect>
               </Field>
             </div>
             <button type="button" className="icon-button danger" disabled={pocs.length === 1}
@@ -1340,7 +1340,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
           <div className="batch-editor-row" key={`setup-service-${index}`}>
             <div className="form-grid">
               <Field label={`Service ${index + 1}`}>
-                <select value={service.serviceCatalogId || ""} onChange={(event) => {
+                <SearchableSelect value={service.serviceCatalogId || ""} onChange={(event) => {
                   const selected = serviceCatalog.find((item) => item.id === event.target.value);
                   updateService(index, { serviceCatalogId: event.target.value, name: selected?.name || "" });
                 }}>
@@ -1348,16 +1348,16 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
                   {serviceCatalog.filter((item) => item.active || item.id === service.serviceCatalogId).map((item) => (
                     <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
                   ))}
-                </select>
+                </SearchableSelect>
               </Field>
               <Field label="Generated key" hint="automatic and not editable">
                 <input value={serviceIdentifier(service.name)} readOnly placeholder="generated_automatically" />
               </Field>
               <Field label="Owner (internal POC)">
-                <select value={service.internalPocId || ""} onChange={(event) => updateService(index, { internalPocId: event.target.value })}>
+                <SearchableSelect value={service.internalPocId || ""} onChange={(event) => updateService(index, { internalPocId: event.target.value })}>
                   <option value="">Not set</option>
                   {people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
-                </select>
+                </SearchableSelect>
               </Field>
               <Field label="KPIs"><input value={service.kpis || ""} onChange={(event) => updateService(index, { kpis: event.target.value })} /></Field>
             </div>
@@ -1398,6 +1398,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const [toast, setToast] = useState("");
   const [saving, setSaving] = useState(false);
   const [projectForm, setProjectForm] = useState(null);
+  const [projectEditRequest, setProjectEditRequest] = useState(0);
   const [clientForm, setClientForm] = useState(null);
   const [clusterForm, setClusterForm] = useState(null);
   const [showAllInternal, setShowAllInternal] = useState(true);
@@ -1530,6 +1531,7 @@ export default function Manage({ onReload, currentUser = null }) {
       setCleanupProjectId((current) => current && (data.projects || []).some((project) => project.id === current) ? current : "");
       const optionalFailure = optionalResults.find((result) => result.status === "rejected");
       if (optionalFailure) showToast(`Manage loaded, but one optional section could not load: ${optionalFailure.reason?.message || "request failed"}`);
+      return data;
     } catch (loadError) {
       setLoadError(loadError);
       showToast(loadError.message);
@@ -1928,8 +1930,10 @@ export default function Manage({ onReload, currentUser = null }) {
 
   useEffect(() => {
     if (!projectForm && !clientForm && !clusterForm && !internalForm && !internalBatch && !clientBatch && !pocBatch && !serviceBatch && !serviceCatalogForm && !serviceCatalogBatch && !setupForm) return;
-    window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
-  }, [Boolean(projectForm), Boolean(clientForm), Boolean(clusterForm), Boolean(internalForm), Boolean(internalBatch), Boolean(clientBatch), Boolean(pocBatch), Boolean(serviceBatch), Boolean(serviceCatalogForm), Boolean(serviceCatalogBatch), Boolean(setupForm)]);
+    const target = projectForm || setupForm ? "manage-projects" : serviceBatch ? "manage-services" : null;
+    const frame = window.requestAnimationFrame(() => (target ? document.getElementById(target)?.querySelector(".edit-form") : formRef.current)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [Boolean(projectForm), projectForm?.id, projectEditRequest, Boolean(clientForm), Boolean(clusterForm), Boolean(internalForm), Boolean(internalBatch), Boolean(clientBatch), Boolean(pocBatch), Boolean(serviceBatch), Boolean(serviceCatalogForm), Boolean(serviceCatalogBatch), Boolean(setupForm)]);
 
   async function selectClient(id) {
     setClientId(id);
@@ -2177,14 +2181,17 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function saveServices() {
+    const projectId = serviceBatch.projectId;
+    const scrollPosition = window.scrollY;
     setSaving(true);
     try {
       const payload = { services: serviceBatch.rows || [] };
       await apiWrite(`/api/admin/projects/${encodeURIComponent(serviceBatch.projectId)}/services`, payload, "PUT");
       showToast("All service changes saved.");
-      setServiceBatch(null);
-      await loadAll(clientId);
+      const refreshed = await loadAll(clientId);
+      if (refreshed) setServiceBatch({ projectId, rows: serviceRowsForProject(refreshed.projectServices || refreshed.services || [], projectId), copySourceProjectId: "" });
       onReload();
+      window.requestAnimationFrame(() => window.scrollTo({ top: scrollPosition, behavior: "instant" }));
     } catch (saveError) {
       showToast(saveError.message);
     } finally {
@@ -2856,15 +2863,16 @@ export default function Manage({ onReload, currentUser = null }) {
     })
     : sortedScopedClientPocs;
   const projectServiceNeedle = projectServiceSearch.trim().toLowerCase();
+  const serviceEditorScope = sortedScopedProjectServices.filter((service) => !serviceBatch?.projectId || service.projectId === serviceBatch.projectId);
   const displayedScopedProjectServices = projectServiceNeedle
-    ? sortedScopedProjectServices.filter((service) => {
+    ? serviceEditorScope.filter((service) => {
       const project = visibleProjectsById.get(service.projectId);
       const owner = (directory?.internalPocs || []).find((person) => person.id === service.internalPocId);
       const manager = owner ? (directory?.internalPocs || []).find((person) => person.id === owner.reportingManagerId) : null;
       return [service.name, service.serviceKey, project?.name, project?.key, owner?.name, manager?.name]
         .some((value) => String(value || "").toLowerCase().includes(projectServiceNeedle));
     })
-    : sortedScopedProjectServices;
+    : serviceEditorScope;
   const scopedPocControlRows = pocControlRows.filter((poc) => visibleProjectIds.has(poc.projectId));
   const scopedServiceChangeRequests = serviceChangeRequests.filter((request) => visibleProjectIds.has(request.projectId));
   const pocs = detail?.pocs || [];
@@ -3104,12 +3112,12 @@ export default function Manage({ onReload, currentUser = null }) {
               <div className="app-user-draft-list">
                 {newAppUsers.map((row) => (
                   <div className="app-user-draft-row" key={row.draftId}>
-                    <select value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", createInternalPoc: role === "project_user" ? row.createInternalPoc : false, permissions: defaultPermissions(role) }); }} aria-label="Application role">
+                    <SearchableSelect value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", createInternalPoc: role === "project_user" ? row.createInternalPoc : false, permissions: defaultPermissions(role) }); }} aria-label="Application role">
                       <option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}
-                    </select>
+                    </SearchableSelect>
                     {row.role === "project_user" ? <SingleSelect compact label="Internal POC" value={row.createInternalPoc ? "__new__" : row.internalPocId} placeholder="Select Internal POC" options={[{ value: "__new__", label: "Create new Internal POC" }, ...internalPocOptionsForDraft(row)]} onChange={(selected) => { const createInternalPoc = selected === "__new__"; const internalPocId = createInternalPoc ? "" : selected; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { createInternalPoc, internalPocId, name: person?.name || "", email: person?.email || "" }); }} /> : <span className="bulk-row-placeholder">Access across projects</span>}
                     {row.role === "project_user" && !row.createInternalPoc ? <span className={`app-user-linked-identity ${row.internalPocId && !row.email ? "missing-email" : ""}`}><strong>{row.name || "Select a person"}</strong><small>{row.email || (row.internalPocId ? "Email missing in Internal POCs" : "Name and email will load automatically")}</small></span> : <span className="app-user-manual-identity"><input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder={row.createInternalPoc ? "New Internal POC name" : "Name"} aria-label="User name" /><input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" /></span>}
-                    <select value={row.active ? "active" : "inactive"} onChange={(event) => updateNewAppUser(row.draftId, { active: event.target.value === "active" })} aria-label="User status"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+                    <SearchableSelect value={row.active ? "active" : "inactive"} onChange={(event) => updateNewAppUser(row.draftId, { active: event.target.value === "active" })} aria-label="User status"><option value="active">Active</option><option value="inactive">Inactive</option></SearchableSelect>
                     <button type="button" className="icon-button danger" disabled={newAppUsers.length === 1} onClick={() => setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId))} aria-label="Remove pending user"><Trash2 size={15} /></button>
                   </div>
                 ))}
@@ -3142,9 +3150,9 @@ export default function Manage({ onReload, currentUser = null }) {
                         <div className="app-user-card-body">
                           <div className="app-user-row">
                             <input value={user.name || ""} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item))} aria-label={`Name for ${user.email}`} />
-                            <select value={user.role} disabled={!isSuperAdmin} onChange={(event) => changeExistingAppUserRole(user.id, event.target.value)} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</select>
+                            <SearchableSelect value={user.role} disabled={!isSuperAdmin} onChange={(event) => changeExistingAppUserRole(user.id, event.target.value)} aria-label={`Role for ${user.email}`}><option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}</SearchableSelect>
                             {user.role === "project_user" ? <SingleSelect compact label={`Internal POC for ${user.name || user.email}`} value={user.internalPocId || ""} placeholder="Select Internal POC" options={internalPocOptionsForUser(user)} onChange={(value) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, internalPocId: value } : item))} /> : <span className="bulk-row-placeholder">No Internal POC link required</span>}
-                            <select value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></select>
+                            <SearchableSelect value={user.active ? "active" : "inactive"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, active: event.target.value === "active" } : item))} aria-label={`Status for ${user.email}`}><option value="active">Active</option><option value="inactive">Inactive</option></SearchableSelect>
                           </div>
                           <div className="app-permission-grid">
                             {permissionsForRole(user.role).map((permission) => <label key={permission}><input type="checkbox" checked={user.role === "super_admin" || user.permissions?.[permission] === true} disabled={user.role === "super_admin"} onChange={(event) => setAppUsers((current) => current.map((item) => item.id === user.id ? { ...item, permissions: { ...item.permissions, [permission]: event.target.checked } } : item))} /><span>{APP_PERMISSION_LABELS[permission]}</span></label>)}
@@ -3197,14 +3205,14 @@ export default function Manage({ onReload, currentUser = null }) {
                         <div className="standard-value-row" key={item.id}>
                           <input type="checkbox" className="standard-row-checkbox" checked={selectedStandardIds.includes(item.id)} onChange={(event) => setSelectedStandardIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} aria-label={`Select ${item.value}`} />
                           <input value={item.value} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, value: event.target.value } : value))} aria-label={`${label} value`} />
-                          <select value={item.active ? "active" : "inactive"} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, active: event.target.value === "active" } : value))}><option value="active">Active</option><option value="inactive">Archived</option></select>
+                          <SearchableSelect value={item.active ? "active" : "inactive"} onChange={(event) => setPerformanceStandards((current) => current.map((value) => value.id === item.id ? { ...value, active: event.target.value === "active" } : value))}><option value="active">Active</option><option value="inactive">Archived</option></SearchableSelect>
                         </div>
                       ))}
                       {drafts.map((item) => (
                         <div className="standard-value-row standard-draft-row" key={item.draftId}>
                           <span className="standard-new-badge">New</span>
                           <input value={item.value} onChange={(event) => updateStandardDraft(category, item.draftId, { value: event.target.value })} placeholder={`New ${label}`} aria-label={`New ${label}`} />
-                          <select value={item.active ? "active" : "inactive"} onChange={(event) => updateStandardDraft(category, item.draftId, { active: event.target.value === "active" })}><option value="active">Active</option><option value="inactive">Archived</option></select>
+                          <SearchableSelect value={item.active ? "active" : "inactive"} onChange={(event) => updateStandardDraft(category, item.draftId, { active: event.target.value === "active" })}><option value="active">Active</option><option value="inactive">Archived</option></SearchableSelect>
                           <button type="button" className="icon-button danger" onClick={() => removeStandardDraft(category, item.draftId)} disabled={saving || drafts.length === 1} aria-label={`Remove new ${label} row`}><Trash2 size={15} /></button>
                         </div>
                       ))}
@@ -3344,28 +3352,28 @@ export default function Manage({ onReload, currentUser = null }) {
             onChange={(value) => { setAutomationClientId(value); clearAutomationPreview(); }}
           />
           <Field label="Project status">
-            <select value={automationProjectStatus} onChange={(event) => { setAutomationProjectStatus(event.target.value); clearAutomationPreview(); }}>
+            <SearchableSelect value={automationProjectStatus} onChange={(event) => { setAutomationProjectStatus(event.target.value); clearAutomationPreview(); }}>
               <option value="">All statuses</option>
               <option value="active">Active</option>
               <option value="paused">Paused</option>
               <option value="closed">Closed</option>
-            </select>
+            </SearchableSelect>
           </Field>
         </div>
         <div className="bulk-automation-action-grid">
           <Field label="Scheduled feedback cycles">
-            <select value={automaticFeedbackAction} onChange={(event) => { setAutomaticFeedbackAction(event.target.value); clearAutomationPreview(); }}>
+            <SearchableSelect value={automaticFeedbackAction} onChange={(event) => { setAutomaticFeedbackAction(event.target.value); clearAutomationPreview(); }}>
               <option value="unchanged">No change</option>
               <option value="off">Turn OFF</option>
               <option value="on">Turn ON</option>
-            </select>
+            </SearchableSelect>
           </Field>
           <Field label="Automatic quick check-ins">
-            <select value={automaticQuickCheckinAction} onChange={(event) => { setAutomaticQuickCheckinAction(event.target.value); clearAutomationPreview(); }}>
+            <SearchableSelect value={automaticQuickCheckinAction} onChange={(event) => { setAutomaticQuickCheckinAction(event.target.value); clearAutomationPreview(); }}>
               <option value="unchanged">No change</option>
               <option value="off">Turn OFF</option>
               <option value="on">Turn ON</option>
-            </select>
+            </SearchableSelect>
           </Field>
           <div className="button-row bulk-automation-presets">
             <Button onClick={() => { setAutomaticFeedbackAction("off"); setAutomaticQuickCheckinAction("off"); clearAutomationPreview(); }}>Prepare both OFF</Button>
@@ -3435,10 +3443,10 @@ export default function Manage({ onReload, currentUser = null }) {
         </p>
         <div className="bulk-send-controls">
           <Field label="Feedback type">
-            <select value={bulkCycleType} onChange={(event) => { setBulkCycleType(event.target.value); setBulkPreview(null); setBulkSelectedProjectIds([]); }}>
+            <SearchableSelect value={bulkCycleType} onChange={(event) => { setBulkCycleType(event.target.value); setBulkPreview(null); setBulkSelectedProjectIds([]); }}>
               <option value="pulse">30-day feedback</option>
               <option value="quick_checkin">Quick check-in</option>
-            </select>
+            </SearchableSelect>
           </Field>
           <Button variant="primary" onClick={previewBulkSend} disabled={bulkSending || !visibleProjects.length}>{bulkSending ? "Checking…" : "Preview eligible projects"}</Button>
         </div>
@@ -3747,11 +3755,11 @@ export default function Manage({ onReload, currentUser = null }) {
           </div>
           <div className="bulk-project-status-actions">
             <Field label="Set selected projects to">
-              <select value={bulkProjectStatus} onChange={(event) => { setBulkProjectStatus(event.target.value); setProjectStatusPreview(null); }}>
+              <SearchableSelect value={bulkProjectStatus} onChange={(event) => { setBulkProjectStatus(event.target.value); setProjectStatusPreview(null); }}>
                 <option value="active">Active — scheduler can start cycles</option>
                 <option value="paused">Paused — deactivate new scheduling</option>
                 <option value="closed">Closed — project finished</option>
-              </select>
+              </SearchableSelect>
             </Field>
             <Button onClick={() => { setSelectedProjectStatusIds(displayedProjects.map((project) => project.id)); setProjectStatusPreview(null); }} disabled={!displayedProjects.length}>Select all filtered</Button>
             <Button onClick={() => { setSelectedProjectStatusIds([]); setProjectStatusPreview(null); }} disabled={!selectedProjectStatusIds.length}>Clear selection</Button>
@@ -3797,6 +3805,7 @@ export default function Manage({ onReload, currentUser = null }) {
                 aria-label={`Edit ${project.name}`}
                 onClick={() => {
                   closeForms();
+                  setProjectEditRequest((request) => request + 1);
                   setProjectForm({
                     id: project.id,
                     clientId: project.clientId,
@@ -3848,7 +3857,7 @@ export default function Manage({ onReload, currentUser = null }) {
                 ["adId", "AD"],
                 ["tlId", "TL"],
                 ["amId", "AM"]
-              ].map(([field, label]) => <select key={field} value={project.team?.[field] || ""} onChange={(event) => updateProjectTeam(project.id, field, event.target.value)} aria-label={`${label} for ${project.name}`}><option value="">Not set</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active === false ? " (Inactive)" : ""}</option>)}</select>)}
+              ].map(([field, label]) => <SearchableSelect key={field} value={project.team?.[field] || ""} onChange={(event) => updateProjectTeam(project.id, field, event.target.value)} aria-label={`${label} for ${project.name}`}><option value="">Not set</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active === false ? " (Inactive)" : ""}</option>)}</SearchableSelect>)}
             </div>
           ))}
           {!displayedProjectTeamRows.length ? <EmptyState title="No project teams match these filters" text="Clear the client, cluster or project-team search to see more projects." /> : null}

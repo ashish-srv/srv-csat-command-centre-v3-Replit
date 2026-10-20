@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
-import { Download, Plus, RefreshCw, Save, Trash2, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Download, Eye, EyeOff, Plus, RefreshCw, Save, Trash2, Upload } from "lucide-react";
+import { isCostKpi, kpiAchievement, kpiDifference, previousYearVariance } from "../lib/performance-metrics.js";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api";
 import { formatDate, formatDateTime } from "../format";
 import { downloadProjectPerformanceWorkbook, parseProjectPerformanceWorkbook } from "../lib/project-performance-workbook.mjs";
-import { FilterBar, SingleSelect } from "./Filters.jsx";
+import { SearchableSelect, FilterBar, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, ErrorBlock, LoadingBlock, MetricCard, Panel, StatusPill } from "./Ui.jsx";
 import { hasPermission } from "../permissions";
 
@@ -62,13 +63,16 @@ function formFromProject(project, editor = "") {
     mom: project?.links?.mom || "",
     consolidatedSheet: project?.links?.consolidatedSheet || "",
     projectDriveFolder: project?.links?.projectDriveFolder || "",
-    projectDataSheet: project?.links?.projectDataSheet || ""
+    projectDataSheet: project?.links?.projectDataSheet || "",
+    zohoDashboardLink: project?.zohoDashboardLink || "",
+    zohoPassword: undefined
   };
 }
 
 function blankKpi() {
   return {
     kpiName: "",
+    comment: "",
     unit: "number",
     direction: "higher_better",
     target: "",
@@ -90,10 +94,10 @@ function Field({ label, children, help, className = "" }) {
 
 function NativeSelect({ value, onChange, items, placeholder = "Not set" }) {
   return (
-    <select value={value || ""} onChange={(event) => onChange(event.target.value)}>
+    <SearchableSelect value={value || ""} onChange={(event) => onChange(event.target.value)}>
       <option value="">{placeholder}</option>
       {items.map((item) => <option key={item.value} value={item.value} disabled={Boolean(item.disabled)}>{item.label}</option>)}
-    </select>
+    </SearchableSelect>
   );
 }
 
@@ -115,30 +119,47 @@ function budgetPosition(project) {
   return { left, percent: allocated > 0 ? (left / allocated) * 100 : null };
 }
 
-function kpiAchievement(kpi) {
-  const target = Number(kpi?.target);
-  const actual = Number(kpi?.actual);
-  if (!Number.isFinite(target) || !Number.isFinite(actual) || target === 0) return null;
-  if (kpi.direction === "lower_better") {
-    if (actual === 0) return 100;
-    return Math.max(0, (target / actual) * 100);
-  }
-  return Math.max(0, (actual / target) * 100);
-}
-
-function previousYearVariance(kpi) {
-  const actual = Number(kpi?.actual);
-  const previous = Number(kpi?.previousYearActual);
-  if (!Number.isFinite(actual) || !Number.isFinite(previous) || previous === 0) return null;
-  return ((actual - previous) / Math.abs(previous)) * 100;
-}
-
 function KpiValue({ kpi, field }) {
   const value = kpi?.[field];
   if (value === null || value === undefined || value === "") return <>—</>;
   if (kpi.unit === "percent") return <>{Number(value).toLocaleString("en-IN")}%</>;
   if (kpi.unit === "currency") return <>{money(value, kpi.currency || "INR")}</>;
   return <>{Number(value).toLocaleString("en-IN", { maximumFractionDigits: 2 })}</>;
+}
+
+function KpiTable({ project }) {
+  return <div className="performance-table-scroll compact"><table className="data-table performance-table"><thead><tr><th>KPI</th><th>Comment / Program</th><th>Target</th><th>Actual</th><th>Difference (Actual − Target)</th><th>Achievement</th><th>Previous Year</th><th>Vs Previous Year</th><th>Direction</th></tr></thead><tbody>
+    {(project.kpis || []).map((kpi, index) => {
+      const achievement = kpiAchievement(kpi), variance = previousYearVariance(kpi), difference = kpiDifference(kpi);
+      const cost = isCostKpi(kpi), favorable = difference !== null && (cost ? difference <= 0 : difference >= 0);
+      const value = { ...kpi, currency: project.currency };
+      return <tr key={kpi.id || index}><td><strong>{kpi.kpiName}</strong>{kpi.isPrimary ? <small>Primary</small> : null}</td><td className="kpi-comment">{kpi.comment || "—"}</td><td><KpiValue kpi={value} field="target" /></td><td><KpiValue kpi={value} field="actual" /></td><td className={difference === null ? "" : favorable ? "kpi-favorable" : "kpi-unfavorable"}><KpiValue kpi={{ ...value, difference }} field="difference" />{difference !== null && cost ? <small>{difference > 0 ? "Over target" : difference < 0 ? "Below target" : "On target"}</small> : null}</td><td>{cost ? <span title="Cost KPIs are evaluated by difference from target, not achievement percentage">Not applicable</span> : achievement === null ? "—" : `${achievement.toFixed(1)}%`}</td><td><KpiValue kpi={value} field="previousYearActual" /></td><td>{variance === null ? "—" : `${variance >= 0 ? "+" : ""}${variance.toFixed(1)}%`}</td><td>{cost ? "Lower is better" : "Higher is better"}</td></tr>;
+    })}
+  </tbody></table>{!project.kpis?.length ? <EmptyState title="No KPIs added" /> : null}</div>;
+}
+
+function ZohoPassword({ project }) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const revealRevision = useRef(0);
+  useEffect(() => {
+    const hide = () => { revealRevision.current += 1; setPassword(""); };
+    document.addEventListener("visibilitychange", hide);
+    window.addEventListener("blur", hide);
+    const timer = window.setTimeout(hide, 60000);
+    return () => { revealRevision.current += 1; document.removeEventListener("visibilitychange", hide); window.removeEventListener("blur", hide); window.clearTimeout(timer); };
+  }, [password, project.id]);
+  async function toggle() {
+    if (password) { setPassword(""); return; }
+    setBusy(true); setError("");
+    const revision = ++revealRevision.current;
+    try { const result = await apiGet(`/api/project-performance/${encodeURIComponent(project.id)}/zoho-password`); if (!document.hidden && revision === revealRevision.current) setPassword(result.password || ""); }
+    catch { setError("Unable to reveal password. Check your access and encryption configuration."); }
+    finally { setBusy(false); }
+  }
+  if (!project.zohoPasswordSet) return <span>Not set</span>;
+  return <div className="zoho-password"><span>{password || "••••••••"}</span><button type="button" className="icon-button" disabled={busy} onClick={toggle} aria-label={password ? "Hide Zoho password" : "Show Zoho password"}>{password ? <EyeOff size={17} /> : <Eye size={17} />}</button>{error ? <small className="error-message">{error}</small> : null}</div>;
 }
 
 function ProjectLink({ href, children }) {
@@ -240,7 +261,7 @@ function ProjectDetailCards({
         <div><dt>Performance Status</dt><dd><StatusPill value={project.performanceStatus || "Not set"} /></dd></div><div><dt>Current Delivery Phase</dt><dd>{project.currentPhase || "Not set"}</dd></div><div><dt>Campaign Status</dt><dd>{project.campaignStatus || "Not set"}</dd></div>
       </dl></Panel>
       <Panel title="Current KPI Performance" className="performance-wide-panel performance-card tone-green">
-        <div className="performance-table-scroll compact"><table className="data-table performance-table"><thead><tr><th>KPI</th><th>Target</th><th>Actual</th><th>Achievement</th><th>Previous Year</th><th>Vs Previous Year</th><th>Direction</th></tr></thead><tbody>{project.kpis.map((kpi) => { const achievement = kpiAchievement(kpi); const variance = previousYearVariance(kpi); return <tr key={kpi.id || kpi.kpiName}><td><strong>{kpi.kpiName}</strong>{kpi.isPrimary ? <small>Primary</small> : null}</td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="target" /></td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="actual" /></td><td>{achievement === null ? "—" : `${achievement.toFixed(1)}%`}</td><td><KpiValue kpi={{ ...kpi, currency: project.currency }} field="previousYearActual" /></td><td>{variance === null ? "—" : `${variance >= 0 ? "+" : ""}${variance.toFixed(1)}%`}</td><td>{kpi.direction === "lower_better" ? "Lower is better" : "Higher is better"}</td></tr>; })}</tbody></table>{!project.kpis.length ? <EmptyState title="No KPIs added" /> : null}</div>
+        <KpiTable project={project} />
       </Panel>
       <Panel title="Services, Mandates and Delivery" className="performance-wide-panel performance-card tone-indigo">
         <p className="field-caption">CSAT project services</p>
@@ -249,10 +270,10 @@ function ProjectDetailCards({
         {canDirectlyManageServices || canRequestServiceChanges ? <div className="performance-service-change-controls">
           {canRequestServiceChanges ? <label><span>Reason for the requested change</span><textarea rows="3" value={changeReason} onChange={(event) => { setChangeReason(event.target.value); setServiceRequestError(""); }} placeholder="Explain why this project service should be added or removed" maxLength="1000" /></label> : null}
           <div className="performance-service-attach">
-          <select value={serviceCatalogId} onChange={(event) => setServiceCatalogId(event.target.value)} aria-label={`Add service to ${project.name}`}>
+          <SearchableSelect value={serviceCatalogId} onChange={(event) => setServiceCatalogId(event.target.value)} aria-label={`Add service to ${project.name}`}>
             <option value="">Select standard service</option>
             {availableServices.map((service) => <option key={service.id} value={service.id}>{service.name}</option>)}
-          </select>
+          </SearchableSelect>
           <Button icon={Plus} onClick={addService} disabled={addingServiceProjectId === project.id || requestingServiceProjectId === project.id}>{addingServiceProjectId === project.id || requestingServiceProjectId === project.id ? "Saving…" : canDirectlyManageServices ? "Add to project" : "Request addition"}</Button>
           </div>
           {canRequestServiceChanges ? <div className="performance-service-attach request-new-service">
@@ -274,8 +295,12 @@ function ProjectDetailCards({
         <dl className="detail-list context-list"><div><dt>Client Sentiment</dt><dd><StatusPill value={project.clientSentiment || "Not set"} /></dd></div><div><dt>Relationship</dt><dd>{project.relationshipStrength || "Not set"}</dd></div><div><dt>Meeting Cadence</dt><dd>{project.meetingCadence || "Not set"}</dd></div><div><dt>Last Meeting</dt><dd>{formatDate(project.lastMeetingDate)}</dd></div><div><dt>Suggestion Frequency</dt><dd>{project.suggestionFrequency || "Not set"}</dd></div><div><dt>Last Suggestion</dt><dd>{formatDate(project.lastSuggestionDate)}</dd></div></dl>
         <div className="performance-note-grid"><div><strong>Client Feedback</strong><p>{project.clientFeedback || "Not set"}</p></div><div><strong>Next Steps</strong><p>{project.nextSteps || "Not set"}</p></div><div><strong>Comments</strong><p>{project.comments || "Not set"}</p></div></div>
       </Panel>
+      <Panel title="Client POC Details" className="performance-wide-panel performance-card tone-blue">
+        <div className="performance-table-scroll compact"><table className="data-table performance-table"><thead><tr><th>Name</th><th>Designation</th><th>Email</th><th>WhatsApp</th><th>Status</th></tr></thead><tbody>{(project.clientPocs || []).map((person) => <tr key={person.id}><td><strong>{person.name}</strong></td><td>{person.designation || "—"}</td><td>{person.contactEmail || "—"}</td><td>{person.contactWhatsapp || "—"}</td><td><StatusPill value={person.active ? "Active" : "Inactive"} /></td></tr>)}</tbody></table>{!project.clientPocs?.length ? <EmptyState title="No Client POCs added" text="Client POCs are configured separately in Manage; this section is read-only." /> : null}</div>
+      </Panel>
       <Panel title="Project Links" className="performance-wide-panel performance-card tone-slate"><dl className="detail-list">
         <div><dt>MoM</dt><dd><ProjectLink href={project.links?.mom}>Open MoM</ProjectLink></dd></div><div><dt>Consolidated Sheet</dt><dd><ProjectLink href={project.links?.consolidatedSheet}>Open Sheet</ProjectLink></dd></div><div><dt>Project Drive</dt><dd><ProjectLink href={project.links?.projectDriveFolder}>Open Folder</ProjectLink></dd></div><div><dt>Project Data Sheet</dt><dd><ProjectLink href={project.links?.projectDataSheet}>Open Sheet</ProjectLink></dd></div>
+        <div><dt>Zoho Dashboard Link</dt><dd><ProjectLink href={project.zohoDashboardLink}>Open Zoho Dashboard</ProjectLink></dd></div><div><dt>Zoho Password</dt><dd><ZohoPassword project={project} /></dd></div>
       </dl></Panel>
     </div>
   );
@@ -321,33 +346,67 @@ export default function ProjectPerformance({ currentUser = null }) {
   const [removingServiceId, setRemovingServiceId] = useState("");
   const [addingServiceProjectId, setAddingServiceProjectId] = useState("");
   const [requestingServiceProjectId, setRequestingServiceProjectId] = useState("");
+  const drafts = useRef(new Map());
+  const editVersion = useRef(0);
+  const loadRevision = useRef(0);
+  const liveEditor = useRef(null);
+  liveEditor.current = { projectId: selectedProjectId, form, kpis };
+  const draftStorageKey = `csat:performance-drafts:${currentUser?.appUserId || currentUser?.email || currentUser?.provider || "anonymous"}`;
+  const draftOwner = useRef(draftStorageKey);
 
-  async function load(preferredProjectId = selectedProjectId) {
+  function persistDrafts() {
+    if (draftOwner.current !== draftStorageKey) return;
+    try { sessionStorage.setItem(draftStorageKey, JSON.stringify(Object.fromEntries([...drafts.current].map(([key, draft]) => [key, { ...draft, form: { ...draft.form, zohoPassword: undefined } }])))); } catch { /* Browsers may restrict storage; in-memory drafts remain intact. */ }
+  }
+
+  useEffect(() => {
+    if (!selectedProjectId || !data || draftOwner.current !== draftStorageKey) return;
+    const project = data.projects.find((item) => item.id === selectedProjectId);
+    if (!project) return;
+    const safeForm = { ...form, zohoPassword: undefined };
+    const changed = form.zohoPassword !== undefined || JSON.stringify(safeForm) !== JSON.stringify(formFromProject(project, editorIdentity))
+      || JSON.stringify(kpis) !== JSON.stringify(project.kpis || []);
+    if (changed) drafts.current.set(selectedProjectId, { form: { ...form }, kpis, version: editVersion.current });
+    else drafts.current.delete(selectedProjectId);
+    persistDrafts();
+  }, [form, kpis, selectedProjectId]);
+
+  async function load(preferredProjectId = selectedProjectId, resetDraft = false) {
+    const revision = ++loadRevision.current;
     setLoading(true);
     setError(null);
     try {
       const next = await apiGet("/api/project-performance");
+      if (revision !== loadRevision.current) return;
       setData(next);
       const found = preferredProjectId
         ? next.projects.find((item) => item.id === preferredProjectId) || null
         : null;
       setSelectedProjectId(found?.id || "");
-      setForm(formFromProject(found, editorIdentity));
-      setKpis((found?.kpis || []).map((item) => ({ ...item })));
+      if (resetDraft && found) { drafts.current.delete(found.id); persistDrafts(); }
+      const draft = found ? drafts.current.get(found.id) : null;
+      setForm(draft?.form ? { ...draft.form, updatedBy: editorIdentity || draft.form.updatedBy } : formFromProject(found, editorIdentity));
+      setKpis(draft?.kpis || (found?.kpis || []).map((item) => ({ ...item })));
+      editVersion.current = draft?.version ?? found?.version ?? 0;
+      if (draft) setNotice("Unsaved draft preserved. Saving still checks for changes made by another person.");
     } catch (loadError) {
-      setError(loadError);
+      if (revision === loadRevision.current) setError(loadError);
     } finally {
-      setLoading(false);
+      if (revision === loadRevision.current) setLoading(false);
     }
   }
 
   const signedInIdentity = `${currentUser?.appUserId || ""}:${currentUser?.internalPocId || ""}:${currentUser?.email || currentUser?.provider || ""}`;
 
   useEffect(() => {
+    draftOwner.current = draftStorageKey;
+    drafts.current = new Map();
+    try { drafts.current = new Map(Object.entries(JSON.parse(sessionStorage.getItem(draftStorageKey) || "{}"))); } catch { /* Ignore invalid or unavailable draft storage. */ }
     setData(null);
     setSelectedProjectId("");
     setViewingProjectId("");
-    void load("");
+    void load([...drafts.current.keys()][0] || "");
+    return () => { loadRevision.current += 1; };
   }, [signedInIdentity]);
 
   useEffect(() => {
@@ -464,10 +523,14 @@ export default function ProjectPerformance({ currentUser = null }) {
   const concernedCount = searchedProjects.filter((item) => ["Concerned", "Escalated"].includes(item.clientSentiment)).length;
 
   function chooseProject(projectId, move = false) {
+    loadRevision.current += 1;
+    setLoading(false);
     const project = projects.find((item) => item.id === projectId) || null;
     setSelectedProjectId(project?.id || "");
-    setForm(formFromProject(project, editorIdentity));
-    setKpis((project?.kpis || []).map((item) => ({ ...item })));
+    const draft = project ? drafts.current.get(project.id) : null;
+    setForm(draft?.form || formFromProject(project, editorIdentity));
+    setKpis(draft?.kpis || (project?.kpis || []).map((item) => ({ ...item })));
+    editVersion.current = draft?.version ?? project?.version ?? 0;
     setNotice("");
     if (move) scrollToSection("performance-project-details");
   }
@@ -498,6 +561,7 @@ export default function ProjectPerformance({ currentUser = null }) {
   function updateKpi(index, field, value) {
     setKpis((current) => current.map((item, itemIndex) => {
       if (itemIndex !== index) return field === "isPrimary" && value ? { ...item, isPrimary: false } : item;
+      if (field === "kpiName" && /\b(?:cpa|cpl|cpc|cpm|cost)\b/i.test(value)) return { ...item, kpiName: value, unit: "currency", direction: "lower_better" };
       return { ...item, [field]: value };
     }));
     setNotice("");
@@ -586,13 +650,14 @@ export default function ProjectPerformance({ currentUser = null }) {
 
   async function save() {
     if (!selectedProject) return;
+    const submitted = JSON.stringify({ form, kpis });
     setSaving(true);
     setError(null);
     setNotice("");
     try {
-      await apiPut(`/api/project-performance/${encodeURIComponent(selectedProject.id)}`, {
+      const saved = await apiPut(`/api/project-performance/${encodeURIComponent(selectedProject.id)}`, {
         updatedBy: form.updatedBy,
-        expectedVersion: selectedProject.version || 0,
+        expectedVersion: editVersion.current,
         clientProfile: { clientGroup: form.clientGroup, clientCriticality: form.clientCriticality },
         profile: {
           financialYear: form.financialYear,
@@ -626,6 +691,8 @@ export default function ProjectPerformance({ currentUser = null }) {
           clientFeedback: form.clientFeedback,
           nextSteps: form.nextSteps,
           comments: form.comments,
+          zohoDashboardLink: form.zohoDashboardLink,
+          zohoPassword: form.zohoPassword,
           links: {
             mom: form.mom,
             consolidatedSheet: form.consolidatedSheet,
@@ -636,12 +703,30 @@ export default function ProjectPerformance({ currentUser = null }) {
         kpis
       });
       setNotice("Project performance saved and added to audit history.");
-      await load(selectedProject.id);
+      const current = liveEditor.current;
+      if (current?.projectId === selectedProject.id && submitted === JSON.stringify({ form: current.form, kpis: current.kpis })) {
+        await load(selectedProject.id, true);
+      } else {
+        const draft = drafts.current.get(selectedProject.id);
+        if (draft && submitted !== JSON.stringify({ form: draft.form, kpis: draft.kpis })) drafts.current.set(selectedProject.id, { ...draft, version: saved.version ?? editVersion.current + 1 });
+        else drafts.current.delete(selectedProject.id);
+        if (current?.projectId === selectedProject.id) {
+          editVersion.current = saved.version ?? editVersion.current + 1;
+          setNotice("Submitted changes saved. Your newer edits remain unsaved.");
+        }
+        persistDrafts();
+      }
     } catch (saveError) {
       setError(saveError);
     } finally {
       setSaving(false);
     }
+  }
+
+  async function discardDraft() {
+    if (!selectedProjectId || !window.confirm("Discard this project's unsaved draft and reload the latest saved version?")) return;
+    await load(selectedProjectId, true);
+    setNotice("Unsaved draft discarded. The latest saved version is loaded.");
   }
 
   async function createProject() {
@@ -856,105 +941,6 @@ export default function ProjectPerformance({ currentUser = null }) {
           ))}
           {!detailProjects.length ? <EmptyState title="No projects match this detail search" text="Clear or change the section search and filters to see project details." /> : null}
         </div>
-        {!selectedProject ? <EmptyState title="No project selected" /> : (
-          <div className="performance-details-scroll legacy-selected-details" aria-hidden="true">
-            <div className="performance-detail-grid">
-              <Panel title="Existing Project Identity">
-                <dl className="detail-list">
-                  <div><dt>Cluster</dt><dd>{selectedProject.clusterName || "Not set"}</dd></div>
-                  <div><dt>Client</dt><dd>{selectedProject.clientName || "Not set"}</dd></div>
-                  <div><dt>Project ID</dt><dd>{selectedProject.key}</dd></div>
-                  <div><dt>Project Name</dt><dd>{selectedProject.name}</dd></div>
-                  <div><dt>Start Date</dt><dd>{formatDate(selectedProject.startDate)}</dd></div>
-                  <div><dt>End Date</dt><dd>{formatDate(selectedProject.endDate)}</dd></div>
-                  <div><dt>CSAT Active Status</dt><dd><StatusPill value={selectedProject.activeStatus} /></dd></div>
-                </dl>
-              </Panel>
-              <Panel title="Client and Project Profile">
-                <dl className="detail-list">
-                  <div><dt>Client Group</dt><dd>{selectedProject.clientGroup || "Not set"}</dd></div>
-                  <div><dt>Client Criticality</dt><dd><StatusPill value={selectedProject.clientCriticality || "Not set"} /></dd></div>
-                  <div><dt>Financial Year</dt><dd>{selectedProject.financialYear || "Not set"}</dd></div>
-                  <div><dt>Project Type</dt><dd>{selectedProject.projectType || "Not set"}</dd></div>
-                  <div><dt>Revenue Category</dt><dd>{selectedProject.revenueCategory || "Not set"}</dd></div>
-                  <div><dt>Portfolio Type</dt><dd>{selectedProject.portfolioType || "Not set"}</dd></div>
-                </dl>
-              </Panel>
-              <Panel title="Project Team">
-                <dl className="detail-list">
-                  <div><dt>Project Director</dt><dd>{selectedProject.team?.projectDirector?.name || "Not set"}</dd></div>
-                  <div><dt>AVP</dt><dd>{selectedProject.team?.avp?.name || "Not set"}</dd></div>
-                  <div><dt>AD</dt><dd>{selectedProject.team?.ad?.name || "Not set"}</dd></div>
-                  <div><dt>TL</dt><dd>{selectedProject.team?.tl?.name || "Not set"}</dd></div>
-                  <div><dt>AM</dt><dd>{selectedProject.team?.am?.name || "Not set"}</dd></div>
-                </dl>
-              </Panel>
-              <Panel title="Commercial Profile">
-                <dl className="detail-list">
-                  <div><dt>Currency</dt><dd>{selectedProject.currency || "INR"}</dd></div>
-                  <div><dt>FX Rate to INR</dt><dd>{valueOrDash(selectedProject.fxRateToInr)}</dd></div>
-                  <div><dt>PO Amount</dt><dd>{money(selectedProject.poAmountLocal, selectedProject.currency)}</dd></div>
-                  <div><dt>Budget Allocated</dt><dd>{money(selectedProject.budgetAllocatedLocal, selectedProject.currency)}</dd></div>
-                  <div><dt>Budget Spent</dt><dd>{money(selectedProject.budgetSpentLocal, selectedProject.currency)}</dd></div>
-                  <div><dt>Revenue Generated</dt><dd>{money(selectedProject.revenueGeneratedLocal, selectedProject.currency)}</dd></div>
-                </dl>
-              </Panel>
-              <Panel title="Current Performance">
-                <dl className="detail-list">
-                  <div><dt>Performance Status</dt><dd><StatusPill value={selectedProject.performanceStatus || "Not set"} /></dd></div>
-                  <div><dt>Current Delivery Phase</dt><dd>{selectedProject.currentPhase || "Not set"}</dd></div>
-                  <div><dt>Campaign Status</dt><dd>{selectedProject.campaignStatus || "Not set"}</dd></div>
-                  <div><dt>Client Sentiment</dt><dd><StatusPill value={selectedProject.clientSentiment || "Not set"} /></dd></div>
-                  <div><dt>Relationship</dt><dd>{selectedProject.relationshipStrength || "Not set"}</dd></div>
-                  <div><dt>Last Updated</dt><dd>{formatDateTime(selectedProject.performanceUpdatedAt)}</dd></div>
-                </dl>
-              </Panel>
-              <Panel title="Delivery and Client Context">
-                <dl className="detail-list">
-                  <div><dt>Current Delivery Update</dt><dd>{selectedProject.deliverablesStatus || "Not set"}</dd></div>
-                  <div><dt>Meeting Cadence</dt><dd>{selectedProject.meetingCadence || "Not set"}</dd></div>
-                  <div><dt>Last Meeting</dt><dd>{formatDate(selectedProject.lastMeetingDate)}</dd></div>
-                  <div><dt>Suggestion Frequency</dt><dd>{selectedProject.suggestionFrequency || "Not set"}</dd></div>
-                  <div><dt>Last Suggestion</dt><dd>{formatDate(selectedProject.lastSuggestionDate)}</dd></div>
-                  <div><dt>Updated By</dt><dd>{selectedProject.updatedBy || "Not set"}</dd></div>
-                </dl>
-              </Panel>
-              <Panel title="Project Links">
-                <dl className="detail-list">
-                  <div><dt>MoM</dt><dd><ProjectLink href={selectedProject.links?.mom}>Open MoM</ProjectLink></dd></div>
-                  <div><dt>Consolidated Sheet</dt><dd><ProjectLink href={selectedProject.links?.consolidatedSheet}>Open Sheet</ProjectLink></dd></div>
-                  <div><dt>Project Drive</dt><dd><ProjectLink href={selectedProject.links?.projectDriveFolder}>Open Folder</ProjectLink></dd></div>
-                  <div><dt>Project Data Sheet</dt><dd><ProjectLink href={selectedProject.links?.projectDataSheet}>Open Sheet</ProjectLink></dd></div>
-                </dl>
-              </Panel>
-              <Panel title="Services, Mandates and Delivery" className="performance-wide-panel">
-                <p className="field-caption">Existing project services</p>
-                <div className="service-chip-list">{selectedProject.services.length ? selectedProject.services.map((service) => <span key={service.id}>{service.name}</span>) : <em>No services configured</em>}</div>
-                <p className="performance-long-text">{selectedProject.mandates || "No mandate, target or delivery detail recorded yet."}</p>
-              </Panel>
-              <Panel title="Feedback, Next Steps and Comments" className="performance-wide-panel">
-                <div className="performance-note-grid">
-                  <div><strong>Client Feedback</strong><p>{selectedProject.clientFeedback || "Not set"}</p></div>
-                  <div><strong>Next Steps</strong><p>{selectedProject.nextSteps || "Not set"}</p></div>
-                  <div><strong>Comments</strong><p>{selectedProject.comments || "Not set"}</p></div>
-                </div>
-              </Panel>
-              <Panel title="Current KPI Performance" className="performance-wide-panel">
-                <div className="performance-table-scroll compact">
-                  <table className="data-table performance-table">
-                    <thead><tr><th>KPI</th><th>Target</th><th>Actual</th><th>Achievement</th><th>Previous Year</th><th>Vs Previous Year</th><th>Direction</th></tr></thead>
-                    <tbody>{selectedProject.kpis.map((kpi) => {
-                      const achievement = kpiAchievement(kpi);
-                      const variance = previousYearVariance(kpi);
-                      return <tr key={kpi.id || kpi.kpiName}><td><strong>{kpi.kpiName}</strong>{kpi.isPrimary ? <small>Primary</small> : null}</td><td><KpiValue kpi={{ ...kpi, currency: selectedProject.currency }} field="target" /></td><td><KpiValue kpi={{ ...kpi, currency: selectedProject.currency }} field="actual" /></td><td>{achievement === null ? "—" : `${achievement.toFixed(1)}%`}</td><td><KpiValue kpi={{ ...kpi, currency: selectedProject.currency }} field="previousYearActual" /></td><td>{variance === null ? "—" : `${variance >= 0 ? "+" : ""}${variance.toFixed(1)}%`}</td><td>{kpi.direction === "lower_better" ? "Lower is better" : "Higher is better"}</td></tr>;
-                    })}</tbody>
-                  </table>
-                  {!selectedProject.kpis.length ? <EmptyState title="No KPIs added" /> : null}
-                </div>
-              </Panel>
-            </div>
-          </div>
-        )}
       </section>
 
       {canEditPerformance ? <section id="performance-update" className="performance-section-anchor">
@@ -1039,6 +1025,7 @@ export default function ProjectPerformance({ currentUser = null }) {
                   {kpis.map((kpi, index) => (
                     <div className="performance-kpi-row" key={kpi.id || `new-${index}`}>
                       <Field label="KPI"><NativeSelect value={kpi.kpiName} onChange={(value) => updateKpi(index, "kpiName", value)} items={referenceOptions(data, "kpi_name")} placeholder="Select KPI" /></Field>
+                      <Field label="Comment / Program"><input value={kpi.comment || ""} maxLength={2000} onChange={(event) => updateKpi(index, "comment", event.target.value)} placeholder="For example MBA IT or Technology Management" /></Field>
                       <Field label="Unit"><NativeSelect value={kpi.unit} onChange={(value) => updateKpi(index, "unit", value)} items={[{ value: "number", label: "Number" }, { value: "percent", label: "Percentage" }, { value: "currency", label: "Currency" }, { value: "ratio", label: "Ratio" }]} /></Field>
                       <Field label="Direction"><NativeSelect value={kpi.direction} onChange={(value) => updateKpi(index, "direction", value)} items={[{ value: "higher_better", label: "Higher is better" }, { value: "lower_better", label: "Lower is better" }]} /></Field>
                       <Field label="Target"><input type="number" step="any" value={kpi.target ?? ""} onChange={(event) => updateKpi(index, "target", event.target.value)} /></Field>
@@ -1050,6 +1037,7 @@ export default function ProjectPerformance({ currentUser = null }) {
                   ))}
                   {!kpis.length ? <EmptyState title="No KPIs added" text="Add as many KPI rows as this project needs." /> : null}
                 </div>
+                <Button icon={Plus} onClick={() => setKpis((current) => [...current, blankKpi()])}>Add Another KPI</Button>
               </div>
 
               <div className="performance-form-section">
@@ -1076,12 +1064,16 @@ export default function ProjectPerformance({ currentUser = null }) {
                   <Field label="Consolidated Sheet Link"><input type="url" value={form.consolidatedSheet} onChange={(event) => updateField("consolidatedSheet", event.target.value)} placeholder="https://" /></Field>
                   <Field label="Project Drive Folder"><input type="url" value={form.projectDriveFolder} onChange={(event) => updateField("projectDriveFolder", event.target.value)} placeholder="https://" /></Field>
                   <Field label="Project Data Sheet"><input type="url" value={form.projectDataSheet} onChange={(event) => updateField("projectDataSheet", event.target.value)} placeholder="https://" /></Field>
+                  <Field label="Zoho Dashboard Link"><input type="url" value={form.zohoDashboardLink} onChange={(event) => updateField("zohoDashboardLink", event.target.value)} placeholder="https://" /></Field>
+                  <Field label="Zoho Password" help={selectedProject.zohoPasswordSet ? "A password is stored. Leave unchanged to keep it, or select Remove Stored Password." : "Stored encrypted; excluded from Excel exports and audit values."}><input type="password" autoComplete="new-password" value={form.zohoPassword ?? ""} onChange={(event) => updateField("zohoPassword", event.target.value)} placeholder={selectedProject.zohoPasswordSet ? "Leave unchanged to keep stored password" : "Enter password"} /></Field>
+                  {selectedProject.zohoPasswordSet ? <Button onClick={() => updateField("zohoPassword", "")}>Remove Stored Password</Button> : null}
                 </div>
               </div>
             </div>
             <div className="performance-save-bar">
               <div>{notice ? <span className="success-message">{notice}</span> : error ? <span className="error-message">{error.message}</span> : <span>Saving updates the current record and creates one audit entry.</span>}</div>
               <Button icon={Save} variant="primary" onClick={save} disabled={saving || !form.updatedBy.trim()}>{saving ? "Saving…" : "Save Project Performance"}</Button>
+              <Button onClick={discardDraft} disabled={saving}>Discard Draft / Reload Saved</Button>
             </div>
           </Panel>
         )}

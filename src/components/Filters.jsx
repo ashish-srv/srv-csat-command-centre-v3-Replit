@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { Children, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Calendar, Check, ChevronDown, Search, X } from "lucide-react";
 
 function useOutsideClose(onClose) {
@@ -59,6 +60,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
           return !value;
         })}
         aria-expanded={open}
+        onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && selected.length) { event.preventDefault(); onChange(selected.slice(0, -1)); } if (event.key === "Escape") closeMenu(); }}
       >
         <span>{summary}</span>
         <ChevronDown size={14} aria-hidden="true" />
@@ -73,6 +75,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
               placeholder={`Search ${String(label || "options").toLowerCase()}`}
               aria-label={`Search ${label}`}
               autoFocus
+              onKeyDown={(event) => { if (event.key === "Escape") closeMenu(); if (event.key === "Backspace" && !query && selected.length) { event.preventDefault(); onChange(selected.slice(0, -1)); } }}
             />
             {query ? (
               <button type="button" onClick={() => setQuery("")} aria-label="Clear search">
@@ -113,16 +116,28 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
   );
 }
 
-export function SingleSelect({ label, options, value, onChange, placeholder = "Select", allowClear = true, compact = false }) {
+export function SingleSelect({ label, options, value, onChange, placeholder = "Select", allowClear = true, compact = false, disabled = false, portal = false }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [position, setPosition] = useState(null);
+  const menuRef = useRef(null);
 
   function closeMenu() {
     setOpen(false);
     setQuery("");
   }
 
-  const ref = useOutsideClose(closeMenu);
+  const ref = useRef(null);
+  useEffect(() => {
+    function outside(event) {
+      if (!ref.current?.contains(event.target) && !menuRef.current?.contains(event.target)) closeMenu();
+    }
+    const closeOnScroll = (event) => { if (!menuRef.current?.contains(event.target)) closeMenu(); };
+    document.addEventListener("mousedown", outside);
+    window.addEventListener("resize", closeMenu);
+    if (portal && open) window.addEventListener("scroll", closeOnScroll, true);
+    return () => { document.removeEventListener("mousedown", outside); window.removeEventListener("resize", closeMenu); window.removeEventListener("scroll", closeOnScroll, true); };
+  }, [portal, open]);
   const selectedOption = options.find((option) => String(option.value) === String(value));
   const normalizedQuery = query.trim().toLowerCase();
   const visibleOptions = normalizedQuery
@@ -130,88 +145,69 @@ export function SingleSelect({ label, options, value, onChange, placeholder = "S
     : options;
 
   function choose(nextValue) {
+    if (disabled) return;
     onChange(nextValue);
     closeMenu();
   }
 
+  const menu = open && !disabled ? (
+        <div ref={menuRef} className={`filter-menu filter-menu-single ${portal ? "filter-menu-portal" : ""}`} style={portal ? position : undefined}>
+          <label className="filter-search">
+            <Search size={14} aria-hidden="true" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${String(label || "options").toLowerCase()}`} aria-label={`Search ${label || "options"}`} autoFocus
+              onKeyDown={(event) => { if (event.key === "Escape") closeMenu(); if (event.key === "Backspace" && !query && allowClear) { event.preventDefault(); choose(""); } }} />
+            {query ? <button type="button" onClick={() => setQuery("")} aria-label="Clear search"><X size={12} /></button> : null}
+          </label>
+          <div className="filter-option-list" role="listbox" aria-label={label || "Options"}>
+            {allowClear ? <button type="button" className={`filter-option single ${!value ? "checked" : ""}`} onClick={() => choose("")} role="option" aria-selected={!value}><i>{!value ? <Check size={12} /> : null}</i><span>{placeholder}</span></button> : null}
+            {visibleOptions.map((option) => <button key={option.value} type="button" disabled={option.disabled} className={`filter-option single ${String(option.value) === String(value) ? "checked" : ""}`} onClick={() => choose(option.value)} role="option" aria-selected={String(option.value) === String(value)}><i>{String(option.value) === String(value) ? <Check size={12} /> : null}</i><span>{option.label}</span></button>)}
+            {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
+          </div>
+          <div className="filter-menu-actions">{allowClear ? <button type="button" className="filter-clear" onClick={() => choose("")} disabled={!value}>Clear</button> : <span />}<button type="button" className="filter-apply" onClick={closeMenu}>OK</button></div>
+        </div>
+      ) : null;
   return (
     <div className={`filter-field ${compact ? "filter-field-compact" : ""}`} ref={ref}>
       <span className="filter-label">{label}</span>
       <button
         type="button"
         className={`filter-trigger ${value ? "active" : ""}`}
-        onClick={() => setOpen((current) => !current)}
+        disabled={disabled}
+        onClick={() => {
+          const rect = ref.current?.getBoundingClientRect();
+          if (rect) {
+            const width = Math.min(Math.max(rect.width, 280), window.innerWidth - 24);
+            const below = (window.innerHeight || 800) - rect.bottom;
+            const openAbove = below < 220 && rect.top > below;
+            setPosition({ position: "fixed", ...(openAbove ? { bottom: (window.innerHeight || 800) - rect.top + 4 } : { top: rect.bottom + 4 }), left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)), width, maxHeight: Math.min(400, Math.max(100, (openAbove ? rect.top : below) - 16)), zIndex: 10000 });
+          }
+          setOpen((current) => !current);
+        }}
+        onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && allowClear && !disabled) { event.preventDefault(); choose(""); } if (event.key === "Escape") closeMenu(); }}
         aria-expanded={open}
         aria-label={label}
       >
         <span>{selectedOption?.label || placeholder || "Select"}</span>
         <ChevronDown size={14} aria-hidden="true" />
       </button>
-      {open ? (
-        <div className="filter-menu filter-menu-single">
-          <label className="filter-search">
-            <Search size={14} aria-hidden="true" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={`Search ${String(label || "options").toLowerCase()}`}
-              aria-label={`Search ${label}`}
-              autoFocus
-            />
-            {query ? (
-              <button type="button" onClick={() => setQuery("")} aria-label="Clear search">
-                <X size={12} aria-hidden="true" />
-              </button>
-            ) : null}
-          </label>
-          <div className="filter-option-list" role="listbox" aria-label={label}>
-            {placeholder ? (
-              <button
-                type="button"
-                className={`filter-option single ${!value ? "checked" : ""}`}
-                onClick={() => choose("")}
-                role="option"
-                aria-selected={!value}
-              >
-                <i>{!value ? <Check size={12} aria-hidden="true" /> : null}</i>
-                <span>{placeholder}</span>
-              </button>
-            ) : null}
-            {visibleOptions.map((option) => {
-              const checked = String(option.value) === String(value);
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`filter-option single ${checked ? "checked" : ""}`}
-                  onClick={() => choose(option.value)}
-                  role="option"
-                  aria-selected={checked}
-                >
-                  <i>{checked ? <Check size={12} aria-hidden="true" /> : null}</i>
-                  <span>{option.label}</span>
-                </button>
-              );
-            })}
-            {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
-          </div>
-          <div className="filter-menu-actions">
-            {allowClear ? (
-              <button
-                type="button"
-                className="filter-clear"
-                onClick={() => choose("")}
-                disabled={!value}
-              >
-                Clear
-              </button>
-            ) : <span />}
-            <button type="button" className="filter-apply" onClick={closeMenu}>OK</button>
-          </div>
-        </div>
-      ) : null}
+      {portal ? (menu ? createPortal(menu, document.body) : null) : menu}
     </div>
   );
+}
+
+// Native-select-compatible adapter so existing form handlers retain their
+// event.target.value contract while all record pickers gain search/clearing.
+export function SearchableSelect({ children, value, onChange, disabled, name, "aria-label": ariaLabel, ...props }) {
+  const flatten = (nodes, groupDisabled = false) => Children.toArray(nodes).flatMap((node) => {
+    if (!node?.props) return [];
+    if (node.type === "option") return [{ value: String(node.props.value ?? node.props.children ?? ""), label: Children.toArray(node.props.children).join(""), disabled: groupDisabled || node.props.disabled }];
+    return flatten(node.props.children, groupDisabled || node.props.disabled);
+  });
+  const allOptions = flatten(children);
+  const empty = allOptions.find((option) => option.value === "");
+  return <div className={`searchable-select ${props.className || ""}`} id={props.id}>
+    <SingleSelect label={ariaLabel || name || ""} compact portal options={allOptions.filter((option) => option.value !== "")} value={value ?? ""} disabled={disabled} placeholder={empty?.label || "Select"} allowClear={Boolean(empty)} onChange={(next) => onChange?.({ target: { value: next, name }, currentTarget: { value: next, name } })} />
+  </div>;
 }
 
 /**

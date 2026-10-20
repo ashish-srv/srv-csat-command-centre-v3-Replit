@@ -1,3 +1,4 @@
+import { SearchableSelect } from "./Filters.jsx";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, Copy, Lock, Plus, Save, Trash2 } from "lucide-react";
 import { apiAdminGet, apiWrite, hasAdminPin, setAdminPin } from "../api";
@@ -372,11 +373,11 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                   <summary>Project Status</summary>
                   <div className="project-configuration-section-body compact-configuration-row">
                     <Field label="Status" hint="Inactive projects do not start new automatic feedback or quick check-ins.">
-                      <select value={status} onChange={(event) => setStatus(event.target.value)}>
+                      <SearchableSelect value={status} onChange={(event) => setStatus(event.target.value)}>
                         <option value="active">Active</option>
                         <option value="paused">Inactive / paused</option>
                         <option value="closed">Closed</option>
-                      </select>
+                      </SearchableSelect>
                     </Field>
                     <Button variant="primary" icon={Save} onClick={saveStatus} disabled={saving === "status" || status === project.activeStatus}>
                       {saving === "status" ? "Saving…" : "Save project status"}
@@ -391,10 +392,10 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                   <div className="project-configuration-section-body">
                     <div className="project-configuration-copy-row">
                       <Field label="Copy POCs from another project" hint="Only projects for this client are listed.">
-                        <select value={pocCopySource} onChange={(event) => setPocCopySource(event.target.value)}>
+                        <SearchableSelect value={pocCopySource} onChange={(event) => setPocCopySource(event.target.value)}>
                           <option value="">Select source project</option>
                           {sameClientProjects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                        </select>
+                        </SearchableSelect>
                       </Field>
                       <Button icon={Copy} onClick={copyPocs} disabled={!pocCopySource}>Copy into draft</Button>
                     </div>
@@ -408,9 +409,9 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                             <Field label="Email"><input type="email" value={poc.contactEmail} onChange={(event) => updatePoc(index, { contactEmail: event.target.value })} /></Field>
                             <Field label="Birthday"><input type="date" value={poc.birthDate} onChange={(event) => updatePoc(index, { birthDate: event.target.value })} /></Field>
                             <Field label="Salutation"><input value={poc.salutation} onChange={(event) => updatePoc(index, { salutation: event.target.value })} /></Field>
-                            <Field label="POC tag"><select value={poc.levelId} onChange={(event) => updatePoc(index, { levelId: event.target.value })}><option value="">Select tag</option>{levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}</select></Field>
+                            <Field label="POC tag"><SearchableSelect value={poc.levelId} onChange={(event) => updatePoc(index, { levelId: event.target.value })}><option value="">Select tag</option>{levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}</SearchableSelect></Field>
                             <Field label="Influence (%)"><input type="number" min="0" max="100" step="0.01" disabled={!poc.active} value={poc.active ? poc.weightPercentage : 0} onChange={(event) => updatePoc(index, { weightPercentage: event.target.value })} /></Field>
-                            <Field label="Active"><select value={poc.active ? "yes" : "no"} onChange={(event) => { const active = event.target.value === "yes"; updatePoc(index, { active, weightPercentage: active ? poc.weightPercentage : 0 }); }}><option value="yes">Yes</option><option value="no">No</option></select></Field>
+                            <Field label="Active"><SearchableSelect value={poc.active ? "yes" : "no"} onChange={(event) => { const active = event.target.value === "yes"; updatePoc(index, { active, weightPercentage: active ? poc.weightPercentage : 0 }); }}><option value="yes">Yes</option><option value="no">No</option></SearchableSelect></Field>
                           </div>
                           <button type="button" className="icon-button danger" onClick={() => removePoc(index)} aria-label={`Remove ${poc.name || `POC ${index + 1}`} from future sends`} title="Remove from this project’s future sends"><Trash2 size={15} aria-hidden="true" /></button>
                         </div>
@@ -435,10 +436,10 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                   <div className="project-configuration-section-body">
                     <div className="project-configuration-copy-row">
                       <Field label="Copy services from another project" hint="Only projects for this client are listed.">
-                        <select value={serviceCopySource} onChange={(event) => setServiceCopySource(event.target.value)}>
+                        <SearchableSelect value={serviceCopySource} onChange={(event) => setServiceCopySource(event.target.value)}>
                           <option value="">Select source project</option>
                           {sameClientProjects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                        </select>
+                        </SearchableSelect>
                       </Field>
                       <Button icon={Copy} onClick={copyServices} disabled={!serviceCopySource}>Copy into draft</Button>
                     </div>
@@ -447,12 +448,12 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                         <div className="batch-editor-row" key={service.id || `new-service-${index}`}>
                           <div className="form-grid project-configuration-service-grid">
                             <Field label={`Service ${index + 1}`}>
-                              <select value={service.serviceCatalogId} onChange={(event) => { const selected = activeCatalog.find((item) => item.id === event.target.value); updateService(index, { serviceCatalogId: selected?.id || "", serviceKey: selected?.serviceKey || "", name: selected?.name || "" }); }}>
+                              <SearchableSelect value={service.serviceCatalogId} onChange={(event) => { const selected = activeCatalog.find((item) => item.id === event.target.value); updateService(index, { serviceCatalogId: selected?.id || "", serviceKey: selected?.serviceKey || "", name: selected?.name || "" }); }}>
                                 <option value="">Select standard service</option>
                                 {(directory.serviceCatalog || []).filter((item) => item.active !== false || item.id === service.serviceCatalogId).map((item) => <option key={item.id} value={item.id}>{item.name}{item.active === false ? " — archived" : ""}</option>)}
-                              </select>
+                              </SearchableSelect>
                             </Field>
-                            <Field label="Internal owner"><select value={service.internalPocId} onChange={(event) => updateService(index, { internalPocId: event.target.value })}><option value="">Not set</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active === false ? " — inactive" : ""}</option>)}</select></Field>
+                            <Field label="Internal owner"><SearchableSelect value={service.internalPocId} onChange={(event) => updateService(index, { internalPocId: event.target.value })}><option value="">Not set</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active === false ? " — inactive" : ""}</option>)}</SearchableSelect></Field>
                             <Field label="KPIs"><input value={service.kpis} onChange={(event) => updateService(index, { kpis: event.target.value })} /></Field>
                           </div>
                           <button type="button" className="icon-button danger" disabled={serviceRows.length === 1} onClick={() => setServiceRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))} aria-label={`Remove ${service.name || `service ${index + 1}`}`}><Trash2 size={15} aria-hidden="true" /></button>

@@ -24,7 +24,7 @@ function elements(tree, predicate) {
 }
 
 class ComponentHarness {
-  constructor(file, props, url, read, componentName = null) {
+  constructor(file, props, url, read, componentName = null, config = {}) {
     this.props = props;
     this.slots = [];
     this.dirty = true;
@@ -43,6 +43,11 @@ class ComponentHarness {
       this.window.location = { pathname: parsed.pathname, search: parsed.search };
     };
     this.window = {
+      innerWidth: 1200,
+      scrollY: 350,
+      scrollTo: (options) => this.scrolls.push(options.top),
+      requestAnimationFrame: (fn) => { const key = Symbol(); this.timers.set(key, fn); return key; },
+      cancelAnimationFrame: (key) => this.timers.delete(key),
       history: { pushState: (_state, _title, value) => { this.pushes.push(value); this.setUrl(value); } },
       addEventListener: listen,
       removeEventListener: (name, fn) => listeners.get(name)?.delete(fn),
@@ -59,6 +64,7 @@ class ComponentHarness {
       return this.slots[index].value;
     };
     const react = {
+      Children: { toArray: (nodes) => [nodes].flat(Infinity).filter((node) => node !== null && node !== undefined && node !== false) },
       Component: class {},
       useState: (initial) => {
         const index = this.cursor++;
@@ -84,7 +90,7 @@ class ComponentHarness {
       }
     };
     const jsx = (type, nodeProps) => ({ type, props: nodeProps || {} });
-    const api = { apiGet: (value) => { this.calls.push(value); return read(value); } };
+    const api = { apiGet: (value) => { this.calls.push(value); return read(value); }, apiAdminGet: (value) => read(value), hasAdminPin: () => true, apiWrite: config.write || (async () => ({})), apiPut: config.write || (async () => ({})), apiPost: config.write || (async () => ({})) };
     const mocks = new Proxy({
       __esModule: true,
       cycleInRange: () => true,
@@ -99,24 +105,28 @@ class ComponentHarness {
       loader: "jsx", format: "cjs", jsx: "automatic", sourcefile: file
     }).code;
     const module = { exports: {} };
-    const document = {
+    const document = this.document = {
+      body: {},
       hidden: false,
       addEventListener: listen,
       removeEventListener: (name, fn) => listeners.get(name)?.delete(fn),
       getElementById: (id) => this.find((node) => node.props.id === id)
-        ? { scrollIntoView: () => this.scrolls.push(id) } : null
+        ? { scrollIntoView: () => this.scrolls.push(id), querySelector: () => ({ scrollIntoView: () => this.scrolls.push(id) }) } : null
     };
     const testEntry = componentName ? `\nmodule.exports.testComponent = ${componentName};` : "";
     vm.runInNewContext(compiled + testEntry, {
       module, exports: module.exports, window: this.window, document,
       URLSearchParams, console,
+      sessionStorage: config.storage || { getItem: () => null, setItem: () => {} },
       PopStateEvent: class { constructor(type) { this.type = type; } },
       require: (name) => name === "react" ? react
         : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" }
-          : /(?:^|\/)api$/.test(name) ? api
+          : name === "react-dom" ? { createPortal: (node) => node }
+          : name.includes("performance-metrics") ? (() => { const m = { exports: {} }; vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, "../src/lib/performance-metrics.js"), "utf8"), { format: "cjs" }).code, { module: m, exports: m.exports }); return m.exports; })()
+          : config.modules?.[name] || (/(?:^|\/)api$/.test(name) ? api
             : name.includes("permissions") || name.includes("format") || name.includes("Filters")
               || name.includes("Ui") || name === "lucide-react" ? mocks
-              : { __esModule: true, default: path.basename(name, ".jsx") }
+              : { __esModule: true, default: path.basename(name, ".jsx") })
     }, { filename: file });
     this.Component = module.exports.testComponent || module.exports.default;
   }
@@ -133,6 +143,7 @@ class ComponentHarness {
         const ref = node.props.ref;
         if (!ref.current) ref.current = {
           scrollTop: 0, scrollHeight: 100,
+          getBoundingClientRect: () => ({ top: 100, bottom: 140, left: 30, width: 300 }),
           scrollIntoView: () => this.scrolls.push(node.props.id || node.type)
         };
       }
@@ -158,7 +169,7 @@ class ComponentHarness {
   }
 
   find(predicate) { return elements(this.tree, predicate)[0]; }
-  selector(label) { return this.find((node) => node.type === "select" && node.props["aria-label"] === label); }
+  selector(label) { return this.find((node) => ["select", "SearchableSelect"].includes(node.type) && node.props["aria-label"] === label); }
   loading(label) { return Boolean(this.find((node) => node.type === "LoadingBlock" && node.props.label === label)); }
 }
 
@@ -399,4 +410,5 @@ async function main() {
   console.log(`\n${passed}/${passed} workspace navigation scenarios passed`);
 }
 
-main().catch((error) => { console.error(error); process.exitCode = 1; });
+module.exports = { ComponentHarness, elements };
+if (require.main === module) main().catch((error) => { console.error(error); process.exitCode = 1; });

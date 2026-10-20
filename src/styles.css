@@ -5519,6 +5519,29 @@ label.button.disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none
 .performance-delivery-copy > div { padding: 13px; border: 1px solid #cad5e3; border-radius: 8px; background: #ffffff; }
 .performance-delivery-copy > div > strong { color: #0b1424; font-size: 16px; font-weight: 900; }
 .performance-delivery-copy .performance-long-text { margin-top: 7px; }
+
+/* Searchable form selectors stay usable inside bounded editors and tables. */
+.searchable-select { min-width: 0; width: 100%; }
+.searchable-select .filter-field { width: 100%; min-width: 0; }
+.searchable-select .filter-label:empty { display: none; }
+.searchable-select .filter-trigger { min-height: 42px; width: 100%; text-align: left; }
+.filter-trigger:disabled { opacity: .55; cursor: not-allowed; }
+.filter-menu-portal { display: flex; flex-direction: column; overflow: hidden; background: #fff; border: 1px solid #bac9de; border-radius: 9px; box-shadow: 0 10px 35px #182d4d30; }
+.filter-menu-portal .filter-search, .filter-menu-portal .filter-menu-actions { flex-shrink: 0; }
+.filter-menu-portal .filter-option-list { min-height: 0; overflow-y: auto; }
+.filter-option:disabled { opacity: .5; cursor: not-allowed; }
+.performance-delivery-copy > div > strong { display: block; color: #17458b; background: #e8f0ff; padding: 9px 12px; border-radius: 5px; }
+.performance-delivery-copy > div:nth-child(2) > strong { color: #096655; background: #e6f6ef; }
+.performance-delivery-copy .performance-long-text { color: #172b45; font-size: 15px; line-height: 1.65; font-weight: 600; padding: 4px 10px; }
+.performance-table .kpi-favorable { color: #08704b; font-weight: 800; }
+.performance-table .kpi-unfavorable { color: #b52632; font-weight: 800; }
+.performance-table .kpi-comment { white-space: pre-wrap; min-width: 160px; }
+.performance-kpi-row { grid-template-columns: minmax(170px, 1.4fr) minmax(180px, 1.5fr) repeat(5, minmax(110px, 1fr)) auto auto; }
+.performance-kpi-editor { overflow-x: auto; }
+.zoho-password { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
+.zoho-password > small { flex-basis: 100%; }
+@media (max-width: 1000px) { .performance-kpi-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .performance-kpi-row { grid-template-columns: 1fr; } }
 .context-list { margin-bottom: 12px !important; }
 
 .performance-section-search,

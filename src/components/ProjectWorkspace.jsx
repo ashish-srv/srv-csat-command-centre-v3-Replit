@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Ban, Bell, Check, CheckCircle2, Power, RefreshCw, RotateCcw, Send, Users } from "lucide-react";
 import { apiGet, apiPost, apiPut } from "../api";
-import { cycleInRange, DateRange, FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
+import { SearchableSelect, cycleInRange, DateRange, FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
 import {
   formatCycleCoverage, formatCycleStatus, formatCycleType, formatDate, formatDateTime,
   formatConfidence, confidenceClass, formatGuardrail, formatNps, formatNpsBasis, npsClass, formatPocLevel, formatPocWeightShare, formatResolutionTime, formatScore,
@@ -1577,7 +1577,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
             {selectedSession && selectedSession.tone ? (
               <TonePill tone={selectedSession.tone} reason={selectedSession.toneReason} />
             ) : null}
-            <select
+            <SearchableSelect
               value={selectedCycle ? selectedCycle.id : ""}
               onChange={(event) => selectCycle(event.target.value)}
               aria-label="Feedback cycle"
@@ -1588,8 +1588,8 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
                   {formatCycleType(cycle.cycleType, project.feedbackIntervalDays)} · {formatDate(cycle.startedAt)}
                 </option>
               ))}
-            </select>
-            <select
+            </SearchableSelect>
+            <SearchableSelect
               value={selectedSession ? selectedSession.id : ""}
               onChange={(event) => selectSession(event.target.value)}
               aria-label="Client POC"
@@ -1600,7 +1600,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
                   {session.pocName || "POC"} · {formatSessionOutcome(session)}
                 </option>
               ))}
-            </select>
+            </SearchableSelect>
           </div>
         }
       >

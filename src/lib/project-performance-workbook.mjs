@@ -48,7 +48,8 @@ const TRAILING_COLUMNS = [
   { key: "mom_link", label: "MoM Link", width: 32, aliases: ["most_recent_mom_doc_link"] },
   { key: "consolidated_sheet_link", label: "Consolidated Sheet Link", width: 32 },
   { key: "project_drive_folder_link", label: "Project Drive Folder Link", width: 32 },
-  { key: "project_data_sheet_link", label: "Project Data Sheet Link", width: 32 }
+  { key: "project_data_sheet_link", label: "Project Data Sheet Link", width: 32 },
+  { key: "zoho_dashboard_link", label: "Zoho Dashboard Link", width: 32 }
 ];
 
 const FIELD_MAP = {
@@ -81,7 +82,8 @@ const FIELD_MAP = {
   mom_link: ["profile", "links", "mom"],
   consolidated_sheet_link: ["profile", "links", "consolidatedSheet"],
   project_drive_folder_link: ["profile", "links", "projectDriveFolder"],
-  project_data_sheet_link: ["profile", "links", "projectDataSheet"]
+  project_data_sheet_link: ["profile", "links", "projectDataSheet"],
+  zoho_dashboard_link: ["profile", "zohoDashboardLink"]
 };
 
 const NUMBER_FIELDS = new Set([
@@ -245,6 +247,7 @@ function projectPayload(project) {
       clientFeedback: project.clientFeedback || "",
       nextSteps: project.nextSteps || "",
       comments: project.comments || "",
+      zohoDashboardLink: project.zohoDashboardLink || "",
       links: {
         mom: project.links?.mom || "",
         consolidatedSheet: project.links?.consolidatedSheet || "",
@@ -254,6 +257,7 @@ function projectPayload(project) {
     },
     kpis: (project.kpis || []).map((kpi) => ({
       kpiName: kpi.kpiName || "",
+      comment: kpi.comment || "",
       unit: kpi.unit || "number",
       direction: kpi.direction || "higher_better",
       target: kpi.target ?? "",
@@ -279,6 +283,7 @@ function kpiColumns(count) {
   for (let index = 1; index <= count; index += 1) {
     columns.push(
       { key: `kpi_${index}_name`, label: `KPI ${index} Name${index === 1 ? " (Primary)" : ""}`, width: 22 },
+      { key: `kpi_${index}_comment`, label: `KPI ${index} Comment / Program`, width: 30 },
       { key: `kpi_${index}_unit`, label: `KPI ${index} Unit`, width: 14 },
       { key: `kpi_${index}_direction`, label: `KPI ${index} Direction`, width: 18 },
       { key: `kpi_${index}_target`, label: `KPI ${index} Target`, width: 15 },
@@ -343,12 +348,14 @@ function rowForProject(project, kpiCount) {
     mom_link: project.links?.mom || "",
     consolidated_sheet_link: project.links?.consolidatedSheet || "",
     project_drive_folder_link: project.links?.projectDriveFolder || "",
-    project_data_sheet_link: project.links?.projectDataSheet || ""
+    project_data_sheet_link: project.links?.projectDataSheet || "",
+    zoho_dashboard_link: project.zohoDashboardLink || ""
   };
   for (let index = 0; index < kpiCount; index += 1) {
     const kpi = project.kpis?.[index] || {};
     const slot = index + 1;
     row[`kpi_${slot}_name`] = kpi.kpiName || "";
+    row[`kpi_${slot}_comment`] = kpi.comment || "";
     row[`kpi_${slot}_unit`] = kpi.unit || "";
     row[`kpi_${slot}_direction`] = kpi.direction === "lower_better" ? "Lower is better" : kpi.kpiName ? "Higher is better" : "";
     row[`kpi_${slot}_target`] = kpi.target ?? "";
@@ -507,10 +514,10 @@ function headerMapFor(sheet) {
     row.eachCell({ includeEmpty: false }, (cell, columnNumber) => {
       const normalized = headerKey(cellValue(cell));
       if (!normalized) return;
-      const genericKpi = normalized.match(/^kpi_(\d+)_(name(?:_primary)?|unit|direction|target|actual|ly_actual|previous_year_actual|primary(?:_yes_no)?)$/);
+      const genericKpi = normalized.match(/^kpi_(\d+)_(name(?:_primary)?|comment(?:_program)?|unit|direction|target|actual|ly_actual|previous_year_actual|primary(?:_yes_no)?)$/);
       if (genericKpi) {
         const suffixMap = {
-          name: "name", name_primary: "name", unit: "unit", direction: "direction", target: "target", actual: "actual",
+          name: "name", name_primary: "name", comment: "comment", comment_program: "comment", unit: "unit", direction: "direction", target: "target", actual: "actual",
           ly_actual: "previous_year_actual", previous_year_actual: "previous_year_actual", primary: "primary", primary_yes_no: "primary"
         };
         map.set(`kpi_${genericKpi[1]}_${suffixMap[genericKpi[2]]}`, columnNumber);
@@ -564,7 +571,7 @@ function parseKpis(row, headerMap, project, data, errors) {
   for (let slot = 1; slot <= maxSlot; slot += 1) {
     const read = (suffix) => headerMap.has(`kpi_${slot}_${suffix}`) ? cellValue(row.getCell(headerMap.get(`kpi_${slot}_${suffix}`))) : "";
     const nameInput = textValue(read("name"));
-    const hasAny = ["name", "unit", "direction", "target", "actual", "previous_year_actual", "primary"]
+    const hasAny = ["name", "comment", "unit", "direction", "target", "actual", "previous_year_actual", "primary"]
       .some((suffix) => textValue(read(suffix)) !== "");
     if (!hasAny) continue;
     if (!nameInput) {
@@ -576,7 +583,8 @@ function parseKpis(row, headerMap, project, data, errors) {
       errors.push(`KPI ${slot} name must be selected from the standard KPI list`);
       continue;
     }
-    const existing = existingByName.get(canonicalName.toLowerCase());
+    const existing = project.kpis?.[slot - 1]?.kpiName?.toLowerCase() === canonicalName.toLowerCase()
+      ? project.kpis[slot - 1] : existingByName.get(canonicalName.toLowerCase());
     const unitInput = textValue(read("unit")).toLowerCase();
     const unit = unitInput || existing?.unit || defaultKpiUnit(canonicalName);
     if (!["number", "percent", "currency", "ratio"].includes(unit)) errors.push(`KPI ${slot} unit must be number, percent, currency or ratio`);
@@ -588,6 +596,7 @@ function parseKpis(row, headerMap, project, data, errors) {
     try {
       kpis.push({
         kpiName: canonicalName,
+        comment: headerMap.has(`kpi_${slot}_comment`) ? textValue(read("comment")) : existing?.comment || "",
         unit,
         direction: direction || "higher_better",
         target: numberValue(read("target"), `KPI ${slot} target`),

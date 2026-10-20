@@ -985,6 +985,45 @@ async function scenario(name, fn) {
     assert.strictEqual(audits.length, 1);
     assert.strictEqual(audits[0].updated_by, "Ashish");
     assert.strictEqual(kpiRows.length, 1);
+    const priorVaultKey = process.env.CREDENTIALS_ENCRYPTION_KEY;
+    process.env.CREDENTIALS_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    try {
+      const secret = "test-only-zoho-password";
+      const repeated = [{ kpiName: "Leads", comment: "MBA IT", target: 100, actual: 200, isPrimary: true }, { kpiName: "Leads", comment: "Technology Management", target: 100, actual: 200, isPrimary: false }];
+      await provider.saveProjectPerformance(project.id, { updatedBy: "Ashish", expectedVersion: 1, profile: { zohoDashboardLink: "https://example.com/dashboard", zohoPassword: secret }, kpis: repeated });
+      assert.equal(kpiRows.length, 2, "identical KPI names and numbers are not deduplicated");
+      assert.deepEqual(kpiRows.map((row) => row.comment), ["MBA IT", "Technology Management"]);
+      assert.equal(profiles[0].zoho_dashboard_link, "https://example.com/dashboard");
+      const ciphertext = profiles[0].zoho_password_encrypted;
+      assert.ok(ciphertext && !ciphertext.includes(secret));
+      assert.equal(await provider.getProjectZohoPassword(project.id), secret);
+      assert.ok(!JSON.stringify(audits).includes(secret));
+      assert.ok(!JSON.stringify(audits).includes(ciphertext));
+      await provider.saveProjectPerformance(project.id, { updatedBy: "Ashish", expectedVersion: 2, profile: {}, kpis: repeated });
+      assert.equal(profiles[0].zoho_password_encrypted, ciphertext, "unrelated updates and workbook imports preserve stored credentials");
+      assert.equal(profiles[0].zoho_dashboard_link, "https://example.com/dashboard");
+      await provider.saveProjectPerformance(project.id, { updatedBy: "Ashish", expectedVersion: 3, profile: { zohoPassword: "" }, kpis: repeated });
+      assert.equal(profiles[0].zoho_password_encrypted, null);
+      assert.equal(await provider.getProjectZohoPassword(project.id), "");
+    } finally { if (priorVaultKey === undefined) delete process.env.CREDENTIALS_ENCRYPTION_KEY; else process.env.CREDENTIALS_ENCRYPTION_KEY = priorVaultKey; }
+  });
+
+  await scenario("Zoho credential reveal requires sign-in and the assigned Project User scope", async () => {
+    const previousRole = store._appUserRole;
+    const previousGet = store.getProjectById;
+    store._appUserRole = "project_user";
+    store.getProjectById = async (id) => id === project.id ? project : null;
+    store.getProjectZohoPassword = async () => "test-only-revealed-password";
+    try {
+      assert.equal((await rawReq("GET", "/api/project-performance/prj_1/zoho-password")).statusCode, 401);
+      const allowed = await rawReq("GET", "/api/project-performance/prj_1/zoho-password", {}, { cookie: googleAppCookie });
+      assert.equal(allowed.statusCode, 200);
+      assert.equal(allowed.headers["cache-control"], "no-store");
+      assert.equal(JSON.parse(allowed.body).password, "test-only-revealed-password");
+      const denied = await rawReq("GET", "/api/project-performance/foreign-project/zoho-password", {}, { cookie: googleAppCookie });
+      assert.equal(denied.statusCode, 403);
+      assert.ok(!denied.body.includes("test-only-revealed-password"));
+    } finally { store._appUserRole = previousRole; store.getProjectById = previousGet; delete store.getProjectZohoPassword; }
   });
 
   await scenario("Application User deletion is allowed only without Project Performance history", async () => {

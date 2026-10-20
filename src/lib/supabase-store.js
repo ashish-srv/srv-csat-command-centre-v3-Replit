@@ -101,7 +101,7 @@ function performanceSnapshot(profile, clientProfile, kpis) {
   const clean = (value) => {
     if (!value) return null;
     return Object.fromEntries(Object.entries(value).filter(([key]) => ![
-      "id", "created_at", "updated_at", "createdAt", "updatedAt"
+      "id", "created_at", "updated_at", "createdAt", "updatedAt", "zoho_password_encrypted"
     ].includes(key)));
   };
   return {
@@ -109,6 +109,7 @@ function performanceSnapshot(profile, clientProfile, kpis) {
     profile: clean(profile),
     kpis: (Array.isArray(kpis) ? kpis : []).map((item) => ({
       kpi_name: item.kpi_name ?? item.kpiName ?? null,
+      comment: item.comment || "",
       unit: item.unit || "number",
       direction: item.direction || "higher_better",
       target: performanceNumber(item.target),
@@ -4138,6 +4139,7 @@ class SupabaseStore {
       items.push({
         id: row.id,
         kpiName: row.kpi_name,
+        comment: row.comment || "",
         unit: row.unit,
         direction: row.direction,
         target: performanceNumber(row.target),
@@ -4228,6 +4230,8 @@ class SupabaseStore {
           projectDriveFolder: row.project_drive_folder_link || "",
           projectDataSheet: row.project_data_sheet_link || ""
         },
+        zohoDashboardLink: row.zoho_dashboard_link || "",
+        zohoPasswordSet: Boolean(row.zoho_password_encrypted),
         version: Number(row.version) || 0,
         updatedBy: row.updated_by || null,
         performanceUpdatedAt: row.updated_at || null,
@@ -4330,10 +4334,15 @@ class SupabaseStore {
       consolidated_sheet_link: String(links.consolidatedSheet || "").trim() || null,
       project_drive_folder_link: String(links.projectDriveFolder || "").trim() || null,
       project_data_sheet_link: String(links.projectDataSheet || "").trim() || null,
+      zoho_dashboard_link: String(profileInput.zohoDashboardLink ?? existingProfile?.zoho_dashboard_link ?? "").trim() || null,
       version: currentVersion + 1,
       updated_by: editor
     };
 
+    if (profileInput.zohoPassword !== undefined) {
+      const { encryptCredential } = require("./credential-vault");
+      profileBody.zoho_password_encrypted = encryptCredential(profileInput.zohoPassword, project.id);
+    }
     const before = performanceSnapshot(existingProfile, existingClientRows[0] || null, existingKpis);
     if (existingClientRows.length) {
       await this.request("client_performance_profiles", {
@@ -4370,6 +4379,7 @@ class SupabaseStore {
       .map((item, index) => ({
         project_id: project.id,
         kpi_name: String(item.kpiName || "").trim(),
+        comment: String(item.comment || "").trim(),
         unit: ["number", "percent", "currency", "ratio"].includes(item.unit) ? item.unit : "number",
         direction: item.direction === "lower_better" ? "lower_better" : "higher_better",
         target: performanceNumber(item.target),
@@ -4387,6 +4397,7 @@ class SupabaseStore {
     });
     const after = performanceSnapshot(savedProfileRows[0], savedClientRows[0] || null, savedKpis);
     const changes = performanceChanges(before, after);
+    if (profileInput.zohoPassword !== undefined) changes["project.zoho_password"] = { before: existingProfile?.zoho_password_encrypted ? "Stored" : "Not set", after: profileInput.zohoPassword ? "Updated (hidden)" : "Removed" };
     await this.request("project_performance_audit", {
       method: "POST",
       body: [{
@@ -4397,6 +4408,12 @@ class SupabaseStore {
       }]
     });
     return { saved: true, projectId: project.id, version: currentVersion + 1, changes };
+  }
+
+  async getProjectZohoPassword(projectId) {
+    const rows = await this.request("project_performance_profiles", { query: `project_id=eq.${encodeURIComponent(projectId)}&select=zoho_password_encrypted&limit=1` });
+    const { decryptCredential } = require("./credential-vault");
+    return decryptCredential(rows[0]?.zoho_password_encrypted, projectId);
   }
 
   async expireDueQuickCheckins(nowIso = new Date().toISOString()) {

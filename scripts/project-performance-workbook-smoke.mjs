@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import ExcelJS from "exceljs";
 import { buildProjectPerformanceWorkbook, parseProjectPerformanceBuffer } from "../src/lib/project-performance-workbook.mjs";
 
@@ -48,7 +47,9 @@ const project = {
   updatedBy: "asha@example.com",
   performanceUpdatedAt: "2026-09-03T00:00:00Z",
   services: [{ name: "SEO" }],
-  kpis: [{ kpiName: "Leads", unit: "number", direction: "higher_better", target: 10, actual: 12, previousYearActual: 8, isPrimary: true }]
+  zohoPasswordSet: true,
+  zohoDashboardLink: "https://example.com/zoho",
+  kpis: [{ kpiName: "Leads", comment: "MBA IT", unit: "number", direction: "higher_better", target: 10, actual: 12, previousYearActual: 8, isPrimary: true }, { kpiName: "Leads", comment: "Technology Management", unit: "number", direction: "higher_better", target: 10, actual: 12, previousYearActual: 8, isPrimary: false }]
 };
 
 const data = {
@@ -67,15 +68,21 @@ const data = {
 
 const workbook = await buildProjectPerformanceWorkbook(data, ExcelJS);
 const buffer = await workbook.xlsx.writeBuffer();
-await fs.writeFile("project-performance-roundtrip.xlsx", buffer);
 const parsed = await parseProjectPerformanceBuffer(buffer, data, "roundtrip.xlsx");
 const row = parsed.rows[0];
 if (workbook.worksheets.length !== 1 || workbook.worksheets[0].name !== "Project Performance") throw new Error("Expected exactly one worksheet");
 if (!row || row.projectKey !== "PRJ-1" || row.errors.length || row.eligible) throw new Error(`Round-trip mismatch: ${JSON.stringify(row)}`);
+if (row.payload.kpis.length !== 2 || row.payload.kpis[0].comment !== "MBA IT" || row.payload.kpis[1].comment !== "Technology Management") throw new Error("Repeated KPI comments did not round trip");
+if (Object.keys(row.payload.profile).some((key) => /zohoPassword/i.test(key))) throw new Error("Workbook import must not touch credentials");
 const actualColumn = workbook.worksheets[0].getRow(1).values.findIndex((value) => value === "KPI 1 Actual");
 if (actualColumn < 1) throw new Error("KPI 1 Actual column was not generated");
 workbook.worksheets[0].getCell(2, actualColumn).value = 14;
 const changedBuffer = await workbook.xlsx.writeBuffer();
 const changed = await parseProjectPerformanceBuffer(changedBuffer, data, "changed.xlsx");
 if (!changed.rows[0]?.eligible || changed.rows[0]?.errors.length) throw new Error(`Changed-row mismatch: ${JSON.stringify(changed.rows[0])}`);
+// Older templates without comment columns must preserve each slot's own label.
+const sheet = workbook.worksheets[0];
+for (let column = sheet.columnCount; column >= 1; column -= 1) if (/KPI \d+ Comment/.test(String(sheet.getCell(1, column).value))) sheet.spliceColumns(column, 1);
+const legacy = await parseProjectPerformanceBuffer(await workbook.xlsx.writeBuffer(), data, "old-template.xlsx");
+if (legacy.rows[0].payload.kpis[0].comment !== "MBA IT" || legacy.rows[0].payload.kpis[1].comment !== "Technology Management") throw new Error("Legacy upload erased or mixed KPI comments");
 console.log(JSON.stringify({ sheets: workbook.worksheets.map((sheet) => sheet.name), rows: parsed.rows.length, projectId: row.projectKey, errors: row.errors, unchanged: !row.changed, changedEligible: changed.rows[0].eligible, bytes: buffer.length }));
