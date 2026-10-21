@@ -2034,6 +2034,18 @@ scenario("Escalation opens an issue immediately, without waiting to settle", () 
   assert.strictEqual(last.analysis.requiresManagerAlert, true);
 });
 
+scenario("The original closing deadline expires even during an essential clarification", () => {
+  for (const state of [STATES.WAITING_FOR_ISSUE_REASON, STATES.WAITING_FOR_SERVICE_FOLLOWUP]) {
+    const session = newSession();
+    session.conversationState = { state, pendingServiceKey: "website", overallRatingAsked: true, overallRating: 7,
+      closingGraceExpiresAt: new Date(Date.now() - 60_000).toISOString(), mentionedServices: {} };
+    const turn = processWhatsAppReply({ session, project, poc, text: "The website form is still broken" });
+    assert.equal(turn.control.guardrail, GUARDRAILS.POST_COMPLETION);
+    assert.equal(turn.control.skipAnalysisWrite, true);
+    assert.equal(turn.conversationState.overallRating, 7);
+  }
+});
+
 let failed = 0;
 for (const [status, name, message] of results) {
   if (status === "FAIL") failed += 1;

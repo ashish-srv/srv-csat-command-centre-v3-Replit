@@ -1439,7 +1439,7 @@ async function scenario(name, fn) {
     assert.strictEqual(payload.poc.id, "poc_1");
   });
 
-  await scenario("Broad feedback offers a choice; yes continues services and no skips safely", async () => {
+  await scenario("Broad monthly feedback offers a rating transition while legacy scope choices still resume safely", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorFetch = global.fetch;
     const priorMessages = [...calls.messages];
@@ -1506,13 +1506,16 @@ async function scenario(name, fn) {
       });
       const broadPayload = JSON.parse(broad.body);
       assert.strictEqual(broad.statusCode, 201);
-      assert.match(broadPayload.whatsappReplyText, /services one by one/i);
-      assert.match(broadPayload.whatsappReplyText, /skip/i);
-      assert.strictEqual(store._session.conversationState.state, "waiting_for_service_scope");
+      assert.match(broadPayload.whatsappReplyText, /add anything else.*overall rating/i);
+      assert.doesNotMatch(broadPayload.whatsappReplyText, /on a scale|out of 10/i);
+      assert.strictEqual(store._session.conversationState.pendingQuestionType, "rating_feedback");
       assert.strictEqual(store._session.conversationState.serviceScopeStatus, "awaiting_choice");
       assert.deepStrictEqual(store._session.conversationState.mentionedServices, {});
 
       const scopeState = JSON.parse(JSON.stringify(store._session.conversationState));
+      // Previously sent continue/skip questions must retain their meaning.
+      store._session.conversationState = { ...scopeState, ratingFeedbackPause: null,
+        state: "waiting_for_service_scope", pendingQuestionType: "service_scope" };
       modelPayloads.push({
         message: "How has PPC / Media been for you?",
         captured: [], observations: [], appreciations: [], overallRating: null,
@@ -1567,7 +1570,7 @@ async function scenario(name, fn) {
     }
   });
 
-  await scenario("Mixed onboarding feedback receives a nuanced Gemini acknowledgement before scope choice", async () => {
+  await scenario("Mixed onboarding feedback receives a nuanced Gemini acknowledgement before the rating choice", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorFetch = global.fetch;
     const priorMessages = [...calls.messages];
@@ -1605,7 +1608,8 @@ async function scenario(name, fn) {
         observations: [], appreciations: []
       },
       {
-        message: "It is encouraging to hear the team has been proactive and that you are very satisfied overall. We also recognise your expectation to now see the full creative and video potential. Would you prefer to continue service by service, or skip the remaining service questions?",
+        message: "Thank you for appreciating the proactive team and sharing that you are very satisfied overall. We also recognise your expectation to now see the full creative and video potential. Would you like to add anything else, or shall we move to the overall rating?",
+        acknowledgement: "It is encouraging to hear the team has been proactive and that you are very satisfied overall. We also recognise your expectation to now see the full creative and video potential.",
         captured: [
           { serviceKey: "account", sentiment: "positive", summary: "Client servicing is proactive and good", declined: false, needsFollowUp: false },
           { serviceKey: "creatives", sentiment: "neutral", summary: "They now expect the team's full creative and video potential", declined: false, needsFollowUp: false }
@@ -1614,7 +1618,7 @@ async function scenario(name, fn) {
         corrects: false, readyToClose: false, deferRequested: false,
         serviceScope: "overall_feedback", askedForOverallRating: false,
         askedForAppreciation: false, askedForAnythingElse: false,
-        askedForServiceScope: true, askedServiceKey: null
+        askedForServiceScope: false, askedForRatingTransition: true, askedServiceKey: null
       }
     ];
     global.fetch = async () => ({
@@ -1632,7 +1636,7 @@ async function scenario(name, fn) {
       assert.strictEqual(response.statusCode, 201);
       assert.match(payload.whatsappReplyText, /proactive/i);
       assert.match(payload.whatsappReplyText, /full creative and video potential/i);
-      assert.match(payload.whatsappReplyText, /continue service by service|skip/i);
+      assert.match(payload.whatsappReplyText, /add anything else.*overall rating/i);
       assert.strictEqual(payload.nextMessage.metadata.provider, "gemini_conducted");
       assert.strictEqual(payload.session.conversationState.serviceScopeStatus, "awaiting_choice");
       assert.strictEqual(
@@ -2227,7 +2231,7 @@ async function scenario(name, fn) {
     }
   });
 
-  await scenario("Closing-window appreciation is acknowledged and gets one easy follow-up", async () => {
+  await scenario("Closing-window team appreciation is acknowledged without reopening a service interview", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorMessages = [...calls.messages];
     const priorSession = store._session;
@@ -2263,8 +2267,9 @@ async function scenario(name, fn) {
       assert.strictEqual(response.statusCode, 201);
       assert.match(payload.whatsappReplyText, /thank you for appreciating the Website Team/i);
       assert.match(payload.whatsappReplyText, /share your kind words/i);
-      assert.match(payload.whatsappReplyText, /anything else.*Website \/ SEO/i);
-      assert.strictEqual(payload.state, "waiting_for_service_followup");
+      assert.doesNotMatch(payload.whatsappReplyText, /anything else.*Website \/ SEO/i);
+      assert.strictEqual(payload.state, "closing_grace");
+      assert.match(payload.whatsappReplyText, /original 10-minute window is still open/i);
 
       const close = await rawReq("POST", "/api/whatsapp/inbound", {
         from: "+91 99999 99999",
@@ -2273,7 +2278,7 @@ async function scenario(name, fn) {
       });
       const closePayload = JSON.parse(close.body);
       assert.strictEqual(closePayload.state, "closing_grace");
-      assert.match(closePayload.whatsappReplyText, /original 10-minute window is still open/i);
+      assert.match(closePayload.whatsappReplyText, /window.*(?:open|close)/i);
     } finally {
       if (priorKey === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = priorKey;
@@ -6014,6 +6019,133 @@ async function scenario(name, fn) {
       store._session = priorSession;
     }
   });
+
+  await scenario("A monthly client can volunteer the invited rating without losing the management invitation", async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorSession = store._session, priorMessages = [...calls.messages];
+    delete process.env.GEMINI_API_KEY;
+    calls.messages.length = 0;
+    store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+      status: "partial", completionStatus: "partial", sessionType: "pulse", conversationState: {
+        state: "waiting_for_overall_rating", sessionType: "pulse", pendingQuestionType: "rating_feedback",
+        ratingFeedbackPause: { ratingType: "overall_rating", choiceAsked: true, overallReview: true },
+        generalFeedbackText: "The partnership and team support have been helpful", serviceScopeStatus: "awaiting_choice",
+        mentionedServices: {}, overallRatingAsked: false,
+        lastQuestionAsked: "Would you like to add anything else, or shall we move to the overall rating?"
+      } };
+    try {
+      const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text: "8", providerMessageId: "wamid.monthly-volunteered-score" });
+      const result = JSON.parse(response.body);
+      assert.equal(response.statusCode, 201);
+      assert.equal(result.session.conversationState.overallRating, 8);
+      assert.equal(result.session.conversationState.npsScore, null);
+      assert.equal(result.session.conversationState.pendingQuestionType, "final_sweep");
+      assert.match(result.whatsappReplyText, /Directors/i);
+      assert.doesNotMatch(result.whatsappReplyText, /recommend|out of 10/i);
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
+  for (const type of ["pulse", "project_end"]) for (const timeout of [false, true]) {
+    await scenario(`${type} closing additions use current semantic points with ${timeout ? "a writer timeout" : "conflicting writer facts"}`, async () => {
+      const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+      const priorSession = store._session, priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      const deadline = new Date(Date.now() + 8 * 60 * 1000).toISOString();
+      store._session = {
+        id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+        status: "completed", completionStatus: "completed", sessionType: type,
+        conversationState: { state: "closing_grace", sessionType: type,
+          closingGraceExpiresAt: deadline, overallRatingAsked: true, overallRating: 7,
+          npsScore: type === "project_end" ? 9 : null,
+          askedForAnythingElse: true, anythingElseAnswered: true, mentionedServices: {
+            website: { serviceKey: "website", serviceName: "Website / SEO", status: "needs_service_followup", sentiment: "negative", serviceFollowUpAnswered: false, reasonText: "Earlier unrelated concern" }
+          } }
+      };
+      const variants = [
+        ["there should be weekly meeting with team", "Weekly Team Meetings", "I have noted your request for weekly meetings with the team.", "request"],
+        ["Could you enable access to our shared dashboard?", "Dashboard Access", "I have noted your request for access to the shared dashboard.", "request"],
+        ["The form freezes when we submit it", "Form Submission Freezes", "I am sorry the form freezes when you submit it. I have noted this concern for review.", "feedback"],
+        ["The team explains the reports very clearly", "Reporting Team", "Thank you for appreciating how clearly the team explains your reports.", "appreciation"]
+      ];
+      let extraction;
+      global.fetch = async (_url, options) => {
+        const input = JSON.parse(options?.body || "{}").input || "";
+        if (input.includes("Task: interpret ONE client reply")) return {
+          ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(extraction) })
+        };
+        if (timeout) throw new Error("simulated response-writer timeout");
+        return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+          message: "I am sorry your whole experience has been disappointing. Anything else about Website / SEO?",
+          acknowledgement: "I am sorry your whole experience has been disappointing.",
+          askedServiceFollowUpKey: "website", overallRating: 1,
+          captured: [{ serviceKey: "ppc", sentiment: "negative", summary: "Invented PPC failure" }],
+          observations: [{ topic: "Senior Involvement", detail: "Invented leadership absence", sentiment: "negative" }]
+        }) }) };
+      };
+      try {
+        for (const [index, [text, topic, acknowledgement, kind]] of variants.entries()) {
+          extraction = { intent: "feedback", sentiment: kind === "feedback" ? "negative" : kind === "appreciation" ? "positive" : "neutral",
+            acknowledgement, explainsProblem: true, serviceFeedback: [],
+            observations: kind === "appreciation" ? [] : [{ topic, detail: text, kind, sentiment: kind === "feedback" ? "negative" : "neutral", needsFollowUp: false }],
+            appreciations: kind === "appreciation" ? [{ subject: topic, detail: text }] : [] };
+          const response = await rawReq("POST", "/api/whatsapp/inbound", {
+            from: poc.contactWhatsapp, text, providerMessageId: `wamid.closing-semantic-${type}-${timeout}-${index}`
+          });
+          const result = JSON.parse(response.body);
+          assert.equal(response.statusCode, 201);
+          assert.equal(result.state, "closing_grace", result.whatsappReplyText);
+          assert.ok(result.whatsappReplyText.includes(acknowledgement), result.whatsappReplyText);
+          assert.doesNotMatch(result.whatsappReplyText, /anything else about|whole experience|Senior Involvement|meeting request|correct number|Directors have been notified/i);
+          assert.equal(result.session.conversationState.closingGraceExpiresAt, deadline);
+          assert.equal(result.session.conversationState.overallRating, 7);
+          assert.equal(result.session.conversationState.npsScore, type === "project_end" ? 9 : null);
+          assert.doesNotMatch(JSON.stringify(result.session.conversationState), /Invented PPC|Invented leadership/);
+        }
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+        calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+      }
+    });
+  }
+
+  for (const kind of ["request", "mixed"]) {
+    await scenario(`quick check-in keeps ${kind} acknowledgements specific without unwarranted apology`, async () => {
+      const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+      const priorSession = store._session, priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      const text = kind === "request" ? "Could we receive a monthly ledger please?"
+        : "The form freezes after submission, but our reporting team explains the numbers clearly.";
+      const acknowledgement = kind === "request" ? "I have noted your request for a monthly ledger."
+        : "I am sorry the form freezes after submission. Thank you for appreciating how clearly the team explains your reports.";
+      global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+        intent: "feedback", sentiment: kind === "request" ? "neutral" : "negative", acknowledgement,
+        explainsProblem: true, isObservation: true, observations: [{ topic: kind === "request" ? "Billing" : "Form Submission Freezes",
+          detail: text, kind: kind === "request" ? "request" : "feedback", sentiment: kind === "request" ? "neutral" : "negative", needsFollowUp: false }],
+        appreciations: kind === "mixed" ? [{ subject: "Reporting Team", detail: "Our reporting team explains the numbers clearly" }] : []
+      }) }) });
+      store._session = { id: "sess_1", cycleId: "cyc_quick", projectId: project.id, clientPocId: poc.id,
+        status: "partial", completionStatus: "partial", sessionType: "quick_checkin",
+        conversationState: { state: "quick_checkin_detail", quickCheckinOutcome: "needs_improvement" } };
+      try {
+        const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201);
+        assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+        assert.doesNotMatch(result.whatsappReplyText, /experience has been disappointing|anything else about|rate|recommend/i);
+        assert.equal(result.state, "quick_checkin_window");
+        if (kind === "request") assert.doesNotMatch(result.whatsappReplyText, /sorry|apolog|concerns|disappoint/i);
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+        calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+      }
+    });
+  }
 
   for (const variant of ["natural choice", "premature numeric question", "internal summary"]) {
     await scenario(`overall review preserves a client-facing acknowledgement with ${variant}`, async () => {

@@ -185,6 +185,23 @@ const turn = {
     }
   });
 
+  await scenario("Grounded acknowledgement validation permits recording feedback, never invented actions", async () => {
+    for (const text of [
+      "I have noted your concern about the form freezing.",
+      "I have recorded your request for access to the dashboard."
+    ]) {
+      assert.equal(containsClaim(text, { allowFeedbackRecording: true }), false, text);
+      assert.equal(normaliseReplyInterpretation({ intent: "feedback", acknowledgement: text }, {}, "test").acknowledgement, text);
+    }
+    for (const text of [
+      "Your complaint has been logged.", "A ticket has been created.",
+      "Your request has been assigned to a manager.", "This has been escalated to the manager.",
+      "We will resolve your concern within 48 hours."
+    ]) assert.equal(containsClaim(text, { allowFeedbackRecording: true }), true, text);
+    assert.equal(containsClaim("I have noted the issue with account management."), true,
+      "the strict/default guard is unchanged");
+  });
+
   await scenario("interpretation and reply prompts consistently permit completion without repeated service interviews", async () => {
     const priorFetch = global.fetch;
     const priorKey = process.env.GEMINI_API_KEY;
@@ -211,6 +228,10 @@ const turn = {
       assert.match(prompts[1], /Do not interview each named team/);
       assert.match(prompts[1], /before the first numeric CSAT/);
       assert.match(prompts[1], /Natural paraphrases are welcome/);
+      assert.match(prompts[0], /prospective suggestion\/request is not automatically a complaint/);
+      assert.match(prompts[0], /This wording must never be used as evidence for facts/);
+      assert.match(prompts[1], /NPS only for project-end, NEVER for monthly/);
+      assert.match(prompts[1], /keep the original deadline/);
       assert.match(prompts[1], /never an additional source of facts/);
       assert.doesNotMatch(prompts[1], /dig until it would be|Move on only when they say no/);
     } finally {

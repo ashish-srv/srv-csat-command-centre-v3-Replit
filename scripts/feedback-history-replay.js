@@ -56,7 +56,7 @@ function review(type = "project_end", customProject = project) {
       flow.applyTurnServiceScope(turn.conversationState, customProject, text, interpretation, context, before);
       flow.applyPendingIssueInterpretation(turn.conversationState, before, interpretation);
       flow.applyConversationInterruption(turn.conversationState, before, interpretation, context, text);
-      flow.settleActionableFinalSweepFacts(turn.conversationState, before, context, text, interpretation);
+      flow.settleActionableFinalSweepFacts(turn.conversationState, before, context, text, interpretation, customProject);
       const completion = sm.detectors.completionScopeFor(text, interpretation);
       if (["feedback", "conversation"].includes(completion)) {
         sm.finishFeedbackQuestions(turn.conversationState, customProject, completion === "conversation");
@@ -68,7 +68,7 @@ function review(type = "project_end", customProject = project) {
       const markers = flow.recordRequiredQuestion(turn.conversationState, customProject, action);
       flow.setStateForRequiredAction(turn.conversationState, action, markers);
       const message = action.type === "close"
-        ? flow.closingGraceMessage(poc, turn.conversationState, context)
+        ? flow.closingGraceMessage(poc, turn.conversationState, context, customProject)
         : flow.fallbackForAction(action, turn.conversationState, customProject, context);
       flow.rememberAcknowledgedConcerns(turn.conversationState, context);
       turn.conversationState.lastQuestionAsked = message;
@@ -161,7 +161,7 @@ scenario("Shravya/Aashish: 9 CSAT, 10 NPS, detailed creative-process concern and
     observations: [{ topic: "Creative Process", detail: "The team and I had aligned on common feedback across multiple creatives, but there was back and forth because changes were not consistently implemented by the designer.", sentiment: "negative", needsFollowUp: false }],
     appreciations: [{ subject: "Sammar and Moulik", detail: "Sammar initially and now Moulik, have always been approachable and responsive making coordination smooth throughout.", serviceKey: "account" }]
   }), { acknowledgement: "I am sorry the agreed creative changes were not applied consistently." });
-  assert.equal(next.action.type, "final_sweep");
+  assert.equal(next.action.type, "final_sweep", JSON.stringify({ action: next.action, state: chat.state }));
   assert.match(next.message, /Sammar.*Moulik/);
   assert.match(next.message, /creative|changes|designer/i);
   assert.doesNotMatch(next.message, /anything else (?:about|regarding) (?:Creatives|Landing|Account)/i);
@@ -590,6 +590,89 @@ scenario("internal summaries and unsupported acknowledgement claims never reach 
     const message = flow.fallbackForAction({ type: "rating_feedback", ratingType: "overall_rating", offerChoice: false }, {}, project, { ...context, acknowledgement });
     assert.doesNotMatch(message, /the client|I have recorded:|have been notified|invoice|fixed the problem/i);
   }
+});
+
+scenario("monthly broad relationship praise offers room before CSAT rather than inferring finished feedback", () => {
+  const chat = review("pulse", { ...project, services: project.services.slice(0, 2) });
+  chat.turn("okay");
+  const text = "Hi thanks a lot for your message. We were all working to make things better. I appreciate your taking the feedback positively and the support your team has extended. We hope to carry on a mutually beneficial relationship and learn from your expertise.";
+  const next = chat.turn(text, read({ sentiment: "positive", serviceScope: "overall_feedback", acknowledgement: "Thank you for valuing the partnership and the team’s support.", appreciations: [{ subject: "SRV Team", detail: "I appreciate your taking the feedback positively and the support your team has extended." }] }));
+  assert.equal(next.action.type, "rating_feedback");
+  assert.equal(next.action.offerChoice, true);
+  assert.match(next.message, /partnership|support/);
+  assert.doesNotMatch(next.message, /on a scale|out of 10|missed.*department/i);
+  chat.turn("Let’s move to the score", read({ completionScope: "feedback", completionEvidence: "Let’s move to the score", intent: "negative" }));
+  const rating = chat.turn("7");
+  assert.equal(chat.state.overallRating, 7);
+  assert.equal(chat.state.npsScore, null);
+  assert.equal(rating.action.type, "close");
+});
+
+scenario("volunteering a monthly rating after a broad review preserves the final management invitation", () => {
+  const chat = review("pulse");
+  chat.turn("The partnership has been constructive and the team has supported us throughout", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+  const next = chat.turn("8");
+  assert.equal(chat.state.overallRating, 8);
+  assert.equal(next.action.type, "final_sweep");
+  assert.equal(chat.state.npsScore, null);
+});
+
+scenario("closing-window requests, concerns and praise stay specific across monthly and project-end flows", () => {
+  for (const type of ["pulse", "project_end"]) {
+    const chat = review(type);
+    chat.turn("Overall the partnership has been helpful", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+    chat.turn("That is all for now", read({ completionScope: "feedback", completionEvidence: "That is all for now", intent: "negative" }));
+    chat.turn("7"); if (type === "project_end") chat.turn("9");
+    const deadline = chat.state.closingGraceExpiresAt;
+    assert.ok(deadline);
+    const requests = [
+      ["there should be weekly meeting with team", "Weekly Team Meetings", "I have noted your request for weekly meetings with the team."],
+      ["Could you enable access to our shared dashboard?", "Dashboard Access", "I have noted your request for access to the shared dashboard."],
+      ["Please send the tax invoice as a PDF", "Billing", "I have noted your request for the tax invoice in PDF format."],
+      ["We would appreciate receiving a monthly ledger", "Billing", "I have noted your request for a monthly ledger."]
+    ];
+    for (const [text, topic, acknowledgement] of requests) {
+      const next = chat.turn(text, read({ acknowledgement, observations: [{ topic, detail: text, kind: "request", sentiment: "negative", needsFollowUp: false }] }), { acknowledgement: "I am sorry your whole experience has been disappointing." });
+      assert.equal(next.action.type, "close", text);
+      assert.ok(next.message.includes(acknowledgement), next.message);
+      assert.doesNotMatch(next.message, /sorry|disappoint|anything else about|out of 10.*correct number/i);
+      assert.equal(chat.state.closingGraceExpiresAt, deadline);
+    }
+    for (const [text, key, title, acknowledgement] of [
+      ["Design looks like 1990s", "creatives", "Outdated Design Style", "I’m sorry the designs felt dated. I have noted your concern about their visual style."],
+      ["The landing page freezes after I submit the form", "landing", "Form Submission Freezes", "I’m sorry the landing page freezes after form submission. I have noted this concern for review."]
+    ]) {
+      const next = chat.turn(text, read({ acknowledgement, captured: [fact(key, text)], concerns: [{ serviceKey: key, title, summary: text, sentiment: "negative" }] }));
+      assert.equal(next.action.type, "close"); assert.ok(next.message.includes(acknowledgement), next.message);
+      assert.doesNotMatch(next.message, /experience has been disappointing|anything else about/i);
+    }
+    // A stale earlier follow-up must not win over this unrelated appreciation.
+    chat.state.mentionedServices.account = { serviceKey: "account", serviceName: "Account Management", status: "needs_service_followup", sentiment: "negative", reasonText: "Historical point", serviceFollowUpAnswered: false };
+    const praise = "Campaign management was good";
+    const next = chat.turn(praise, read({ sentiment: "positive", captured: [fact("campaign", praise, "positive")], appreciations: [{ subject: "Campaign Management Team", detail: praise, serviceKey: "campaign" }], acknowledgement: "Thank you for appreciating the Campaign Management team. We will share your kind words with them." }));
+    assert.equal(next.action.type, "close");
+    assert.doesNotMatch(next.message, /Account Management|anything else about|sorry/i);
+    assert.match(next.message, /Campaign Management/);
+    assert.equal(chat.state.overallRating, 7);
+    assert.equal(chat.state.npsScore, type === "project_end" ? 9 : null);
+    assert.equal(chat.state.closingGraceExpiresAt, deadline);
+  }
+});
+
+scenario("closing-window clarification is about a new unclear point, bounded and never a restarted interview", () => {
+  const chat = review();
+  chat.turn("The overall work has been good", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+  chat.turn("Nothing more", read({ intent: "negative", completionScope: "feedback", completionEvidence: "Nothing more" }));
+  chat.turn("8"); chat.turn("9");
+  const expiry = chat.state.closingGraceExpiresAt;
+  const vague = "The creative quality is poor";
+  const next = chat.turn(vague, read({ captured: [fact("creatives", vague, "negative", true)] }));
+  assert.equal(next.action.type, "issue_reason"); assert.equal(next.action.serviceKey, "creatives");
+  const praise = "The influencer work was excellent";
+  const changed = chat.turn(praise, read({ sentiment: "positive", captured: [fact("influencer", praise, "positive")], appreciations: [{ subject: "Influencer Marketing Team", detail: praise, serviceKey: "influencer" }] }));
+  assert.equal(changed.action.type, "close");
+  assert.doesNotMatch(changed.message, /anything else about|what happened with Creatives/i);
+  assert.equal(chat.state.closingGraceExpiresAt, expiry);
 });
 
 for (const [status, name, error] of results) console.log(`${status}  ${name}${error ? `\n${error}` : ""}`);

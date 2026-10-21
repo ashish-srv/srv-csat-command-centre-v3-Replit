@@ -1932,6 +1932,16 @@ function processWhatsAppReply({
     });
   }
 
+  // A necessary clarification may temporarily change state inside the closing
+  // window. The original deadline still expires that conversation; it must
+  // not stay open merely because the last question was not a closing message.
+  const existingGraceDeadline = Date.parse(conversationState.closingGraceExpiresAt || "");
+  if (Number.isFinite(existingGraceDeadline) && existingGraceDeadline <= Date.now()
+    && ![STATES.COMPLETED, STATES.HANDED_OFF, STATES.OPTED_OUT].includes(priorState)) {
+    conversationState.state = STATES.COMPLETED;
+    priorState = STATES.COMPLETED;
+  }
+
   // Asking who contacted them is not evidence of a wrong number. Introduce
   // the survey and repeat the pending question without alerting a human.
   if (isIdentityQuestion(text)) {
@@ -2467,6 +2477,8 @@ function processWhatsAppReply({
     priorState === STATES.WAITING_FOR_SERVICE_RATING
     || conversationState.overallRatingAsked === true
     || conversationState.pendingQuestionType === "overall_rating"
+    || (conversationState.pendingQuestionType === "rating_feedback"
+      && conversationState.ratingFeedbackPause?.ratingType === "overall_rating")
   );
   const expectsNps = priorState === STATES.WAITING_FOR_NPS
     || (conversationState.ratingFeedbackPause?.ratingType === "nps" && conversationState.npsScore == null);
@@ -2617,6 +2629,10 @@ function processWhatsAppReply({
     service.status = hasServiceRating(service) ? "rated" : "needs_rating";
   } else if (priorState === STATES.WAITING_FOR_OVERALL_RATING && rating !== null) {
     conversationState.overallRating = rating;
+    // A client may volunteer the score while choosing between adding more
+    // feedback and moving to the rating. It is a rating context, not a number
+    // mined from an unrelated narrative; retain the answer without re-asking.
+    conversationState.overallRatingAsked = true;
   } else if (isGreetingOnly(text) && !detectedServiceKeys.length && !emoji && !directServiceOpinion) {
     // --- G11 a greeting is not feedback: no service, no score, no issue.
     guardrails.push(GUARDRAILS.NO_SIGNAL);

@@ -33,6 +33,7 @@ covered. No schema migration or n8n workflow change is required for this update.
 | All good / Share feedback buttons | Button payload and typed-response handling; window stays available for corrections |
 | Messages after any closed feedback flow | Substantive follow-up routes to handoff; missing/failed delivery is not described as successful |
 | Other wording and custom services | Semantic completion, score refusal, topic changes, billing/access/reporting requests and Influencer Marketing |
+| 21 October monthly partnership review and closing-window additions | Room to finish before CSAT; neutral meeting/access requests, specific form/design concerns, unrelated team praise; no old service interview or deadline extension |
 
 ## Overall Review and Feedback Added During a Rating Question
 
@@ -71,6 +72,30 @@ Additional replays cover bounded clarification, quantities inside NPS feedback,
 conflicting reply-writing output, response-writer timeouts and negative role
 descriptions that must not become appreciation. Related complaints are retained
 unless their wording is genuinely near-identical.
+
+## Contextual Additions and Closing Windows (21 October)
+
+Broad monthly relationship feedback gets the same opportunity to finish sharing
+before CSAT; a client who volunteers the score need not repeat it. Monthly
+feedback never asks NPS. A prospective request is not evidence of a failure or
+of overall disappointment. Mixed messages retain both concerns and appreciation.
+
+The latest-reply extraction may supply optional client-facing acknowledgement
+wording. This is preferred over transcript-informed wording when available,
+validated for unsupported topics and notification/action claims, and never
+used as evidence for services, concerns or scores. No extra model call or
+cross-model fact merge is introduced. Question-shaped requests also receive a
+semantic interpretation before the older off-topic shortcut can intercept them.
+
+Within an existing ten-minute window, acknowledge the actual new points rather
+than reopening historical service interviews. Generic team praise does not
+require another service question. A genuinely unclear new concern or unnamed
+person may receive one clarification; the original deadline still applies even
+while waiting for that answer. Model timeouts retain grounded current facts and
+use a topic-aware fallback, without assuming that email or action has occurred.
+
+The one-hour reminder for overall feedback with an unanswered CSAT remains
+deferred. This update does not enable it or change existing n8n workflows.
 
 ## Rollback Discipline
 

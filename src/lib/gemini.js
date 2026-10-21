@@ -88,8 +88,15 @@ function isGeminiConfigured() {
   return Boolean(geminiApiKey());
 }
 
-function containsClaim(text) {
-  return CLAIM_PATTERNS.some((pattern) => pattern.test(String(text || "")));
+function containsClaim(text, { allowFeedbackRecording = false } = {}) {
+  const source = String(text || "");
+  // Only the acknowledgement validator opts in after facts are grounded.
+  // Recording feedback is not the same as creating a ticket or notifying
+  // someone. Strict/default claim checks elsewhere remain unchanged.
+  const checked = allowFeedbackRecording && !/\b(?:logged|created|registered|raised)\b/i.test(source)
+    ? source.replace(/\b(?:concerns?|requests?|problems?)\b/gi, "feedback")
+    : source;
+  return CLAIM_PATTERNS.some((pattern) => pattern.test(checked));
 }
 
 function compactService(service) {
@@ -934,6 +941,8 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
 
   return {
     intent: parsed.intent,
+    acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement, { allowFeedbackRecording: true })
+      ? parsed.acknowledgement.trim().slice(0, 600) : "",
     completionScope: ["topic", "feedback", "conversation", "rating"].includes(parsed.completionScope) ? parsed.completionScope : "none",
     completionEvidence: typeof parsed.completionEvidence === "string" ? parsed.completionEvidence.slice(0, 400) : null,
     serviceScope: SERVICE_SCOPES.includes(parsed.serviceScope) ? parsed.serviceScope : "none",
@@ -959,7 +968,7 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
 
 async function interpretReply({ project, question, text, longForm = false }) {
   const fallback = {
-    intent: null, deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
+    intent: null, acknowledgement: "", deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
     serviceHint: null, serviceKeys: [], explainsProblem: false,
     isObservation: false, captured: [], observations: [], concerns: [], appreciations: [],
     source: "fallback", error: null
@@ -970,10 +979,10 @@ async function interpretReply({ project, question, text, longForm = false }) {
 
   const input = [
     SAFETY_PREAMBLE,
-    "Task: interpret ONE client reply. Do not answer it, do not reply to the client.",
+    "Task: interpret ONE client reply. Do not advance the survey or ask a question.",
     "Return strict JSON only, no markdown:",
     '{"intent": "...", "deferRequested": false, "completionScope": "none", "completionEvidence": null, "serviceScope": "none", "sentiment": "...", "rating": null,',
-    ' "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
+    ' "acknowledgement": "...", "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
     ' "serviceFeedback": [{"serviceHint": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false, "kind": "feedback"}],',
     ' "concerns": [{"title": "...", "summary": "...", "sentiment": "negative", "severity": "watch", "serviceHint": null, "needsFollowUp": false}],',
@@ -1021,6 +1030,8 @@ async function interpretReply({ project, question, text, longForm = false }) {
     "a concern and also finish, preserve both the concern and completionScope.",
     "completionEvidence must quote the EXACT current words expressing that",
     "completion, otherwise null and scope none. Never quote older messages.",
+    "Courtesy, thanks and hopes for the future within a substantive review do",
+    "not alone mean the client has finished sharing or declined other questions.",
     "When asked to add more feedback or move to a rating, a short no or done",
     "finishes feedback; it does not refuse the numeric score. Use rating only",
     "if they actually decline giving that score, however they phrase it.",
@@ -1089,6 +1100,20 @@ async function interpretReply({ project, question, text, longForm = false }) {
     "observations contains every non-service point, including billing, contracts,",
     "internal processes, named people and leadership. kind is request only when",
     "the client asks SRV to do something; otherwise it is feedback.",
+    "A prospective suggestion/request is not automatically a complaint. Do not",
+    "infer that something failed, that the client is disappointed, or that a",
+    "leader was absent just because they request an improvement or meeting.",
+    "Keep a real stated problem separate when a message contains both.",
+    "",
+    "acknowledgement is optional client-facing wording only: one to three short",
+    "sentences recognising the actual current request, concern and appreciation.",
+    "Name the specific points naturally, not just their department. Acknowledge",
+    "requests without an unwarranted apology; use proportionate empathy for an",
+    "actual problem and thanks for praise. Do not label their whole experience",
+    "disappointing from one concern or from a rating. Do not repeat prior facts.",
+    "No questions, ratings, closing-window text, invented actions or claims that",
+    "someone was notified. Use an empty string for a bare score/control reply.",
+    "This wording must never be used as evidence for facts, services or scores.",
     "",
     "concerns contains every DISTINCT actionable negative concern in this reply,",
     "whether it belongs to a service or is project-wide. Do not create concerns",
@@ -1376,10 +1401,11 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "- The checklist permits at most one optional follow-up per service. Extra",
     "  feedback remains welcome at every step; record it without resetting that",
     "  invitation. A client never has to supply a particular word to move on.",
-    "- For a detailed project-end review, acknowledge concerns AND appreciation",
+    "- For a broad monthly or project-end review, acknowledge concerns AND appreciation",
     "  and offer the feedback-to-rating choice before the first numeric CSAT",
     "  question, unless they have already finished sharing or volunteer a score.",
-    "  Then ask CSAT, followed by NPS. Do not interview each named team.",
+    "  Then ask CSAT. Ask NPS only for project-end, NEVER for monthly feedback.",
+    "  Do not interview each named team.",
     "- When feedback interrupts a rating question, acknowledge and record it,",
     "  clarify only an essential missing detail, then return to the unanswered",
     "  rating. Never interpret concern numbers, costs or quantities as scores.",
@@ -1398,6 +1424,14 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "  or service from a stale transcript topic or the pending question.",
     "  Match the acknowledgement to the reply: empathy for a problem, thanks",
     "  for clarification, or genuine appreciation for praise.",
+    "  Name the actual current points in the separate acknowledgement field.",
+    "  A request/suggestion is not proof of disappointment or a failure. Never",
+    "  apologise for an otherwise neutral request or use a past rating as tone.",
+    "- An existing closingGraceExpiresAt marks the original response window.",
+    "  New feedback/praise in it does not reopen old service interviews. Record",
+    "  it, give a specific acknowledgement and keep the original deadline.",
+    "  Ask only a necessary clarification about the new point or an unnamed",
+    "  person the client wishes to appreciate; never revive a previous service.",
     "- Every appreciation must be acknowledged before the next survey question,",
     "  and say that the kind words will be shared with the relevant person/team.",
     "- For a real problem, lead with brief empathy such as 'I am sorry to hear",
@@ -1544,8 +1578,8 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
 
   return {
     text: message,
-    acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement)
-      ? parsed.acknowledgement.trim().slice(0, 320) : "",
+    acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement, { allowFeedbackRecording: true })
+      ? parsed.acknowledgement.trim().slice(0, 600) : "",
     captured,
     observations,
     appreciations: appreciations.slice(0, 6),
