@@ -2813,7 +2813,7 @@ function processWhatsAppReply({
     || (geminiUnavailable && keywordsCaptured);
 
   const completionScope = completionScopeFor(text, interpretation);
-  if (["feedback", "conversation"].includes(completionScope)) {
+  if (!conversationState.closingGraceExpiresAt && ["feedback", "conversation"].includes(completionScope)) {
     finishFeedbackQuestions(conversationState, project, completionScope === "conversation");
   }
   const materialProgress = conversationProgressSignature(conversationState) !== progressBefore;

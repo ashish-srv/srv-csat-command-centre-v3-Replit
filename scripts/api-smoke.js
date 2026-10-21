@@ -6020,6 +6020,151 @@ async function scenario(name, fn) {
     }
   });
 
+  for (const [sessionType, ratingType] of [["pulse", "overall_rating"], ["project_end", "overall_rating"], ["project_end", "nps"]]) {
+    for (const [text, semanticChoice, evidence, timeout] of [
+      ["rating", "none", null, false],
+      [ratingType === "nps" ? "recommendation rating" : "overall rating", "none", null, true],
+      ["The second option please", "proceed", "The second option please", false],
+      ["Let us get to the number now", "proceed", "Let us get to the number now", true]
+    ]) await scenario(`${sessionType} ${ratingType} choice '${text}' escapes an acknowledgement-only stall`, async () => {
+      const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+      const priorSession = store._session, priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      let extractionPrompt = "";
+      global.fetch = async (_url, options) => {
+        const input = JSON.parse(options?.body || "{}").input || "";
+        if (input.includes("Task: interpret ONE client reply")) {
+          extractionPrompt = input;
+          return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+            intent: "feedback", sentiment: "neutral", rating: null,
+            ratingChoice: semanticChoice, ratingChoiceEvidence: evidence,
+            acknowledgement: "Thank you for confirming.", serviceFeedback: [], observations: [], appreciations: []
+          }) }) };
+        }
+        if (timeout) throw new Error("simulated rating-choice response-writer timeout");
+        return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+          message: "Thank you for confirming.", acknowledgement: "Thank you for confirming.",
+          // Markers must never substitute for the actual numeric question.
+          askedForOverallRating: ratingType === "overall_rating", overallRating: 10,
+          ratingChoice: "continue_feedback", captured: [{ serviceKey: "ppc", summary: "Invented campaign concern", sentiment: "negative" }]
+        }) }) };
+      };
+      store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+        status: "partial", completionStatus: "partial", sessionType,
+        conversationState: { state: ratingType === "nps" ? "waiting_for_nps" : "waiting_for_overall_rating",
+          sessionType, pendingQuestionType: "rating_feedback",
+          ratingFeedbackPause: { ratingType, choiceAsked: true, overallReview: true },
+          lastQuestionAsked: "Thank you for letting us know.",
+          generalFeedbackText: "The partnership and support have been helpful", serviceScopeStatus: "skipped",
+          projectEndReviewCaptured: sessionType === "project_end", overallRatingAsked: ratingType === "nps",
+          overallRating: ratingType === "nps" ? 6 : null, npsScore: null,
+          mentionedServices: Object.fromEntries(project.services.map((service) => [service.serviceKey, { ...service,
+            status: "captured", sentiment: "neutral", serviceFollowUpAnswered: true }]))
+        } };
+      try {
+        const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text,
+          providerMessageId: `wamid.rating-choice-${sessionType}-${ratingType}-${text}` });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201);
+        assert.equal(result.session.conversationState.pendingQuestionType, ratingType, result.whatsappReplyText);
+        assert.match(result.whatsappReplyText, ratingType === "nps" ? /recommend.*out of 10/i : /overall.*out of 10/i);
+        assert.equal(result.session.conversationState.overallRating, ratingType === "nps" ? 6 : null);
+        assert.equal(result.session.conversationState.npsScore, null);
+        assert.equal(result.session.conversationState.ratingFeedbackPause, null);
+        assert.ok(extractionPrompt.includes(`<pending_rating_choice>\n${ratingType}\n</pending_rating_choice>`));
+        assert.doesNotMatch(JSON.stringify(result.session.conversationState), /Invented campaign concern/);
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+        calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+      }
+    });
+  }
+
+  await scenario("Rating option labels work with Gemini unavailable only while the choice is pending", async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorSession = store._session, priorMessages = [...calls.messages];
+    delete process.env.GEMINI_API_KEY;
+    calls.messages.length = 0;
+    try {
+      for (const text of ["rating", "overall rating", "score"]) {
+        store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+          status: "partial", completionStatus: "partial", sessionType: "pulse", conversationState: {
+            state: "waiting_for_overall_rating", sessionType: "pulse", pendingQuestionType: "rating_feedback",
+            ratingFeedbackPause: { ratingType: "overall_rating", choiceAsked: true, overallReview: true },
+            generalFeedbackText: "The partnership is good", serviceScopeStatus: "awaiting_choice", mentionedServices: {},
+            lastQuestionAsked: "Thank you for confirming."
+          } };
+        const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text,
+          providerMessageId: `wamid.choice-outage-${text}` });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201);
+        assert.equal(result.session.conversationState.pendingQuestionType, "overall_rating", result.whatsappReplyText);
+        assert.match(result.whatsappReplyText, /overall.*out of 10/i);
+        assert.equal(result.session.conversationState.overallRating, null);
+      }
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
+  for (const sessionType of ["pulse", "project_end"]) await scenario(`${sessionType} closing acknowledgements distinguish scores and completion from new facts`, async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+    const priorSession = store._session, priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    calls.messages.length = 0;
+    let read = {};
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options?.body || "{}").input || "";
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(
+        input.includes("Task: interpret ONE client reply") ? read : {
+          message: "Thank you for providing your overall rating. Thank you for confirming.",
+          acknowledgement: "Thank you for providing your overall rating.", readyToClose: true
+        }
+      ) }) };
+    };
+    store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+      status: "partial", completionStatus: "partial", sessionType, conversationState: {
+        state: sessionType === "project_end" ? "waiting_for_nps" : "waiting_for_overall_rating", sessionType,
+        pendingQuestionType: sessionType === "project_end" ? "nps" : "overall_rating", overallRatingAsked: true,
+        overallRating: sessionType === "project_end" ? 6 : null, npsScore: null,
+        projectEndReviewCaptured: sessionType === "project_end", serviceScopeStatus: "skipped",
+        askedForAnythingElse: true, anythingElseAnswered: true,
+        mentionedServices: Object.fromEntries(project.services.map((service) => [service.serviceKey, { ...service,
+          status: "captured", sentiment: "neutral", serviceFollowUpAnswered: true }]))
+      } };
+    try {
+      const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp,
+        text: sessionType === "project_end" ? "9" : "6", providerMessageId: `wamid.closing-no-duplicate-${sessionType}` });
+      const closed = JSON.parse(response.body);
+      assert.equal(response.statusCode, 201);
+      assert.equal(closed.state, "closing_grace");
+      assert.doesNotMatch(closed.whatsappReplyText, /Thank you for providing/);
+      const deadline = closed.session.conversationState.closingGraceExpiresAt;
+      const before = JSON.stringify(closed.session.conversationState.mentionedServices);
+      for (const [index, text] of ["thats it", "Nothing further from my side", "Everything I wanted to share is covered"].entries()) {
+        read = { intent: "negative", sentiment: "neutral", completionScope: "feedback", completionEvidence: text,
+          acknowledgement: "Thank you for confirming that you have shared all your feedback." };
+        const reply = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text,
+          providerMessageId: `wamid.window-finish-${sessionType}-${index}` });
+        const result = JSON.parse(reply.body);
+        assert.equal(reply.statusCode, 201);
+        assert.equal(result.state, "closing_grace");
+        assert.doesNotMatch(result.whatsappReplyText, /added|additional|out of 10|next 10 minutes/i);
+        assert.match(result.whatsappReplyText, /original 10-minute window|close automatically/i);
+        assert.equal(result.session.conversationState.closingGraceExpiresAt, deadline);
+        assert.equal(result.session.conversationState.overallRating, 6);
+        assert.equal(result.session.conversationState.npsScore, sessionType === "project_end" ? 9 : null);
+        assert.equal(JSON.stringify(result.session.conversationState.mentionedServices), before);
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
   await scenario("A monthly client can volunteer the invited rating without losing the management invitation", async () => {
     const priorKey = process.env.GEMINI_API_KEY, priorSession = store._session, priorMessages = [...calls.messages];
     delete process.env.GEMINI_API_KEY;
@@ -6326,6 +6471,18 @@ async function scenario(name, fn) {
     ], true);
     assert.strictEqual(rating, 4,
       "the recommendation answer and its correction must not replace overall CSAT");
+  });
+
+  await scenario("Partial transcript reconciliation does not guess that an unlabelled score is CSAT", async () => {
+    const { conversationFlow } = require("../src/server/api-handler");
+    assert.equal(conversationFlow.latestExplicitOverallRating([
+      { side: "client", body: "9" },
+      { side: "srv", body: "Thank you. Your feedback and rating of 6 out of 10 are recorded." },
+      { side: "client", body: "That is all" }
+    ], true), null, "missing question history must not pull an NPS answer into CSAT");
+    assert.equal(conversationFlow.latestExplicitOverallRating([
+      { side: "client", body: "9" }, { side: "client", body: "Change my overall rating to 6" }
+    ], true), 6, "an explicitly identified CSAT correction remains usable");
   });
 
   await scenario("closing-window CSAT and recommendation corrections remain separate during transcript reconciliation", async () => {

@@ -58,7 +58,7 @@ function review(type = "project_end", customProject = project) {
       flow.applyConversationInterruption(turn.conversationState, before, interpretation, context, text);
       flow.settleActionableFinalSweepFacts(turn.conversationState, before, context, text, interpretation, customProject);
       const completion = sm.detectors.completionScopeFor(text, interpretation);
-      if (["feedback", "conversation"].includes(completion)) {
+      if (!before.closingGraceExpiresAt && ["feedback", "conversation"].includes(completion)) {
         sm.finishFeedbackQuestions(turn.conversationState, customProject, completion === "conversation");
       }
       sm.applyTurnProgress(turn.conversationState, customProject,
@@ -673,6 +673,87 @@ scenario("closing-window clarification is about a new unclear point, bounded and
   assert.equal(changed.action.type, "close");
   assert.doesNotMatch(changed.message, /anything else about|what happened with Creatives/i);
   assert.equal(chat.state.closingGraceExpiresAt, expiry);
+});
+
+scenario("rating option labels advance once even after an acknowledgement-only stalled turn", () => {
+  for (const type of ["pulse", "project_end"]) for (const text of ["rating", "overall rating", "score", "then ask rating"]) {
+    const chat = review(type);
+    chat.turn("The partnership and support have been good overall", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+    chat.state.lastQuestionAsked = "Thank you for letting us know.";
+    const interpretation = text === "then ask rating" ? { ratingChoice: "proceed", ratingChoiceEvidence: text } : {};
+    const next = chat.turn(text, read({ intent: "feedback", sentiment: "neutral", ...interpretation }));
+    assert.equal(next.action?.type, "overall_rating", `${type}: ${text}: ${next.message}`);
+    assert.match(next.message, /overall.*out of 10/i);
+    assert.equal(chat.state.overallRating, null);
+    assert.equal(chat.state.npsScore, null);
+  }
+});
+
+scenario("semantic rating choices respect current evidence, continued feedback and explicit refusal", () => {
+  for (const text of ["Let us get to the number now", "The second option please", "I am ready for the scoring question", "Ab rating poochiye"]) {
+    const chat = review();
+    chat.turn("Our overall experience was positive", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+    chat.state.lastQuestionAsked = "Thank you for confirming.";
+    const next = chat.turn(text, read({ ratingChoice: "proceed", ratingChoiceEvidence: text, sentiment: "neutral" }));
+    assert.equal(next.action.type, "overall_rating", text);
+  }
+  const chat = review();
+  chat.turn("Our overall experience was positive", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+  const text = "The rating can wait; there are no project updates";
+  const next = chat.turn(text, read({ ratingChoice: "proceed", ratingChoiceEvidence: "Let us get to the number now",
+    captured: [fact("account", "There are no project updates")] }));
+  assert.equal(next.action.type, "rating_feedback");
+  assert.equal(chat.state.overallRating, null);
+  assert.match(chat.state.mentionedServices.account.reasonText, /no project updates/i);
+  const refused = "I do not wish to give a score";
+  chat.turn(refused, read({ intent: "negative", completionScope: "rating", completionEvidence: refused }));
+  assert.equal(chat.state.overallRatingDeclined, true);
+  assert.equal(chat.state.overallRating, null);
+});
+
+scenario("closing a score avoids duplicate acknowledgements and completion is not new feedback", () => {
+  for (const type of ["pulse", "project_end"]) {
+    const chat = review(type);
+    chat.turn("Our overall experience was positive", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+    chat.turn("That covers everything", read({ intent: "negative", completionScope: "feedback", completionEvidence: "That covers everything" }));
+    chat.turn("6", null, { acknowledgement: "Thank you for providing your overall rating of 6." });
+    if (type === "project_end") chat.turn("9", null, { acknowledgement: "Thank you for your recommendation rating of 9." });
+    const close = chat.turns.at(-1);
+    assert.doesNotMatch(close.message, /Thank you for (?:providing|your recommendation)/i);
+    const expiry = chat.state.closingGraceExpiresAt;
+    for (const text of ["That is it", "Nothing further from my side", "I have shared everything I wanted to"]) {
+      const done = chat.turn(text, read({ intent: "negative", completionScope: "feedback", completionEvidence: text }), { acknowledgement: "Thank you for confirming that you have shared all your feedback." });
+      assert.equal(done.state.state, sm.STATES.CLOSING_GRACE);
+      assert.doesNotMatch(done.message, /added|additional|out of 10|next 10 minutes/i);
+      assert.match(done.message, /original 10-minute window|close automatically/i);
+      assert.equal(chat.state.closingGraceExpiresAt, expiry);
+      assert.equal(chat.state.overallRating, 6);
+      assert.equal(chat.state.npsScore, type === "project_end" ? 9 : null);
+    }
+  }
+});
+
+scenario("rating choices do not swallow additional feedback, invent a score or apply outside their context", () => {
+  for (const type of ["pulse", "project_end"]) {
+    const chat = review(type);
+    chat.turn("Our overall experience was positive", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+    const text = "The rating can wait; we are not receiving project updates";
+    const added = chat.turn(text, read({ ratingChoice: "continue_feedback", ratingChoiceEvidence: "The rating can wait",
+      captured: [fact("account", "We are not receiving project updates")] }));
+    assert.equal(added.action.type, "rating_feedback");
+    assert.match(chat.state.mentionedServices.account.reasonText, /not receiving project updates/i);
+    assert.equal(chat.state.overallRating, null);
+    const last = "The form freezes when submitted. Let us proceed to the score";
+    const moved = chat.turn(last, read({ ratingChoice: "proceed", ratingChoiceEvidence: "Let us proceed to the score",
+      captured: [fact("landing", "The form freezes when submitted")] }));
+    assert.equal(moved.action.type, "overall_rating");
+    assert.match(chat.state.mentionedServices.landing.reasonText, /form freezes/i);
+    assert.equal(chat.state.overallRating, null);
+  }
+  const chat = review("pulse");
+  const text = "The website form freezes";
+  const next = chat.turn(text, read({ ratingChoice: "proceed", ratingChoiceEvidence: text, captured: [fact("landing", text)] }));
+  assert.notEqual(next.action.type, "overall_rating", "choice metadata cannot skip the normal service flow without a pending rating choice");
 });
 
 for (const [status, name, error] of results) console.log(`${status}  ${name}${error ? `\n${error}` : ""}`);

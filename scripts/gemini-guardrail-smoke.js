@@ -202,6 +202,18 @@ const turn = {
       "the strict/default guard is unchanged");
   });
 
+  await scenario("Rating choice metadata preserves intent and evidence without supplying a score", async () => {
+    const text = "The second option please";
+    const read = normaliseReplyInterpretation({ intent: "affirmative", ratingChoice: "proceed", ratingChoiceEvidence: text }, {}, text);
+    assert.equal(read.ratingChoice, "proceed");
+    assert.equal(read.ratingChoiceEvidence, text);
+    assert.equal(read.rating, null);
+    assert.deepEqual(read.captured, []);
+    const invalid = normaliseReplyInterpretation({ intent: "feedback", ratingChoice: "finish_everything" }, {}, "test");
+    assert.equal(invalid.ratingChoice, "none");
+    assert.equal(invalid.ratingChoiceEvidence, null);
+  });
+
   await scenario("interpretation and reply prompts consistently permit completion without repeated service interviews", async () => {
     const priorFetch = global.fetch;
     const priorKey = process.env.GEMINI_API_KEY;
@@ -217,7 +229,7 @@ const turn = {
     };
     try {
       const project = { name: "Prompt test", services: [{ serviceKey: "account", name: "Account Management" }] };
-      await interpretReply({ project, question: "Anything else?", text: "That covers everything" });
+      await interpretReply({ project, question: "Thank you for confirming.", text: "That covers everything", pendingRatingChoice: "overall_rating" });
       const response = await conductTurn({ project, checklist: { overallRatingStillNeeded: true }, preferredAction: { type: "overall_rating" } });
       assert.equal(response.acknowledgement, "Thank you for explaining your experience.");
       assert.equal(prompts.length, 2);
@@ -230,6 +242,9 @@ const turn = {
       assert.match(prompts[1], /Natural paraphrases are welcome/);
       assert.match(prompts[0], /prospective suggestion\/request is not automatically a complaint/);
       assert.match(prompts[0], /This wording must never be used as evidence for facts/);
+      assert.match(prompts[0], /<pending_rating_choice>\noverall_rating\n<\/pending_rating_choice>/);
+      assert.match(prompts[0], /ratingChoiceEvidence must quote the EXACT current words/);
+      assert.match(prompts[0], /do not forget it merely because question_we_asked now contains thanks/);
       assert.match(prompts[1], /NPS only for project-end, NEVER for monthly/);
       assert.match(prompts[1], /keep the original deadline/);
       assert.match(prompts[1], /never an additional source of facts/);

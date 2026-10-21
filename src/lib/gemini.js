@@ -943,6 +943,8 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
     intent: parsed.intent,
     acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement, { allowFeedbackRecording: true })
       ? parsed.acknowledgement.trim().slice(0, 600) : "",
+    ratingChoice: ["proceed", "continue_feedback"].includes(parsed.ratingChoice) ? parsed.ratingChoice : "none",
+    ratingChoiceEvidence: typeof parsed.ratingChoiceEvidence === "string" ? parsed.ratingChoiceEvidence.slice(0, 240) : null,
     completionScope: ["topic", "feedback", "conversation", "rating"].includes(parsed.completionScope) ? parsed.completionScope : "none",
     completionEvidence: typeof parsed.completionEvidence === "string" ? parsed.completionEvidence.slice(0, 400) : null,
     serviceScope: SERVICE_SCOPES.includes(parsed.serviceScope) ? parsed.serviceScope : "none",
@@ -966,9 +968,10 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
   };
 }
 
-async function interpretReply({ project, question, text, longForm = false }) {
+async function interpretReply({ project, question, text, longForm = false, pendingRatingChoice = null }) {
   const fallback = {
-    intent: null, acknowledgement: "", deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
+    intent: null, acknowledgement: "", ratingChoice: "none", ratingChoiceEvidence: null,
+    deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
     serviceHint: null, serviceKeys: [], explainsProblem: false,
     isObservation: false, captured: [], observations: [], concerns: [], appreciations: [],
     source: "fallback", error: null
@@ -981,7 +984,7 @@ async function interpretReply({ project, question, text, longForm = false }) {
     SAFETY_PREAMBLE,
     "Task: interpret ONE client reply. Do not advance the survey or ask a question.",
     "Return strict JSON only, no markdown:",
-    '{"intent": "...", "deferRequested": false, "completionScope": "none", "completionEvidence": null, "serviceScope": "none", "sentiment": "...", "rating": null,',
+    '{"intent": "...", "deferRequested": false, "completionScope": "none", "completionEvidence": null, "ratingChoice": "none", "ratingChoiceEvidence": null, "serviceScope": "none", "sentiment": "...", "rating": null,',
     ' "acknowledgement": "...", "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
     ' "serviceFeedback": [{"serviceHint": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false, "kind": "feedback"}],',
@@ -1035,6 +1038,20 @@ async function interpretReply({ project, question, text, longForm = false }) {
     "When asked to add more feedback or move to a rating, a short no or done",
     "finishes feedback; it does not refuse the numeric score. Use rating only",
     "if they actually decline giving that score, however they phrase it.",
+    "ratingChoice is separate progression metadata, never a numeric score or",
+    "feedback fact. Only when pending_rating_choice is overall_rating or nps:",
+    "use proceed when they select moving to that score question, including an",
+    "option label, a request to ask it, readiness for that question, or a natural",
+    "reference to that option. Judge meaning in context, not exact wording.",
+    "Use continue_feedback when they explicitly want to keep sharing, and none",
+    "when uncertain. A courtesy okay after a note-only acknowledgement is NOT",
+    "alone a choice to proceed. A request for rating later or a concern about",
+    "ratings is not permission to proceed. A bare rating option is not refusal",
+    "to give a score. Genuine refusal still uses completionScope rating.",
+    "ratingChoiceEvidence must quote the EXACT current words selecting the",
+    "option, or be null. Preserve any new feedback in the same message.",
+    "The choice can still be pending after an acknowledgement-only bot reply;",
+    "do not forget it merely because question_we_asked now contains thanks.",
     "",
     "serviceScope must be exactly one of none, overall_feedback,",
     "continue_service_by_service, skip_remaining_services:",
@@ -1144,6 +1161,7 @@ async function interpretReply({ project, question, text, longForm = false }) {
     "  'landing page hangs mid-session'     -> true",
     "  'not happy with PPC'                 -> false",
     "",
+    fence("pending_rating_choice", ["overall_rating", "nps"].includes(pendingRatingChoice) ? pendingRatingChoice : "none"),
     fence("question_we_asked", question),
     "",
     fence("client_message", text)

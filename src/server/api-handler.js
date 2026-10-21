@@ -815,6 +815,26 @@ function settleClosingWindowFacts(state, before, facts = {}) {
 // Give an overall review room to finish before the first numeric question,
 // and welcome additional feedback when a rating is already pending. This is
 // only progression metadata: it never supplies facts or scores.
+function pendingRatingChoiceFor(before, text, interpretation = null) {
+  const pause = before.ratingFeedbackPause;
+  if (!pause || pendingQuestionTypeFor(before) !== "rating_feedback") return "none";
+  const normalize = (value) => String(value || "").toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, " ").trim();
+  const source = normalize(text);
+  // Exact option labels are unambiguous ONLY while this choice is pending.
+  // No substring matching: a report, concern or request mentioning a rating
+  // must still go through semantic interpretation and ordinary fact capture.
+  const label = source.replace(/[.!?]+$/, "").trim();
+  const labels = pause.ratingType === "nps"
+    ? ["rating", "score", "nps", "nps rating", "recommendation rating", "recommendation score"]
+    : ["rating", "score", "overall rating", "overall score", "csat", "csat rating"];
+  if (labels.includes(label)) return "proceed";
+  if (detectors.completionScopeFor(text, interpretation) === "rating") return "none";
+  const evidence = normalize(interpretation?.ratingChoiceEvidence);
+  return evidence && source.includes(evidence)
+    && ["proceed", "continue_feedback"].includes(interpretation?.ratingChoice)
+    ? interpretation.ratingChoice : "none";
+}
+
 function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpretation = null, project = null) {
   if (state.sessionType === "quick_checkin" || state.closingGraceExpiresAt
     || [STATES.CLOSING_GRACE, STATES.COMPLETED, STATES.HANDED_OFF, STATES.OPTED_OUT].includes(before.state)) {
@@ -841,6 +861,16 @@ function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpr
       state.anythingElseAnswered = Boolean(answered);
     }
     state.ratingFeedbackPause = null;
+    return;
+  }
+  const ratingChoice = pendingRatingChoiceFor(before, text, interpretation);
+  if (ratingChoice === "proceed") {
+    state.ratingFeedbackPause = null;
+    if (project && previousPause?.overallReview && state.sessionType !== "project_end") finishFeedbackQuestions(state, project);
+    return;
+  }
+  if (ratingChoice === "continue_feedback") {
+    state.ratingFeedbackPause = { ...previousPause, choiceAsked: true };
     return;
   }
   const completion = detectors.completionScopeFor(text, interpretation);
@@ -1093,7 +1123,12 @@ function closingGraceMessage(poc, conversationState = {}, context = {}, project 
   const ratingText = rating === null || rating === undefined
     ? "feedback"
     : `rating of ${rating} out of 10`;
+  const hasNewFacts = [context.captured, context.observations, context.concerns, context.appreciations]
+    .some((items) => items?.length);
   if (conversationState.reopenedDuringClosingGrace) {
+    if (!hasNewFacts) {
+      return "Thank you for confirming. Your feedback is recorded, and the original 10-minute window will close automatically.";
+    }
     const appreciation = (context.appreciations || [])[0];
     const subject = String(appreciation?.subject || "").trim();
     const natural = clientFacingAcknowledgement(context, project, { type: "close" });
@@ -1114,7 +1149,7 @@ function closingGraceMessage(poc, conversationState = {}, context = {}, project 
     ? "Thank you again for your honesty, time and trust. We appreciate the opportunity to have worked with you and wish you every success ahead."
     : "Thank you again for your honesty, time and trust. Please take care, and we look forward to connecting with you again next month.";
   const recorded = rating == null ? "Your feedback has" : `Your feedback and ${ratingText} have`;
-  const natural = clientFacingAcknowledgement(context, project, { type: "close" });
+  const natural = hasNewFacts ? clientFacingAcknowledgement(context, project, { type: "close" }) : "";
   const appreciation = appreciationAcknowledgement(context, project, conversationState);
   const acknowledgement = natural
     ? [natural, appreciation && !responseAcknowledgesAppreciation(natural) ? appreciation : ""].filter(Boolean).join(" ")
@@ -1407,7 +1442,10 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
   });
   const candidates = ratingQuestionIndex >= 0 ? messages.slice(ratingQuestionIndex + 1) : messages.slice(-12);
   let latest = null;
-  let ratingContext = "overall";
+  // Missing/partial history is not evidence that a bare number answered CSAT.
+  // The state machine already knows the current question; reconciliation may
+  // override it only from a real question in history or an explicit correction.
+  let ratingContext = ratingQuestionIndex >= 0 ? "overall" : "unknown";
   for (const message of candidates) {
     const body = String(message.body || "").trim();
     if (message.side === "srv") {
@@ -1454,7 +1492,7 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
     // A clearly worded CSAT/rating correction is authoritative even after the
     // NPS question. A bare number or a generic "take 5" inherits the NPS
     // question instead; neither may be pulled backward into overall CSAT.
-    if (ratingContext === "nps" && !explicitlyOverall && !explicitlyCsatCorrection) continue;
+    if (ratingContext !== "overall" && !explicitlyOverall && !explicitlyCsatCorrection) continue;
     const normalized = read.scale === 5 ? read.value * 2 : read.value;
     if (normalized < 0 || normalized > 10 || (read.scale && ![5, 10].includes(read.scale))) continue;
     latest = normalized;
@@ -3658,7 +3696,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     const read = await interpretReply({
       project,
       question: lastQuestion ? lastQuestion.body : "",
-      text
+      text,
+      pendingRatingChoice: stateBefore.ratingFeedbackPause?.ratingType || null
     });
 
     // If Gemini could not be reached, let the rules fall back to their keyword
@@ -3914,7 +3953,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       settleActionableFinalSweepFacts(
         turn.conversationState, stateBefore, conducted, text, interpretation, project
       );
-      if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) {
+      if (!stateBefore.closingGraceExpiresAt && ["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) {
         finishFeedbackQuestions(turn.conversationState, project, detectors.completionScopeFor(text, interpretation) === "conversation");
       }
       // First record only what THIS client reply answered. The checklist then
@@ -3944,7 +3983,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // omitted or mis-set. Validate the client-facing words as well. The hard
       // checklist still blocks genuinely wrong transitions (for example,
       // asking about PPC instead of offering the requested continue/skip choice).
-      const actionRejected = requiredAction.type === "rating_feedback"
+      const actionRejected = ["rating_feedback", "overall_rating", "nps"].includes(requiredAction.type)
         ? !messageMatchesRequiredAction(requiredAction, conducted.text)
         : !actionMatches(requiredAction, actualAction) && !messageMatchesRequiredAction(requiredAction, conducted.text);
       const requiredService = requiredAction.serviceKey
@@ -4134,7 +4173,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         interpretation,
         project
       );
-      if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) {
+      if (!stateBefore.closingGraceExpiresAt && ["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) {
         finishFeedbackQuestions(turn.conversationState, project, detectors.completionScopeFor(text, interpretation) === "conversation");
       }
       const answerMarkers = validatedAnswerMarkers(stateBefore, fallbackConducted, text, interpretation);

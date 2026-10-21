@@ -97,6 +97,31 @@ use a topic-aware fallback, without assuming that email or action has occurred.
 The one-hour reminder for overall feedback with an unanswered CSAT remains
 deferred. This update does not enable it or change existing n8n workflows.
 
+## Rating Choice and Completion Confirmations (21 October Follow-up)
+
+The pending feedback-to-rating choice is supplied to the latest-reply
+interpretation even when the last bot message was only an acknowledgement.
+Optional `ratingChoice` metadata needs a quote from the current reply and is
+used only while that choice is pending. It never supplies a score or a service
+fact. Exact whole-message option labels have a scoped outage fallback; merely
+mentioning a rating in a request or concern does not select it. Continuing
+feedback, refusing a score and volunteering a score retain their separate
+meanings. The response-writing pass cannot supply the client's choice.
+
+When the required action is a score question, a JSON question marker cannot
+substitute for asking the numeric question in the outgoing text. Closing a
+score does not add a second score-only thank-you. A completion-only reply
+during the existing window gets a short confirmation, not a claim that new
+feedback was added or a reclassification of previously finished service records.
+Scores and the original deadline remain unchanged. Partial transcript history
+cannot reclassify an unlabelled NPS number as overall CSAT during reconciliation.
+
+Replays and handler tests cover option labels, semantic alternatives, stalled
+acknowledgements, conflicting writer output, timeouts, missing history, continued
+feedback and completion in monthly and project-end flows. The broader fact
+merge remains removed; quick-check-in behaviour and the deferred one-hour
+reminder are not expanded. No new migration, secret or n8n workflow is required.
+
 ## Rollback Discipline
 
 Preserve the pre-change worktree and Git history before updating conversational
