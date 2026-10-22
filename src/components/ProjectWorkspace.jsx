@@ -9,6 +9,7 @@ import {
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill, TonePill } from "./Ui.jsx";
 import ReportDownloads from "./ReportDownloads.jsx";
+import { conversationReportSections } from "../lib/report-export";
 import ProjectConfiguration from "./ProjectConfiguration.jsx";
 import { hasPermission } from "../permissions";
 
@@ -30,6 +31,8 @@ const QUICK_CHECKIN_OUTCOMES = [
 function sessionCanBeStopped(session) {
   if (!session || session.completionStatus === "completed" || ["completed", "opted_out"].includes(session.status)) return false;
   const state = session.conversationState || {};
+  if (session.sessionType === "quick_checkin" && state.state === "quick_checkin_window"
+    && Date.parse(state.quickCheckinWindowExpiresAt || "") <= Date.now()) return false;
   return !["completed", "opted_out", "handed_off"].includes(state.state)
     && !state.reminderExhausted
     && !state.stoppedByAdmin;
@@ -76,6 +79,14 @@ function isSameText(a, b) {
   const right = normalise(b);
   if (!left || !right) return false;
   return left === right || left.includes(right) || right.includes(left);
+}
+
+function hasDistinctIssueDetail(issue) {
+  // A short title may be a prefix of the explanation. Only hide genuinely
+  // identical wording, never a longer detail that contains the title.
+  const normalize = (value) => String(value || "")
+    .replace(/^[^:]{1,40}:\s*/, "").toLowerCase().replace(/\s+/g, " ").trim();
+  return Boolean(issue.rootCause && normalize(issue.rootCause) !== normalize(issue.title));
 }
 
 function isSamePoint(a, b) {
@@ -1019,7 +1030,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
             status: issue.status || "open",
             service: issue.serviceName || "--",
             issue: issue.title,
-            rootCause: issue.rootCause && !isSameText(issue.rootCause, issue.title) ? issue.rootCause : "--",
+            rootCause: hasDistinctIssueDetail(issue) ? issue.rootCause : "--",
             severity: issue.severity || "--",
             raisedBy: pocNameById.get(issue.clientPocId) || "Unknown POC",
             raised: formatDateTime(issue.createdAt),
@@ -1061,33 +1072,8 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
             detail: item.detail
           }))
         },
-        {
-          title: "Conversation transcripts",
-          sheetName: "Conversations",
-          note: "Saved WhatsApp messages for every POC session matching the current cycle, date and POC filters.",
-          columns: [
-            { key: "cycle", label: "Cycle", width: 20 },
-            { key: "poc", label: "POC", width: 22 },
-            { key: "time", label: "Time", width: 20 },
-            { key: "side", label: "Side", width: 12 },
-            { key: "speaker", label: "Speaker", width: 24 },
-            { key: "message", label: "Message", width: 85 },
-            { key: "interpretation", label: "Interpretation", width: 24 }
-          ],
-          rows: conversationGroups.flatMap(({ session, messages: sessionMessages }) => sessionMessages.map((message) => ({
-            cycle: formatCycleType(session.reportCycle.cycleType, project.feedbackIntervalDays),
-            poc: session.pocName || pocNameById.get(session.clientPocId) || "--",
-            time: formatDateTime(message.createdAt),
-            side: message.side === "client" ? "Client" : "SRV",
-            speaker: message.speaker || "Unknown",
-            message: message.body || "",
-            interpretation: [
-              message.metadata?.interpretedIntent ? `Read as ${message.metadata.interpretedIntent}` : "",
-              message.metadata?.manualOutbound ? "Sent manually" : "",
-              message.metadata?.fallbackReason || ""
-            ].filter(Boolean).join(" · ") || "--"
-          })))
-        }
+        ...conversationReportSections(conversationGroups, { pocNameById,
+          cycleLabel: (type) => formatCycleType(type, project.feedbackIntervalDays), dateLabel: formatDateTime })
       ]
     };
   }
@@ -1704,7 +1690,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
               </div>
               {/* The fallback path writes the same text into both fields. Showing
                   it twice reads as a rendering bug rather than detail. */}
-              {issue.rootCause && !isSameText(issue.rootCause, issue.title) ? (
+              {hasDistinctIssueDetail(issue) ? (
                 <p>{issue.rootCause}</p>
               ) : null}
               <div className="issue-meta">
@@ -1787,6 +1773,12 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
                 <span>{pocNameById.get(item.clientPocId) || "Unknown POC"} · {formatDate(item.createdAt)}</span>
               </div>
               <p>{item.detail}</p>
+              {item.sourceText && item.sourceText !== item.detail ? (
+                <details>
+                  <summary>Original Client Message</summary>
+                  <p>{item.sourceText}</p>
+                </details>
+              ) : null}
             </div>
           ))}
           {!observations.length ? (

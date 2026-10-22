@@ -5,6 +5,7 @@ const { MAX_REMINDERS, nextQuickCheckinAt } = require("../lib/supabase-store");
 const { processWhatsAppReply, getConversationState, buildChecklist, applyCaptured, applyServiceScopeDecision, applyTurnProgress, finishFeedbackQuestions, isEverythingCovered, soundsLikeFarewell, isMoveOnReply, overallRatingQuestion, projectEndReviewQuestion, buildAnalysis, detectors, STATES, GUARDRAILS, CLOSING_GRACE_MS, DEFERRAL_REPLY, SERVICE_SCOPE_DECISIONS, SERVICE_SCOPE_QUESTION } = require("../lib/whatsapp-state-machine");
 const { offScriptReply, reviewIssues, readTone, readNps, interpretReply, conductTurn, predictSatisfaction, cleanRepeatedText, extractExplicitAppreciations, hasSatisfactionEvidence, containsClaim, ALERT_CONFIDENCE_THRESHOLD } = require("../lib/gemini");
 const { emitAutomation } = require("../lib/n8n");
+const { sendIdleRatingPrompts, ownsPendingRatingReminder } = require("../lib/idle-rating-prompt");
 const { importAdminWorkbook } = require("../lib/admin-import");
 const { buildCsatImportWorkbook } = require("../lib/csat-workbook-template");
 const { recipientList, sendEmail, smtpConfigured } = require("../lib/email");
@@ -494,10 +495,12 @@ function appreciationAcknowledgement(context = {}, project = {}, conversationSta
     .filter(Boolean))];
   if (items.length === 1 && explicitSubjects.length === 1) {
     const subject = explicitSubjects[0];
-    const target = /\b(?:team|department|manager|coordinator|executive|lead|head)$/i.test(subject)
-      ? `the ${subject}`
-      : subject;
-    return `Thank you for appreciating ${target}. We will share your kind words with them.`;
+    if (/\b(?:team|department|manager|coordinator|executive|lead|head)$/i.test(subject)) {
+      return `Thank you for appreciating the ${subject}. We will share your kind words with them.`;
+    }
+    // A subject may be an outcome or the overall experience, not a person.
+    // Do not turn an extracted topic into a fictional team with "them".
+    return `Thank you for your kind words about ${subject}.`;
   }
   if (serviceNames.length === 1) {
     return `Thank you for appreciating the ${serviceNames[0]} team. We will share your kind words with them.`;
@@ -805,9 +808,9 @@ function settleClosingWindowFacts(state, before, facts = {}) {
     }
   }
   state.pendingServiceKey = unclear?.serviceKey || null;
-  const observation = (facts.observations || []).find((item) => item.needsFollowUp === true && item.kind !== "appreciation");
+  const observation = (facts.observations || []).find(observationNeedsReason);
   if (observation && !Number(state.observationReasonAskCounts?.[String(observation.topic).toLowerCase()] || 0)) {
-    state.pendingObservation = { topic: observation.topic, stage: "reason", responseKind: observation.kind === "request" ? "request" : "feedback" };
+    state.pendingObservation = { topic: observation.topic, stage: "reason", responseKind: "feedback", sentiment: observation.sentiment };
   }
   if (!(facts.appreciations || []).length) state.awaitingAppreciationPersonName = null;
 }
@@ -849,6 +852,10 @@ function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpr
     && (state.projectEndReviewCaptured
       || ((state.generalFeedbackText || state.generalConcernText) && state.serviceScopeStatus !== "service_by_service")
       || (project && buildChecklist(state, project).overallRatingStillNeeded));
+  // Explicitly arm only a real, newly processed review; never backfill old
+  // conversations or infer substantive feedback from an acknowledgement.
+  if (firstOverallReview && (suppliedFacts || String(state.generalFeedbackText || "").includes(String(text).trim()))
+    && String(text).trim() && !factFreeControlReply(text, interpretation)) state.idleRatingPromptEligible = true;
   const ratingType = previousPause?.ratingType
     || (["overall_rating", "nps"].includes(pending) ? pending : null)
     || (firstOverallReview ? "overall_rating" : null);
@@ -871,6 +878,8 @@ function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpr
     return;
   }
   if (ratingChoice === "continue_feedback") {
+    // Let consecutive feedback messages flow. The one-time inactivity prompt
+    // supplies a way forward without asking the same choice after each point.
     state.ratingFeedbackPause = { ...previousPause, choiceAsked: true };
     return;
   }
@@ -979,7 +988,10 @@ function baseFallbackForAction(action, conversationState, project, context = {})
   if (action.type === "service") return `How has ${action.name} been for you?`;
   if (action.type === "general_issue_detail") return "Of course — please tell me what happened.";
   if (action.type === "observation_reason") {
-    return `I am sorry to hear that. What specifically happened with ${action.topic}?`;
+    const pending = conversationState.pendingObservation;
+    if (pending?.responseKind === "request") return "Could you share a little more about your request?";
+    if (pending?.sentiment !== "negative") return "Could you share a little more about that point?";
+    return "I am sorry to hear about your concern. Could you share what needs attention?";
   }
   if (action.type === "observation_followup") {
     if (conversationState.pendingObservation?.acknowledged) {
@@ -1055,7 +1067,8 @@ function requestAcknowledgement(context = {}) {
   const positiveLead = requests.some((item) => item.positiveContext === "Social Media")
     ? "Glad to hear that social media is working well. " : "";
   const topics = [...new Set(requests.map((item) => String(item.topic || "").trim())
-    .filter((topic) => topic && !internalSummaryLanguage(topic)))].slice(0, 3);
+    .filter((topic) => topic && !internalSummaryLanguage(topic)
+      && !/^(?:client request|(?:management|general|client) feedback)$/i.test(topic)))].slice(0, 3);
   return `${positiveLead}I have recorded your request${topics.length ? ` regarding ${topics.join("; ")}` : ""} for review by the relevant team.`;
 }
 
@@ -1137,12 +1150,9 @@ function closingGraceMessage(poc, conversationState = {}, context = {}, project 
       return "Thank you for confirming. Your feedback is recorded, and the original 10-minute window will close automatically.";
     }
     const appreciation = (context.appreciations || [])[0];
-    const subject = String(appreciation?.subject || "").trim();
     const natural = clientFacingAcknowledgement(context, project, { type: "close" });
     const acknowledgement = appreciation
-      ? /^client appreciation$/i.test(subject)
-        ? "Thank you for sharing that appreciation."
-        : `Thank you for appreciating ${/\b(?:team|department)$/i.test(subject) ? `the ${subject}` : subject}.`
+      ? appreciationAcknowledgement(context, project, conversationState)
       : "Thank you.";
     const recorded = appreciation && !natural
       ? "We will share your kind words with the relevant team, and I have added your appreciation to your recorded feedback."
@@ -1595,6 +1605,13 @@ function validatedAnswerMarkers(stateBefore, conducted, text, interpretation = n
   };
 }
 
+function observationNeedsReason(item) {
+  // The extraction contract reserves needsFollowUp for an unexplained
+  // negative point. A neutral request is not missing a complaint explanation.
+  return item.needsFollowUp === true && item.sentiment === "negative"
+    && item.kind !== "request" && item.kind !== "appreciation";
+}
+
 function applyConversationInterruption(conversationState, stateBefore, interpretation, conducted, text) {
   const pendingType = pendingQuestionTypeFor(stateBefore);
   const explicitlyFinished = isMoveOnReply(text)
@@ -1627,11 +1644,12 @@ function applyConversationInterruption(conversationState, stateBefore, interpret
     conversationState.pendingGeneralIssue = false;
     const topicKey = String(latest.topic || "").toLowerCase();
     const reasonAlreadyAsked = Number(conversationState.observationReasonAskCounts?.[topicKey] || 0) >= 1;
-    conversationState.pendingObservation = latest.needsFollowUp && !reasonAlreadyAsked ? {
+    conversationState.pendingObservation = observationNeedsReason(latest) && !reasonAlreadyAsked ? {
       topic: latest.topic,
       stage: latest.needsFollowUp ? "reason" : "followup",
       acknowledged: false,
       responseKind: latest.kind === "request" ? "request" : "feedback",
+      sentiment: latest.sentiment,
       positiveContext: latest.positiveContext || null
     } : null;
   } else if (
@@ -1845,6 +1863,10 @@ function positiveSocialMediaContext(text) {
 }
 
 function observationFromInterpretation(interpretation, text) {
+  // Structured current-message facts already carry kind, sentiment and
+  // clarity. A second whole-message guess can contradict them (a visit
+  // request became an unexplained "Management Feedback" complaint).
+  if ((interpretation?.observations || []).some((item) => groundModelFact("observation", item, text))) return null;
   const explicitRequest = isExplicitActionRequest(text);
   const interpretedObservation = interpretation?.intent === "feedback"
     && interpretation.isObservation === true;
@@ -1955,7 +1977,8 @@ function fallbackGeneralConcernObservation(
 
 function responseAcknowledgesAppreciation(message) {
   const source = String(message || "");
-  return /\b(?:thank(?:s| you)?(?: for)?|appreciat(?:e|ed|ing|ion)|kind words|special mention|glad to hear)\b/i.test(source)
+  return /\b(?:glad|pleased|happy|delighted) to (?:hear|know|learn)\b/i.test(source)
+    || /\b(?:thank(?:s| you)?(?: for)?|appreciat(?:e|ed|ing|ion)|kind words|special mention|glad to hear)\b/i.test(source)
     && /\b(?:share|pass|convey|team|person|people|them|him|her|support|work|words|mention|feedback)\b/i.test(source);
 }
 
@@ -2052,7 +2075,7 @@ function groundedObservationTopic(text, item = {}) {
     || topicOverlap.shared >= 2
     || (topicOverlap.shared >= 1 && topicOverlap.ratio >= 0.5)
   )) return candidate;
-  return "Management Feedback";
+  return item.kind === "request" ? "Client Request" : "Management Feedback";
 }
 
 function groundModelFact(kind, item, text, project = {}) {
@@ -2233,6 +2256,7 @@ function enrichConductedWithDeterministicFacts(
   const mergeObservation = (candidate) => {
     if (!candidate || !String(candidate.detail || "").trim()) return;
     const existing = conducted.observations.find((item) => {
+      if ((item.kind === "request") !== (candidate.kind === "request")) return false;
       const overlap = contentOverlap(item.detail, candidate.detail);
       return (item.topic === candidate.topic && overlap.shared >= 2)
         || overlap.shared >= 5
@@ -2305,7 +2329,9 @@ function enrichConductedWithDeterministicFacts(
       .filter(Boolean)
   };
 
-  const deterministicObservation = observationFromInterpretation(groundedInterpretation, text)
+  // Only fill a missing observation; do not re-interpret structured points
+  // or change their sentiment based on a second whole-message fallback.
+  const deterministicObservation = conducted.observations.length ? null : observationFromInterpretation(groundedInterpretation, text)
     || fallbackDeliveryObservation(text)
     || (protectSubstantiveConcern
       ? fallbackGeneralConcernObservation(text, groundedInterpretation, {
@@ -2316,28 +2342,7 @@ function enrichConductedWithDeterministicFacts(
         })
       : null);
   if (deterministicObservation) {
-    const existing = conducted.observations.find((item) => {
-      if (item.kind === "appreciation" || item.sentiment === "positive") return false;
-      const overlap = contentOverlap(item.detail, deterministicObservation.detail);
-      return item.fallbackKind === deterministicObservation.fallbackKind
-        || (item.topic === deterministicObservation.topic && overlap.shared >= 2)
-        || overlap.shared >= 5
-        || overlap.ratio >= 0.55;
-    });
-    if (existing) {
-      // Retain Gemini's richer wording while tagging the point so the safe
-      // acknowledgement can address this concern specifically.
-      existing.fallbackKind = deterministicObservation.fallbackKind;
-      if (deterministicObservation.fallbackKind === "delivery_process") {
-        existing.topic = deterministicObservation.topic;
-      }
-      existing.sentiment = "negative";
-      existing.severity = existing.severity || deterministicObservation.severity;
-      if (deterministicObservation.needsFollowUp === false) existing.needsFollowUp = false;
-      if (!String(existing.detail || "").trim()) existing.detail = deterministicObservation.detail;
-    } else {
-      conducted.observations.push(deterministicObservation);
-    }
+    conducted.observations.push(deterministicObservation);
   }
 
   for (const appreciation of fallbackRoleAppreciations(text, project)) {
@@ -2389,10 +2394,10 @@ function canonicalObservationTopic(observation, text = "") {
   const grounded = groundedObservationTopic(text, observation);
   const classified = explicitRequestTopic(observation?.detail)
     || classify(observation?.detail)
-    || (grounded !== "Management Feedback" ? grounded : null)
+    || (!["Management Feedback", "Client Request"].includes(grounded) ? grounded : null)
     || unambiguousStrongTopic;
   if (classified) return classified;
-  return "Management Feedback";
+  return observation?.kind === "request" ? "Client Request" : "Management Feedback";
 }
 
 /**
@@ -3252,6 +3257,32 @@ async function completeAutomationClaim(store, claim, event) {
   }
 }
 
+async function processIdleRatingPrompts(store, nowIso) {
+  // Reuse Workflow 15's five-minute tick and Workflow 9 as a fallback.
+  // Missing outbound configuration must not consume a one-time attempt.
+  if (!process.env.N8N_MANUAL_MESSAGE_WEBHOOK) return { sent: [], skipped: [], failed: [], configured: false };
+  return sendIdleRatingPrompts({
+    store, nowIso,
+    messagingEnabled: () => whatsappMessagingEnabled(store),
+    send: (payload) => emitAutomation("manual_whatsapp_message", payload),
+    question: (sessionType) => `Thank you for sharing your feedback. ${overallRatingQuestion({ sessionType, mentionedServices: {} })}`,
+    prepareState: (session, project, text, attemptedAt) => {
+      const state = JSON.parse(JSON.stringify(session.conversationState || {}));
+      finishFeedbackQuestions(state, project);
+      state.ratingFeedbackPause = null;
+      state.pendingGeneralIssue = null;
+      state.pendingObservation = null;
+      state.pendingServiceKey = null;
+      state.pendingQuestionType = "overall_rating";
+      state.state = STATES.WAITING_FOR_OVERALL_RATING;
+      state.overallRatingAsked = true;
+      state.lastQuestionAsked = text;
+      state.idleRatingPromptAttemptedAt = attemptedAt;
+      return state;
+    }
+  });
+}
+
 function claimedInactiveFinalSweepState(session, nowIso) {
   const state = { ...(session.conversationState || {}) };
   if (numericScore(state.overallRating) === null && session.csatSource === "stated") {
@@ -3511,10 +3542,9 @@ async function analyzeTimedOutPartialSession({
     service.ratingSource = service.rating === null || service.rating === undefined ? "predicted" : "stated";
   }
 
-  analysis.observations = mergeObservations(
-    analysis.observations || [],
-    predicted.observations || []
-  );
+  // Transcript scoring enriches scores, not the feedback ledger. The client's
+  // points were captured on their originating turns; inserting paraphrases
+  // here would duplicate them on Stop, reminder closure or scoring retries.
 
   if (session.sessionType === "project_end") {
     if (analysis.npsScore !== null && analysis.npsScore !== undefined) {
@@ -3687,6 +3717,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       sessionId: session.id
     });
   }
+
+  if (typeof store.noteClientResponseStarted === "function") await store.noteClientResponseStarted(session.id);
 
   // Refresh after the atomic insert. When the client sends consecutive
   // bubbles, the latest invocation processes them as one thought and the
@@ -4426,12 +4458,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
           : "stated";
       }
 
-      // Billing, a named person, a process — real feedback with no owner and
-      // no SLA. Previously dropped in silence.
-      turn.analysis.observations = mergeObservations(
-        turn.analysis.observations || [],
-        predicted.observations || []
-      );
+      // Keep the current turn's grounded observations. The whole-conversation
+      // scoring pass is not a new source of feedback records, especially when
+      // this block runs again for additions inside the correction window.
 
       // NPS is a project-end question only, and it is derived from the whole
       // conversation rather than a single answer. Marked as derived so the UI
@@ -4547,7 +4576,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     // about a client who was still typing. They go out with the cycle summary,
     // once, alongside everything else that cycle produced.
     if ((turn.analysis.observations || []).length && typeof store.recordObservations === "function") {
-      await store.recordObservations(session, turn.analysis.observations);
+      await store.recordObservations(session, turn.analysis.observations, {
+        sourceMessage: { ...clientMessage, body: text }
+      });
     }
     control._alertNeeded = alertNeeded;
   } else {
@@ -4761,6 +4792,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 
 async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clientPocIds, scheduleKey, automatic = false }) {
   if (!await whatsappMessagingEnabled(store)) throw new Error("WhatsApp messaging is paused");
+  await expireQuickCheckinsAndNotify(store, new Date().toISOString(), baseUrl);
   const result = await store.createCycle(projectKey, {
     cycleType,
     channel: "whatsapp",
@@ -4792,6 +4824,9 @@ async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clien
 }
 
 async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null) {
+  if (typeof store.expireDueQuickCheckins === "function") {
+    await store.expireDueQuickCheckins(new Date().toISOString(), { windowsOnly: true });
+  }
   const projects = await store.listProjects();
   // `null` means no caller scope was supplied. An explicitly supplied empty
   // array means the active UI scope contains no projects and must return none,
@@ -5789,6 +5824,9 @@ async function handleApiRequest(request) {
     }
 
     // Guard against two open cycles of the same type for one project.
+    if (typeof store.expireDueQuickCheckins === "function") {
+      await store.expireDueQuickCheckins(new Date().toISOString(), { windowsOnly: true });
+    }
     if (typeof store.hasOpenCycle === "function" && await store.hasOpenCycle(project.id, cycleType)) {
       return error(409, "An open cycle of this type already exists for the project", {
         projectKey,
@@ -6051,21 +6089,17 @@ async function handleApiRequest(request) {
       riskLevel: session.riskLevel || (
         predicted.overall.score < 5 ? "High" : predicted.overall.score < 7 ? "Watch" : "Low"
       ),
-      observations: predicted.observations
+      observations: []
     };
 
     if (typeof store.applyInterimAnalysis !== "function") {
       return error(503, "Could not score this conversation", "The data provider does not support non-terminal scoring.");
     }
     const updated = await store.applyInterimAnalysis(sessionId, analysis);
-    if ((predicted.observations || []).length && typeof store.recordObservations === "function") {
-      await store.recordObservations(session, predicted.observations);
-    }
-
     return json(200, {
       session: updated,
       predicted: predicted.overall,
-      observations: predicted.observations,
+      observations: [],
       alreadyScored: false,
       sessionRemainsOpen: !["completed", "opted_out"].includes(updated.status),
       sessionStatusUnchanged: true
@@ -6303,6 +6337,7 @@ async function handleApiRequest(request) {
     const now = body.now ? new Date(body.now) : new Date();
     if (Number.isNaN(now.getTime())) return error(400, "Invalid automation time");
     const nowIso = now.toISOString();
+    const ratingPrompts = await processIdleRatingPrompts(store, nowIso);
     const closed = await finalizeFeedbackWindowsAndNotify(store, nowIso, baseUrl);
     if (!await whatsappMessagingEnabled(store)) {
       return json(200, { paused: true, closed, sent: [], closedWithoutMessage: [], duplicates: [], failed: [], ignored: 0 });
@@ -6507,6 +6542,7 @@ async function handleApiRequest(request) {
 
     return json(200, {
       now: nowIso,
+      ratingPrompts,
       inactivityHours: INACTIVE_FINAL_SWEEP_MS / (60 * 60 * 1000),
       sent,
       closedWithoutMessage,
@@ -6621,6 +6657,7 @@ async function handleApiRequest(request) {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
     const nowIso = body.now || new Date().toISOString();
     if (!Number.isFinite(Date.parse(nowIso))) return error(400, "Invalid automation time");
+    const ratingPrompts = await processIdleRatingPrompts(store, nowIso);
     await finalizeFeedbackWindowsAndNotify(store, nowIso, baseUrl);
     const expiredQuickCheckins = await expireQuickCheckinsAndNotify(store, nowIso, baseUrl);
     if (!await whatsappMessagingEnabled(store)) {
@@ -6633,6 +6670,8 @@ async function handleApiRequest(request) {
     const deferredClosures = [];
 
     for (const target of targets) {
+      const latestReminderSession = await store.getSession(target.session.id) || target.session;
+      if (ownsPendingRatingReminder(latestReminderSession)) continue;
       // Opted-out or handed-off POCs are never re-pinged.
       const conversationState = target.session.conversationState || {};
       if (conversationState.optedOut || ["opted_out", "handed_off"].includes(conversationState.state)) {
@@ -6777,6 +6816,7 @@ async function handleApiRequest(request) {
 
     return json(200, {
       reminders,
+      ratingPrompts,
       closed,
       deferredClosures,
       expiredQuickCheckins: expiredQuickCheckins.expired,
@@ -8575,6 +8615,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     const recorded = await store.applyQuickCheckinResponse(session.id, {
       outcome: "feedback_shared",
       detail: text,
+      sourceMessage: clientMessage,
       interpretation
     });
     if (recorded.sentiment !== "positive") {

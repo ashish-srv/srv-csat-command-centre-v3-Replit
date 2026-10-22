@@ -255,8 +255,8 @@ const store = {
     };
     return store._session;
   },
-  recordObservations: async (session, observations) => {
-    calls.observations.push({ sessionId: session.id, observations });
+  recordObservations: async (session, observations, options) => {
+    calls.observations.push({ sessionId: session.id, observations, options });
   },
   finalizeReminderLoop: async () => {
     const partial = store._session.completionStatus === "partial";
@@ -3860,6 +3860,10 @@ async function scenario(name, fn) {
 
   await scenario("workspace loads independent project data together and retains inactive POCs", async () => {
     const workspaceStore = Object.create(SupabaseStore.prototype);
+    workspaceStore.expireDueQuickCheckins = async (_now, options) => {
+      assert.deepStrictEqual(options, { windowsOnly: true, projectId: project.id });
+      return { expired: 0, sessions: [] };
+    };
     const started = new Set();
     const read = async (name, result) => {
       started.add(name);
@@ -3887,6 +3891,7 @@ async function scenario(name, fn) {
 
   await scenario("workspace refresh repairs an open cycle whose sessions are complete", async () => {
     const repairStore = Object.create(SupabaseStore.prototype);
+    repairStore.expireDueQuickCheckins = async () => ({ expired: 0, sessions: [] });
     const openCycle = { id: "cyc_stale", projectId: "prj_1", status: "open" };
     const closedCycle = { ...openCycle, status: "closed", csatScore: 7, pocResponded: 1, pocTotal: 1 };
     const completedSession = {
@@ -3922,6 +3927,7 @@ async function scenario(name, fn) {
 
   await scenario("workspace refresh repairs a legacy project-end lock after its cycle was already deleted", async () => {
     const repairStore = Object.create(SupabaseStore.prototype);
+    repairStore.expireDueQuickCheckins = async () => ({ expired: 0, sessions: [] });
     const requests = [];
     const lockedAt = "2026-10-01T08:00:00.000Z";
     repairStore.getProject = async () => ({
@@ -3957,6 +3963,7 @@ async function scenario(name, fn) {
 
   await scenario("workspace refresh keeps the project-end lock while a project-end cycle remains", async () => {
     const repairStore = Object.create(SupabaseStore.prototype);
+    repairStore.expireDueQuickCheckins = async () => ({ expired: 0, sessions: [] });
     const requests = [];
     const lockedAt = "2026-10-01T08:00:00.000Z";
     repairStore.getProject = async () => ({
@@ -6048,7 +6055,8 @@ async function scenario(name, fn) {
           assert.match(result.whatsappReplyText, /Would you like to add anything else, or shall we move to the overall rating\?$/);
           assert.doesNotMatch(result.whatsappReplyText, /out of 10|on a scale/i);
         } else if (index === 1) {
-          assert.doesNotMatch(result.whatsappReplyText, /\?|out of 10|on a scale/i);
+          assert.doesNotMatch(result.whatsappReplyText, /anything else.*overall rating\?$/i);
+          assert.doesNotMatch(result.whatsappReplyText, /out of 10|on a scale/i);
           assert.doesNotMatch(result.whatsappReplyText, /appreciat|kind words/i, "never available is a complaint, not praise");
         } else assert.match(result.whatsappReplyText, /overall.*out of 10/i);
         assert.doesNotMatch(result.whatsappReplyText, /the client|I have recorded:/i);
@@ -6399,6 +6407,127 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("Pooja project-end review progresses without manual intervention and keeps a visit request neutral", async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+    const priorSession = store._session, priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    calls.messages.length = 0;
+    let read = {}, writer = {};
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options?.body || "{}").input || "";
+      const payload = input.includes("Task: interpret ONE client reply") ? read
+        : input.includes("Task: verify ONLY the client's survey-control instruction") ? { decision: read.completionScope || "none", evidence: read.completionEvidence || null }
+        : /predict how satisfied/i.test(input) ? { overall: { score: 8, confidence: 0.9, reasoning: "Fixture", signals: [] }, services: [], observations: [] }
+        : writer;
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(payload) }) };
+    };
+    store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+      status: "started", completionStatus: "no_response", sessionType: "project_end", conversationState: {
+        state: "waiting_for_open_feedback", sessionType: "project_end", pendingQuestionType: "project_end_review", projectEndReviewAsked: true
+      } };
+    let index = 0;
+    const send = async (text, extraction, responseWriter = { message: "Thank you for sharing that." }) => {
+      read = { intent: "feedback", sentiment: "neutral", rating: null, observations: [], appreciations: [], serviceFeedback: [], concerns: [], ...extraction };
+      writer = responseWriter;
+      const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text, providerMessageId: `wamid.pooja-replay-${index++}` });
+      assert.equal(response.statusCode, 201, response.body);
+      return JSON.parse(response.body);
+    };
+    try {
+      const praise = "Overall engagement was good…we could meet our registration nos….";
+      const acknowledgement = "Thank you for sharing your experience. We are glad to hear that the overall engagement went well and that the registration numbers were met.";
+      let result = await send(praise, { sentiment: "positive", serviceScope: "overall_feedback", acknowledgement,
+        appreciations: [{ subject: "Overall Engagement", detail: praise }] });
+      assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+      assert.doesNotMatch(result.whatsappReplyText, /appreciating Overall Engagement|kind words with them/i);
+      assert.match(result.whatsappReplyText, /anything else.*overall rating\?/i);
+
+      const concern = "Yes would request the deliverables to be provided in shorter time. Currently it seems the SRV Spoc assigned handles other campaigns and this slows down overall response time or leads to minor mistakes";
+      result = await send(concern, { sentiment: "negative", isObservation: true, explainsProblem: true,
+        acknowledgement: "I have noted your concern about delivery turnaround, slow responses and minor mistakes, and your impression that the SPOC may be handling other campaigns.",
+        observations: [{ topic: "Delivery Turnaround", detail: concern, sentiment: "negative", needsFollowUp: false }] });
+      assert.match(result.whatsappReplyText, /turnaround.*slow responses.*minor mistakes/i);
+      assert.doesNotMatch(result.whatsappReplyText, /anything else.*overall rating\?/i);
+      assert.equal(result.session.conversationState.idleRatingPromptEligible, true);
+      assert.doesNotMatch(result.whatsappReplyText, /what specifically happened|Senior Involvement/i);
+      result = await send("rating", { intent: "affirmative" });
+      assert.match(result.whatsappReplyText, /overall.*out of 10/i);
+      result = await send("8", { intent: "rating", rating: 8 });
+      assert.equal(result.session.conversationState.overallRating, 8);
+      assert.match(result.whatsappReplyText, /recommend/i);
+      result = await send("9", { intent: "rating", rating: 9 });
+      assert.equal(result.session.conversationState.overallRating, 8);
+      assert.equal(result.session.conversationState.npsScore, 9);
+      assert.match(result.whatsappReplyText, /Directors/i);
+      result = await send("No nothing thank u", { intent: "negative", completionScope: "feedback", completionEvidence: "No nothing" });
+      assert.equal(result.state, "closing_grace", result.whatsappReplyText);
+      const deadline = result.session.conversationState.closingGraceExpiresAt;
+
+      const visit = "I wish to conduct a small visit with my students to your office and if ull can guide them on AI for branding";
+      const beforeRecords = calls.observations.length;
+      result = await send(visit, { isObservation: true, explainsProblem: false,
+        acknowledgement: "I have noted your request for a student office visit and guidance on AI for branding for review by the relevant team.",
+        observations: [{ topic: "Office Visit & AI Guidance Request", detail: visit, sentiment: "neutral", kind: "request", needsFollowUp: false }] },
+      { message: "I am sorry to hear that. What specifically happened with Management Feedback?", askedObservationReasonTopic: "Management Feedback" });
+      assert.equal(result.state, "closing_grace", result.whatsappReplyText);
+      assert.equal(result.session.conversationState.pendingObservation, null);
+      assert.doesNotMatch(result.whatsappReplyText, /sorry|what specifically|Management Feedback|anything else about|confirmed|notified/i);
+      assert.match(result.whatsappReplyText, /student office visit.*AI for branding/i);
+      const entries = calls.observations.slice(beforeRecords).flatMap((record) => record.observations || []);
+      assert.equal(entries.filter((item) => item.kind !== "appreciation").length, 1, JSON.stringify(entries));
+      assert.equal(entries[0].sentiment, "neutral");
+      assert.equal(entries[0].kind, "request");
+
+      const clarification = "No just a field visit like an industry visit early next year";
+      result = await send(clarification, { isObservation: true, explainsProblem: false,
+        acknowledgement: "Thank you for clarifying that you are looking for an industry visit early next year. I have noted this with your request.",
+        observations: [{ topic: "Industry Visit Timing", detail: clarification, sentiment: "neutral", kind: "request", needsFollowUp: false }] });
+      assert.equal(result.state, "closing_grace", result.whatsappReplyText);
+      assert.equal(result.session.conversationState.closingGraceExpiresAt, deadline);
+      assert.equal(result.session.conversationState.overallRating, 8);
+      assert.equal(result.session.conversationState.npsScore, 9);
+      assert.doesNotMatch(result.whatsappReplyText, /sorry|what specifically|Management Feedback|anything else about/i);
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
+  await scenario("Structured requests and mixed concerns retain their own meaning without generic fallback duplicates", async () => {
+    const { conversationFlow: flow } = require("../src/server/api-handler");
+    const requests = [
+      "Our students would love to see how your agency operates.",
+      "An introduction to AI-assisted branding for our faculty would be welcome.",
+      "May we have access to the source artwork?",
+      "I wish to explore an internship collaboration next summer.",
+      "No, just an industry visit early next year."
+    ];
+    for (const text of requests) {
+      const read = { intent: "feedback", sentiment: "neutral", isObservation: true, explainsProblem: false,
+        observations: [{ topic: "Client Request", detail: text, sentiment: "neutral", kind: "request", needsFollowUp: false }] };
+      const facts = flow.enrichConductedWithDeterministicFacts({}, text, project, read, { protectSubstantiveConcern: true });
+      assert.equal(facts.observations.length, 1, JSON.stringify(facts));
+      assert.equal(facts.observations[0].kind, "request");
+      assert.equal(facts.observations[0].sentiment, "neutral", JSON.stringify(facts));
+      assert.equal(flow.observationFromInterpretation(read, text), null);
+    }
+    const text = "I wish to arrange a student visit. The invoice is incorrect.";
+    const read = { intent: "feedback", sentiment: "negative", isObservation: true, explainsProblem: false,
+      observations: [
+        { topic: "Student Visit", detail: "I wish to arrange a student visit", sentiment: "neutral", kind: "request", needsFollowUp: true },
+        { topic: "Billing", detail: "The invoice is incorrect", sentiment: "negative", kind: "feedback", needsFollowUp: true }
+      ] };
+    const facts = flow.enrichConductedWithDeterministicFacts({}, text, project, read, { protectSubstantiveConcern: true });
+    assert.equal(facts.observations.length, 2, JSON.stringify(facts));
+    assert.equal(facts.observations[0].sentiment, "neutral");
+    const before = { closingGraceExpiresAt: new Date(Date.now() + 600000).toISOString(), overallRating: 8, npsScore: 9 };
+    const state = { ...before, mentionedServices: {} };
+    flow.settleActionableFinalSweepFacts(state, before, facts, text, read, project);
+    assert.equal(state.pendingObservation.topic, "Billing");
+    assert.equal(state.closingGraceExpiresAt, before.closingGraceExpiresAt);
+  });
+
   for (const type of ["pulse", "project_end"]) for (const timeout of [false, true]) {
     await scenario(`${type} closing additions use current semantic points with ${timeout ? "a writer timeout" : "conflicting writer facts"}`, async () => {
       const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
@@ -6419,6 +6548,8 @@ async function scenario(name, fn) {
       const variants = [
         ["there should be weekly meeting with team", "Weekly Team Meetings", "I have noted your request for weekly meetings with the team.", "request"],
         ["Could you enable access to our shared dashboard?", "Dashboard Access", "I have noted your request for access to the shared dashboard.", "request"],
+        ["Our students would love to see how your agency operates", "Student Agency Visit", "I have noted your interest in a student visit to our agency.", "request"],
+        ["An introduction to AI-assisted branding for our faculty would be welcome", "Faculty AI Introduction", "I have noted your request for an introduction to AI-assisted branding for your faculty.", "request"],
         ["The form freezes when we submit it", "Form Submission Freezes", "I am sorry the form freezes when you submit it. I have noted this concern for review.", "feedback"],
         ["The team explains the reports very clearly", "Reporting Team", "Thank you for appreciating how clearly the team explains your reports.", "appreciation"]
       ];
@@ -6427,6 +6558,12 @@ async function scenario(name, fn) {
         const input = JSON.parse(options?.body || "{}").input || "";
         if (input.includes("Task: interpret ONE client reply")) return {
           ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(extraction) })
+        };
+        if (/predict how satisfied/i.test(input)) return {
+          ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+            overall: { score: 7, confidence: 0.9, reasoning: "Fixture", signals: [] }, services: [],
+            observations: [{ topic: "Reporting Frequency", detail: "Old report request paraphrased by scoring", sentiment: "neutral" }]
+          }) })
         };
         if (timeout) throw new Error("simulated response-writer timeout");
         return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
@@ -6440,9 +6577,10 @@ async function scenario(name, fn) {
       try {
         for (const [index, [text, topic, acknowledgement, kind]] of variants.entries()) {
           extraction = { intent: "feedback", sentiment: kind === "feedback" ? "negative" : kind === "appreciation" ? "positive" : "neutral",
-            acknowledgement, explainsProblem: true, serviceFeedback: [],
+            acknowledgement, isObservation: kind === "request", explainsProblem: kind !== "request", serviceFeedback: [],
             observations: kind === "appreciation" ? [] : [{ topic, detail: text, kind, sentiment: kind === "feedback" ? "negative" : "neutral", needsFollowUp: false }],
             appreciations: kind === "appreciation" ? [{ subject: topic, detail: text }] : [] };
+          const beforeRecords = calls.observations.length;
           const response = await rawReq("POST", "/api/whatsapp/inbound", {
             from: poc.contactWhatsapp, text, providerMessageId: `wamid.closing-semantic-${type}-${timeout}-${index}`
           });
@@ -6455,6 +6593,12 @@ async function scenario(name, fn) {
           assert.equal(result.session.conversationState.overallRating, 7);
           assert.equal(result.session.conversationState.npsScore, type === "project_end" ? 9 : null);
           assert.doesNotMatch(JSON.stringify(result.session.conversationState), /Invented PPC|Invented leadership/);
+          const records = calls.observations.slice(beforeRecords);
+          assert.doesNotMatch(JSON.stringify(records), /Old report request paraphrased by scoring/);
+          for (const record of records) {
+            assert.equal(record.options.sourceMessage.body, text);
+            assert.ok(record.options.sourceMessage.id);
+          }
         }
       } finally {
         global.fetch = priorFetch;
@@ -6463,6 +6607,70 @@ async function scenario(name, fn) {
       }
     });
   }
+
+  await scenario("Quick-check-in visit and collaboration requests stay neutral before and during the window", async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+    const priorSession = store._session, priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    calls.messages.length = 0;
+    let extraction;
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(extraction) }) });
+    const variants = [
+      ["I wish to conduct a visit with my students to your office for AI branding guidance", "Student Office Visit", "I have noted your request for a student office visit and AI branding guidance."],
+      ["An introduction to your production process for our faculty would be welcome", "Faculty Production Introduction", "I have noted your interest in a faculty introduction to our production process."],
+      ["No just an industry visit early next year", "Industry Visit Timing", "Thank you for clarifying that you would like an industry visit early next year."]
+    ];
+    try {
+      for (const state of ["quick_checkin_detail", "quick_checkin_window"]) {
+        for (const [index, [text, topic, acknowledgement]] of variants.entries()) {
+          store._session = { id: "sess_1", cycleId: "cyc_quick", projectId: project.id, clientPocId: poc.id,
+            status: "partial", completionStatus: "partial", sessionType: "quick_checkin", conversationState: {
+              state, quickCheckinOutcome: state === "quick_checkin_window" ? "feedback_shared" : "needs_improvement",
+              quickCheckinWindowExpiresAt: state === "quick_checkin_window" ? "2099-01-01T00:10:00.000Z" : null
+            } };
+          extraction = { intent: "feedback", sentiment: "neutral", isObservation: true, explainsProblem: false, acknowledgement,
+            observations: [{ topic, detail: text, sentiment: "neutral", kind: "request", needsFollowUp: false }] };
+          const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+            text, providerMessageId: "wamid.quick-visit-" + state + "-" + index
+          });
+          const result = JSON.parse(response.body);
+          assert.equal(response.statusCode, 201);
+          assert.equal(result.state, "quick_checkin_window", result.whatsappReplyText);
+          assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+          assert.doesNotMatch(result.whatsappReplyText, /sorry|what specifically|Management Feedback|anything else about|out of 10|rate|recommend/i);
+          const stored = calls.quickCheckinResponses.at(-1).input.interpretation;
+          assert.equal(stored.observations.length, 1);
+          assert.equal(stored.observations[0].kind, "request");
+          assert.equal(stored.observations[0].sentiment, "neutral");
+          assert.equal((stored.concerns || []).length, 0);
+        }
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
+  await scenario("Request and complaint details sharing words are not collapsed into one negative request", async () => {
+    const { conversationFlow: flow } = require("../src/server/api-handler");
+    const text = "The weekly report about spend arrived late. Please send the weekly report about spend by Monday.";
+    const facts = flow.enrichConductedWithDeterministicFacts({}, text, project, {
+      intent: "feedback", sentiment: "negative", isObservation: true, observations: [
+        { topic: "Spend Reporting", detail: "The weekly report about spend arrived late", sentiment: "negative", kind: "feedback", needsFollowUp: false },
+        { topic: "Spend Reporting", detail: "Please send the weekly report about spend by Monday", sentiment: "neutral", kind: "request", needsFollowUp: false }
+      ]
+    });
+    assert.equal(facts.observations.length, 2);
+    assert.equal(facts.observations[0].sentiment, "negative");
+    assert.equal(facts.observations[1].sentiment, "neutral");
+    assert.equal(facts.observations[1].kind, "request");
+    const reply = flow.fallbackForAction({ type: "observation_reason", topic: "Management Feedback" }, {
+      pendingObservation: { topic: "Management Feedback", responseKind: "request" }
+    }, project);
+    assert.match(reply, /request/i);
+    assert.doesNotMatch(reply, /sorry|happened|Management Feedback/i);
+  });
 
   for (const kind of ["request", "mixed"]) {
     await scenario(`quick check-in keeps ${kind} acknowledgements specific without unwarranted apology`, async () => {
@@ -6605,7 +6813,7 @@ async function scenario(name, fn) {
           assert.notEqual(result.session.conversationState.overallRatingDeclined, true);
           assert.doesNotMatch(result.whatsappReplyText, /Senior Involvement|Invented leadership/i);
           if (expected === "choice") assert.match(result.whatsappReplyText, /Would you like to add anything else, or shall we move to the overall rating\?$/);
-          if (expected === "acknowledgement") assert.doesNotMatch(result.whatsappReplyText, /\?|out of 10/);
+          if (expected === "acknowledgement") assert.doesNotMatch(result.whatsappReplyText, /\?|out of 10|anything else about/i);
           if (text === "The PPC reports are clear now") assert.match(result.session.conversationState.mentionedServices.ppc.reasonText, /reports are clear/i);
           if (expected === "rating") assert.match(result.whatsappReplyText, /overall.*out of 10/i);
         }
@@ -7867,7 +8075,7 @@ async function scenario(name, fn) {
     );
     assert.strictEqual(conducted.observations.length, 1);
     assert.strictEqual(conducted.observations[0].sentiment, "negative");
-    assert.strictEqual(conducted.observations[0].fallbackKind, "general_concern");
+    assert.strictEqual(conducted.observations[0].detail, text, "keep all the grounded concern detail without a second fallback interpretation");
     assert.strictEqual(conducted.observations[0].needsFollowUp, false);
   });
 
@@ -8089,8 +8297,9 @@ async function scenario(name, fn) {
         text
       );
 
-      const observed = conversationFlow.observationFromInterpretation(interpreted, text);
-      assert.ok(observed, text);
+      assert.equal(conversationFlow.observationFromInterpretation(interpreted, text), null,
+        "do not add a second observation when a grounded structured request already exists");
+      const observed = interpreted.observations[0];
       assert.strictEqual(observed.topic, expectedTopic, text);
       assert.strictEqual(observed.kind, "request", text);
 

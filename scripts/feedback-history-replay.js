@@ -531,10 +531,12 @@ scenario("rating transition accepts natural alternatives but not direct numeric 
   }
 });
 
-scenario("a bare acknowledgement after a note-only reply is not treated as finished feedback", () => {
+scenario("a legacy note-only reply does not turn a bare acknowledgement into consent to rating", () => {
   const chat = review();
   chat.turn("Overall our campaign experience was disappointing", read({ serviceScope: "overall_feedback" }));
   chat.turn("Our requests were also ignored", read({ captured: [fact("account", "Our requests were also ignored")] }));
+  // Reproduce an older deployed session: the previous response had no choice.
+  chat.state.lastQuestionAsked = "Thank you. I have noted your additional feedback.";
   const acknowledgement = chat.turn("okay", read({ intent: "affirmative", sentiment: "neutral", explainsProblem: false }));
   assert.equal(acknowledgement.action.type, "rating_feedback");
   assert.equal(acknowledgement.action.offerChoice, false);
@@ -595,10 +597,12 @@ scenario("internal summaries and unsupported acknowledgement claims never reach 
 scenario("monthly broad relationship praise offers room before CSAT rather than inferring finished feedback", () => {
   const chat = review("pulse", { ...project, services: project.services.slice(0, 2) });
   chat.turn("okay");
+  assert.notEqual(chat.state.idleRatingPromptEligible, true, "a start acknowledgement does not arm the idle prompt");
   const text = "Hi thanks a lot for your message. We were all working to make things better. I appreciate your taking the feedback positively and the support your team has extended. We hope to carry on a mutually beneficial relationship and learn from your expertise.";
   const next = chat.turn(text, read({ sentiment: "positive", serviceScope: "overall_feedback", acknowledgement: "Thank you for valuing the partnership and the team’s support.", appreciations: [{ subject: "SRV Team", detail: "I appreciate your taking the feedback positively and the support your team has extended." }] }));
   assert.equal(next.action.type, "rating_feedback");
   assert.equal(next.action.offerChoice, true);
+  assert.equal(chat.state.idleRatingPromptEligible, true, "meaningful overall praise arms the one-time idle prompt");
   assert.match(next.message, /partnership|support/);
   assert.doesNotMatch(next.message, /on a scale|out of 10|missed.*department/i);
   chat.turn("Let’s move to the score", read({ completionScope: "feedback", completionEvidence: "Let’s move to the score", intent: "negative" }));
@@ -611,6 +615,7 @@ scenario("monthly broad relationship praise offers room before CSAT rather than 
 scenario("volunteering a monthly rating after a broad review preserves the final management invitation", () => {
   const chat = review("pulse");
   chat.turn("The partnership has been constructive and the team has supported us throughout", read({ sentiment: "positive", serviceScope: "overall_feedback" }));
+  assert.equal(chat.state.idleRatingPromptEligible, true, "overall feedback can qualify without a named service observation");
   const next = chat.turn("8");
   assert.equal(chat.state.overallRating, 8);
   assert.equal(next.action.type, "final_sweep");

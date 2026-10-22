@@ -1,4 +1,6 @@
 const { statusFromScore } = require("./analysis");
+const { IDLE_RATING_MS, ownsPendingRatingReminder } = require("./idle-rating-prompt");
+const { observationIdentity, observationRecords, fullIssueDetail, issueHeading, feedbackRecordTopic } = require("./feedback-records");
 
 const MAX_REMINDERS = 3;
 const REMINDER_INTERVAL_HOURS = 24;
@@ -89,7 +91,15 @@ function sessionIsTerminal(session) {
   return ["completed", "opted_out"].includes(session.status)
     || session.completionStatus === "completed"
     || ["completed", "opted_out", "handed_off"].includes(state)
+    || quickCheckinWindowElapsed(session)
     || reminderLoopExhausted(session);
+}
+
+function quickCheckinWindowElapsed(session, nowMs = Date.now()) {
+  const state = session?.conversationState || {};
+  const deadline = Date.parse(state.quickCheckinWindowExpiresAt || "");
+  return session?.sessionType === "quick_checkin" && state.state === "quick_checkin_window"
+    && Number.isFinite(deadline) && deadline <= nowMs;
 }
 
 function sessionHasOpenResponseWindow(session, nowMs = Date.now()) {
@@ -1552,8 +1562,8 @@ class SupabaseStore {
           status: "open",
           // The API layer may attach Gemini-written text. The RULES still decide
           // that this issue exists; Gemini only supplies the wording.
-          title: problem.issueTitle || String(problem.reasonText || "Needs attention").slice(0, 160),
-          root_cause: problem.issueRootCause || problem.reasonText,
+          title: issueHeading(problem),
+          root_cause: fullIssueDetail(problem),
           internal_poc_id: projectService ? projectService.internalPocId : null,
           sla: severity === "high" ? "24h" : "48h",
           due_at: addHours(new Date(), severity === "high" ? 24 : 48)
@@ -2038,6 +2048,51 @@ class SupabaseStore {
   // Scheduler targets
   // -------------------------------------------------------------------
 
+  async getIdleRatingCandidates(nowIso = new Date().toISOString()) {
+    const cutoff = new Date(Date.parse(nowIso) - IDLE_RATING_MS).toISOString();
+    const candidates = [];
+    for (let offset = 0; ; offset += 1000) {
+      const rows = await this.request("feedback_sessions", {
+        query: `status=in.(started,partial,no_response,needs_attention)&last_client_response_at=lte.${encodeURIComponent(cutoff)}&select=*,feedback_cycles(cycle_type)&order=last_client_response_at.asc,id.asc&limit=1000&offset=${offset}`
+      });
+      for (const row of rows) {
+        const session = toSession(row, this.sessionExtras(row));
+        if (session.conversationState?.idleRatingPromptEligible && !session.conversationState?.idleRatingPromptAttemptedAt) candidates.push(session);
+      }
+      if (rows.length < 1000) break;
+    }
+    return candidates;
+  }
+
+  async noteClientResponseStarted(sessionId) {
+    // Touch before Gemini work, not only at its end. A scheduler must see the
+    // new activity even while the response is being interpreted.
+    await this.request("feedback_sessions", {
+      method: "PATCH", query: `id=eq.${encodeURIComponent(sessionId)}`,
+      body: { last_client_response_at: new Date().toISOString() }
+    });
+  }
+
+  async reserveIdleRatingPrompt(session, conversationState, nowIso) {
+    const cutoff = new Date(Date.parse(nowIso) - IDLE_RATING_MS).toISOString();
+    const rows = await this.request("feedback_sessions", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(session.id)}&status=eq.${encodeURIComponent(session.status)}&last_client_response_at=lte.${encodeURIComponent(cutoff)}&conversation_state=eq.${encodeURIComponent(JSON.stringify(session.conversationState || {}))}`,
+      body: { conversation_state: conversationState, reminder_due_at: null }
+    });
+    return Boolean(rows?.length);
+  }
+
+  async releaseIdleRatingPrompt(session, expectedState, attempted = false) {
+    const previous = { ...session.conversationState };
+    if (attempted) previous.idleRatingPromptAttemptedAt = expectedState.idleRatingPromptAttemptedAt;
+    await this.request("feedback_sessions", {
+      method: "PATCH",
+      query: `id=eq.${encodeURIComponent(session.id)}&conversation_state=eq.${encodeURIComponent(JSON.stringify(expectedState))}`,
+      body: { conversation_state: previous, reminder_due_at: attempted ? null : session.reminderDueAt || null }
+    });
+  }
+
   async getInactiveFinalSweepCandidates(nowIso = new Date().toISOString()) {
     const now = new Date(nowIso);
     if (Number.isNaN(now.getTime())) throw new Error("Invalid automation time");
@@ -2199,6 +2254,7 @@ class SupabaseStore {
     });
 
     return rows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin" && !row.client_pocs?.removed_at
+      && !ownsPendingRatingReminder(toSession(row, this.sessionExtras(row)))
       && !sessionIsTerminal(toSession(row, this.sessionExtras(row)))).map((row) => ({
       session: toSession(row, this.sessionExtras(row)),
       poc: row.client_pocs
@@ -2284,6 +2340,7 @@ class SupabaseStore {
     let project = await this.getProject(projectKey);
     if (!project) return null;
 
+    await this.expireDueQuickCheckins(new Date().toISOString(), { windowsOnly: true, projectId: project.id });
     let cycles = await this.listProjectCycles(project.id);
 
     // Repair projects whose Project-End cycles were deleted by an older
@@ -2971,25 +3028,24 @@ class SupabaseStore {
    * dropping it loses real feedback: a client told us his invoices were wrong
    * and it went nowhere.
    */
-  async recordObservations(session, observations = []) {
+  async recordObservations(session, observations = [], { sourceMessage = null } = {}) {
     if (!observations.length) return [];
 
     const existing = await this.request("observations", {
-      query: `session_id=eq.${encodeURIComponent(session.id)}&select=topic,detail,sentiment`
+      query: `session_id=eq.${encodeURIComponent(session.id)}&select=topic,detail,sentiment,source_message_id,record_key`
     });
-    const key = (item) => [item.topic, item.detail, item.sentiment || "neutral"]
-      .map((value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase()).join("\u0000");
-    const seen = new Set(existing.map(key));
-    const fresh = observations.filter((item) => {
-      const identity = key(item);
-      if (!String(item.detail || "").trim() || seen.has(identity)) return false;
-      seen.add(identity);
-      return true;
-    });
+    // A successfully stored message is not re-extracted on later turns or
+    // scoring retries. Keep all distinct points in its first atomic batch.
+    if (sourceMessage?.id && existing.some((item) => item.source_message_id === sourceMessage.id)) return [];
+    const seen = new Set(existing.map(observationIdentity));
+    const fresh = observationRecords(observations, sourceMessage)
+      .filter((item) => !seen.has(observationIdentity(item)));
     if (!fresh.length) return [];
 
     const rows = await this.request("observations", {
       method: "POST",
+      query: "on_conflict=session_id,record_key",
+      prefer: "resolution=ignore-duplicates,return=representation",
       body: fresh.map((item) => ({
         project_id: session.projectId,
         session_id: session.id,
@@ -2997,7 +3053,10 @@ class SupabaseStore {
         topic: item.topic,
         detail: item.detail,
         sentiment: item.sentiment || "neutral",
-        severity: item.severity || "watch"
+        severity: item.severity || "watch",
+        source_message_id: item.sourceMessageId,
+        source_text: item.sourceText,
+        record_key: item.recordKey
       }))
     });
     return rows;
@@ -3011,8 +3070,10 @@ class SupabaseStore {
       id: row.id,
       sessionId: row.session_id,
       clientPocId: row.client_poc_id,
-      topic: row.topic,
+      topic: feedbackRecordTopic(row),
       detail: row.detail,
+      sourceMessageId: row.source_message_id || null,
+      sourceText: row.source_text || null,
       sentiment: row.sentiment,
       severity: row.severity,
       status: row.status,
@@ -3130,7 +3191,7 @@ class SupabaseStore {
         .filter((row) => row.sentiment !== "positive")
         .map((row) => ({
           sessionId: row.session_id,
-          topic: row.topic, detail: row.detail, severity: row.severity
+          topic: feedbackRecordTopic(row), detail: row.detail, severity: row.severity
         })),
       // Every internal address this cycle should reach, de-duplicated.
       recipients: [...new Set([
@@ -3551,6 +3612,7 @@ class SupabaseStore {
   }
 
   async getDashboard() {
+    await this.expireDueQuickCheckins(new Date().toISOString(), { windowsOnly: true });
     const projects = await this.listProjects();
     const clusters = await this.request("clusters", { query: "select=*&order=name.asc" });
     const clients = await this.request("clients", { query: "select=id,client_key,name,cluster_id&order=name.asc" });
@@ -3831,19 +3893,9 @@ class SupabaseStore {
       sentiment = sentiments.includes("negative") ? "negative" : sentiments.includes("positive") ? "positive" : "neutral";
       const severity = sentiment === "negative" ? "watch" : "info";
 
-      const observationRows = await this.request("observations", {
-        method: "POST",
-        body: [{
-          project_id: session.projectId,
-          session_id: session.id,
-          client_poc_id: session.clientPocId,
-          topic: service ? service.name : "Quick check-in",
-          detail,
-          sentiment,
-          severity,
-          status: "open"
-        }]
-      });
+      const observationRows = await this.recordObservations(session, [{
+        topic: service ? service.name : "Quick check-in", detail, sentiment, severity
+      }], { sourceMessage: input.sourceMessage || null });
       observation = observationRows[0] || null;
 
       if (sentiment === "negative" && !concerns.length) {
@@ -4557,19 +4609,40 @@ class SupabaseStore {
     return decryptCredential(rows[0]?.zoho_password_encrypted, projectId);
   }
 
-  async expireDueQuickCheckins(nowIso = new Date().toISOString()) {
-    const rows = await this.request("feedback_sessions", {
-      query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,partial)&select=*,feedback_cycles(cycle_type)&order=reminder_due_at.asc`
-    });
-    const due = rows.filter((row) => row.feedback_cycles?.cycle_type === "quick_checkin");
+  async expireDueQuickCheckins(nowIso = new Date().toISOString(), { windowsOnly = false, projectId = null } = {}) {
+    const nowMs = Date.parse(nowIso);
+    if (!Number.isFinite(nowMs)) throw new Error("Invalid automation time");
+    const due = [];
+    // The saved response-window deadline is authoritative, not a scheduler's
+    // reminder timestamp. Collect before patching so pagination cannot skip rows.
+    for (let offset = 0; ; offset += 1000) {
+      const rows = await this.request("feedback_sessions", {
+        query: `${projectId ? `project_id=eq.${encodeURIComponent(projectId)}&` : ""}status=in.(started,partial,needs_attention)&select=*,feedback_cycles(cycle_type)&order=started_at.asc,id.asc&limit=1000&offset=${offset}`
+      });
+      due.push(...rows.filter((row) => {
+        if (row.feedback_cycles?.cycle_type !== "quick_checkin") return false;
+        const session = toSession(row, { cycleType: "quick_checkin" });
+        if (session.conversationState?.state === "quick_checkin_window") return quickCheckinWindowElapsed(session, nowMs);
+        return !windowsOnly && !sessionIsTerminal(session)
+          && Number.isFinite(Date.parse(row.reminder_due_at || "")) && Date.parse(row.reminder_due_at) <= nowMs;
+      }));
+      if (rows.length < 1000) break;
+    }
     const cycleIds = new Set();
     const expiredSessions = [];
     for (const row of due) {
       const state = row.conversation_state || {};
       const completedWindow = state.state === "quick_checkin_window";
+      // Supabase supplies an exact timestamp string: keep its REST URL short.
+      // node-postgres supplies Date objects, which lose PostgreSQL microseconds;
+      // an equality check on that Date could fail forever. Compare JSON state
+      // for that adapter (its query string becomes SQL, not a network URL).
+      const revisionFilter = typeof row.updated_at === "string" && row.updated_at
+        ? `updated_at=eq.${encodeURIComponent(row.updated_at)}`
+        : `conversation_state=eq.${encodeURIComponent(JSON.stringify(state))}`;
       const updatedRows = await this.request("feedback_sessions", {
         method: "PATCH",
-        query: `id=eq.${encodeURIComponent(row.id)}`,
+        query: `id=eq.${encodeURIComponent(row.id)}&status=eq.${encodeURIComponent(row.status)}&${revisionFilter}`,
         body: {
           status: "completed",
           completion_status: completedWindow
@@ -4579,6 +4652,7 @@ class SupabaseStore {
           reminder_due_at: null,
           conversation_state: {
             ...state,
+            ...(completedWindow && !state.summaryPendingSince ? { summaryPendingSince: nowIso } : {}),
             state: "completed",
             reminderExhausted: !completedWindow,
             closureReason: completedWindow ? "quick_checkin_window_elapsed" : "quick_checkin_expired",
@@ -4589,6 +4663,9 @@ class SupabaseStore {
           }
         }
       });
+      // A simultaneous client turn or another expiry worker won. Do not
+      // overwrite that state, emit a second completion or lose its additions.
+      if (!updatedRows.length) continue;
       expiredSessions.push(toSession(updatedRows[0], {
         cycleType: "quick_checkin"
       }));
@@ -4598,7 +4675,7 @@ class SupabaseStore {
       const session = due.find((row) => row.cycle_id === cycleId);
       await this.recomputeCycle(cycleId, session.project_id);
     }
-    return { expired: due.length, sessions: expiredSessions };
+    return { expired: expiredSessions.length, sessions: expiredSessions };
   }
 }
 

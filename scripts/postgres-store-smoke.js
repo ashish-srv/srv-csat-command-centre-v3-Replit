@@ -88,6 +88,20 @@ async function main() {
     "2026-10-01T01:00:00.000Z", 1000
   ]);
 
+  const ratingClaimPool = new FakePool([[{ id: "session-idle" }], []]);
+  const ratingClaimStore = new PostgresStore({ pool: ratingClaimPool });
+  const oldRatingState = { idleRatingPromptEligible: true, generalFeedbackText: "Good support, but reports need detail." };
+  const nextRatingState = { ...oldRatingState, overallRatingAsked: true };
+  const idleSession = { id: "session-idle", status: "partial", conversationState: oldRatingState };
+  assert.equal(await ratingClaimStore.reserveIdleRatingPrompt(idleSession, nextRatingState, "2026-10-22T12:00:00.000Z"), true);
+  const ratingClaimQuery = ratingClaimPool.calls[0];
+  assert.match(ratingClaimQuery.sql, /"conversation_state" = \$\d+/);
+  assert.match(ratingClaimQuery.sql, /"last_client_response_at" <= \$\d+/);
+  assert.ok(ratingClaimQuery.values.includes(JSON.stringify(oldRatingState)));
+  assert.ok(ratingClaimQuery.values.includes("2026-10-22T11:00:00.000Z"));
+  assert.equal(await ratingClaimStore.reserveIdleRatingPrompt(idleSession, nextRatingState, "2026-10-22T12:00:00.000Z"), false,
+    "a concurrent state change returns no reservation");
+
   console.log("PostgreSQL adapter smoke tests passed.");
 }
 

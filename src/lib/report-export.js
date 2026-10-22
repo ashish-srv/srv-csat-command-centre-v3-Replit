@@ -66,6 +66,12 @@ function reportStyles() {
     tbody tr:nth-child(even) { background: #fafcff; }
     tbody tr:last-child td { border-bottom: 0; }
     .empty { padding: 18px 16px; color: #68758a; }
+    .chat-session { padding: 16px; background: #f1f5f9; border-bottom: 3px solid #cbd5e1; }
+    .chat-session h3 { margin: 0 0 16px; color: #1e3a5f; }
+    .chat-message { width: fit-content; max-width: 85%; margin: 10px auto 10px 0; padding: 12px 16px; border: 1px solid #d5deeb; border-radius: 12px; background: #fff; break-inside: avoid; }
+    .chat-message.srv { margin-left: auto; margin-right: 0; background: #e3f1ff; }
+    .chat-body { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+    .chat-time { font-size: 11px; color: #4b5563; }
     @media print {
       @page { size: A4 landscape; margin: 10mm; }
       body { background: #fff; font-size: 9px; }
@@ -101,7 +107,16 @@ export function reportToHtml(report, { autoPrint = false } = {}) {
           <h2>${escapeHtml(section.title)}</h2>
           ${section.note ? `<p class="section-note">${escapeHtml(section.note)}</p>` : ""}
         </div>
-        ${rows.length ? `
+        ${section.chatSessions ? section.chatSessions.map((chat) => `
+          <div class="chat-session">
+            <h3>${escapeHtml(chat.title)}</h3>
+            ${chat.messages.length ? chat.messages.map((message) => `
+              <article class="chat-message ${message.side === "client" ? "client" : "srv"}">
+                <strong>${escapeHtml(message.speaker)}</strong>
+                <div class="chat-body">${escapeHtml(message.message)}</div>
+                <time class="chat-time">${escapeHtml(message.time)}</time>
+              </article>`).join("") : '<p class="empty">No messages saved for this session.</p>'}
+          </div>`).join("") : rows.length ? `
           <div class="table-wrap"><table>
             <thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead>
             <tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(displayValue(row[column.key]))}</td>`).join("")}</tr>`).join("")}</tbody>
@@ -169,7 +184,7 @@ function styleWorksheetHeader(row) {
   });
 }
 
-export async function downloadExcelReport(report, fileName) {
+export async function buildExcelReport(report) {
   const excelModule = await import("exceljs");
   const ExcelJS = excelModule.default || excelModule;
   const workbook = new ExcelJS.Workbook();
@@ -231,16 +246,29 @@ export async function downloadExcelReport(report, fileName) {
     worksheet.columns = columns.map((column) => ({
       key: column.key,
       header: column.label,
-      width: Math.max(10, Math.min(55, column.width || 18))
+      width: Math.max(10, Math.min(section.chatSessions ? 100 : 55, column.width || 18))
     }));
     styleWorksheetHeader(worksheet.getRow(1));
     for (const dataRow of section.rows || []) {
+      if (dataRow.conversationHeading) {
+        const heading = worksheet.addRow([dataRow.conversationHeading]);
+        worksheet.mergeCells(heading.number, 1, heading.number, columns.length);
+        heading.font = { name: "Arial", size: 11, bold: true, color: { argb: "FF163B64" } };
+        heading.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE3F1FF" } };
+        heading.alignment = { vertical: "middle", wrapText: true };
+        heading.height = 38;
+        continue;
+      }
       const row = worksheet.addRow(columns.reduce((values, column) => {
         values[column.key] = dataRow[column.key] ?? null;
         return values;
       }, {}));
       row.alignment = { vertical: "top", wrapText: true };
       row.font = { name: "Arial", size: 10, color: { argb: "FF172033" } };
+      if (section.chatSessions) {
+        row.height = Math.min(409, Math.max(30, String(dataRow.message || "").split("\n")
+          .reduce((lines, line) => lines + Math.max(1, Math.ceil(line.length / 85)), 0) * 15 + 12));
+      }
       row.eachCell((cell) => {
         cell.border = { bottom: { style: "hair", color: { argb: "FFE6EBF2" } } };
       });
@@ -248,13 +276,18 @@ export async function downloadExcelReport(report, fileName) {
         if (column.numberFormat) row.getCell(index + 1).numFmt = column.numberFormat;
       });
     }
-    if ((section.rows || []).length) {
+    if ((section.rows || []).length && !section.chatSessions) {
       worksheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };
-    } else {
+    } else if (!(section.rows || []).length) {
       worksheet.addRow(["No records match the current report filters."]);
     }
   }
 
+  return workbook;
+}
+
+export async function downloadExcelReport(report, fileName) {
+  const workbook = await buildExcelReport(report);
   const buffer = await workbook.xlsx.writeBuffer();
   downloadBlob(
     new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
@@ -263,3 +296,52 @@ export async function downloadExcelReport(report, fileName) {
 }
 
 export { safeFileName };
+
+function excelMessageParts(text) {
+  const parts = [];
+  let chunk = "", lines = 1, column = 0;
+  for (const character of Array.from(text)) {
+    chunk += character;
+    column += 1;
+    if (character === "\n" || column >= 85) { lines += 1; column = 0; }
+    if (lines >= 23 || chunk.length >= 1400) {
+      parts.push(chunk); chunk = ""; lines = 1; column = 0;
+    }
+  }
+  if (chunk || !parts.length) parts.push(chunk);
+  return parts;
+}
+
+export function conversationReportSections(groups, { pocNameById = new Map(), cycleLabel, dateLabel }) {
+  const byPoc = new Map();
+  for (const { session, messages } of groups) {
+    const identity = session.clientPocId || session.id;
+    const poc = session.pocName || pocNameById.get(session.clientPocId) || "Unknown POC";
+    if (!byPoc.has(identity)) byPoc.set(identity, { poc, sessions: [] });
+    byPoc.get(identity).sessions.push({ session, messages });
+  }
+  return [...byPoc.values()].map(({ poc, sessions }) => {
+    const chatSessions = sessions.sort((a, b) => (Date.parse(a.session.startedAt) || 0) - (Date.parse(b.session.startedAt) || 0))
+      .map(({ session, messages }) => ({
+        title: `${cycleLabel(session.reportCycle.cycleType)} · ${dateLabel(session.startedAt)} · Session ${session.id}`,
+        messages: [...messages].sort((a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0))
+          .map((message) => ({ side: message.side, speaker: message.speaker || (message.side === "client" ? poc : "SRV Media Directors' Office"),
+            time: dateLabel(message.createdAt), message: String(message.body || "") }))
+      }));
+    return { title: `Conversation — ${poc}`, sheetName: `Chat ${poc}`,
+      note: "Saved messages grouped by POC and feedback session.", chatSessions,
+      columns: [{ key: "time", label: "Time", width: 24 }, { key: "speaker", label: "Speaker", width: 30 },
+        { key: "message", label: "Message", width: 100 }],
+      rows: chatSessions.flatMap((chat) => [
+        { conversationHeading: chat.title },
+        ...chat.messages.flatMap((message) => {
+          // Excel has a finite visible row height. Continue long messages on
+          // subsequent rows without dropping or rewriting any characters.
+          return excelMessageParts(message.message).map((part, index) => ({
+            time: index ? "Continued" : message.time, speaker: message.speaker, message: part
+          }));
+        }),
+        ...(!chat.messages.length ? [{ message: "No messages saved for this session." }] : [])
+      ]) };
+  });
+}
