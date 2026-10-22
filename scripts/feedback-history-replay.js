@@ -761,6 +761,67 @@ scenario("rating choices do not swallow additional feedback, invent a score or a
   assert.notEqual(next.action.type, "overall_rating", "choice metadata cannot skip the normal service flow without a pending rating choice");
 });
 
+scenario("positive outcome acknowledgements do not receive duplicate abstract-topic thanks", () => {
+  const cases = [
+    ["Overall Engagement", "Overall engagement was good; we met our registration numbers.",
+      "Thank you for confirming that the overall engagement went well and that your registration targets were successfully met."],
+    ["Registration Results", "We achieved our registration target this year.",
+      "It is good to hear that your registration target was achieved."],
+    ["Launch", "The launch went well and enquiries have grown.",
+      "It is encouraging that the launch went well and enquiries have grown."],
+    ["Training", "The training was helpful and our staff learned a lot.",
+      "It is good to hear that the training was helpful for your staff."]
+  ];
+  for (const [subject, detail, acknowledgement] of cases) {
+    const context = { latestClientText: detail, extractedAcknowledgement: acknowledgement,
+      appreciations: [{ subject, detail }] };
+    const savedFacts = JSON.stringify(context);
+    for (const offerChoice of [false, true]) {
+      const response = flow.fallbackForAction({ type: "rating_feedback", ratingType: "overall_rating", offerChoice }, {}, project, context);
+      assert.ok(response.startsWith(acknowledgement), response);
+      assert.doesNotMatch(response.slice(acknowledgement.length), /thank|kind words|appreciat/i);
+      assert.equal((response.match(/\?/g) || []).length, offerChoice ? 1 : 0);
+    }
+    for (const sessionType of ["pulse", "project_end"]) {
+      const state = { sessionType, reopenedDuringClosingGrace: true, overallRating: 8, npsScore: sessionType === "project_end" ? 9 : null,
+        closingGraceExpiresAt: "2030-01-01T00:10:00.000Z" };
+      const savedState = JSON.stringify(state);
+      const response = flow.closingGraceMessage(poc, state, context, project);
+      assert.ok(response.startsWith(acknowledgement), response);
+      assert.doesNotMatch(response.slice(acknowledgement.length), /thank|kind words|appreciat|anything else about/i);
+      assert.equal(JSON.stringify(state), savedState, "presentation must not mutate ratings, progress or the window");
+    }
+    assert.equal(JSON.stringify(context), savedFacts, "presentation must not merge any new facts");
+  }
+});
+
+scenario("mixed feedback still recognises praise when only the concern was acknowledged", () => {
+  const text = "The invoice total is wrong. The training was helpful for our staff.";
+  const response = flow.fallbackForAction({ type: "rating_feedback", offerChoice: false }, {}, project, {
+    latestClientText: text, extractedAcknowledgement: "We hear your concern about the incorrect invoice total.",
+    observations: [{ topic: "Invoice Total", detail: "The invoice total is wrong", sentiment: "negative" }],
+    appreciations: [{ subject: "Training", detail: "The training was helpful for our staff" }]
+  });
+  assert.match(response, /invoice total/i);
+  assert.match(response, /kind words about Training/i);
+  assert.doesNotMatch(response, /what happened|anything else|management|senior/i);
+});
+
+scenario("missing model acknowledgement does not append a detached Thank you after a request or concern", () => {
+  for (const [kind, sentiment, topic, detail] of [
+    ["request", "neutral", "Student Visit", "May we arrange a student visit?"],
+    ["feedback", "negative", "Invoice Error", "The invoice total is wrong"]
+  ]) {
+    const state = { reopenedDuringClosingGrace: true, overallRating: 8, npsScore: 9 };
+    const response = flow.closingGraceMessage(poc, state, {
+      latestClientText: detail, observations: [{ kind, sentiment, topic, detail }]
+    }, project);
+    assert.doesNotMatch(response, /Thank you\./i);
+    assert.match(response, new RegExp(topic, "i"));
+    if (kind === "request") assert.doesNotMatch(response, /sorry|disappoint|what happened|Management Feedback/i);
+  }
+});
+
 for (const [status, name, error] of results) console.log(`${status}  ${name}${error ? `\n${error}` : ""}`);
 const failures = results.filter(([status]) => status === "FAIL").length;
 console.log(`\n${results.length - failures}/${results.length} historical conversation replays passed`);

@@ -344,6 +344,11 @@ const turn = {
       assert.match(prompts[1], /NPS only for project-end, NEVER for monthly/);
       assert.match(prompts[1], /keep the original deadline/);
       assert.match(prompts[1], /never an additional source of facts/);
+      assert.match(prompts[0], /recognise the concrete difficulty and its impact/);
+      assert.match(prompts[0], /one acknowledgement, not a thank-you followed by another thank-you/);
+      assert.match(prompts[1], /positive\s+outcome already recognised needs no second thank-you/);
+      assert.match(prompts[1], /preserving uncertainty rather than confirming a suggested cause/);
+      assert.doesNotMatch(prompts[1], /A few words, not a summary|Every appreciation must be acknowledged/);
       assert.doesNotMatch(prompts[1], /dig until it would be|Move on only when they say no/);
     } finally {
       global.fetch = priorFetch;

@@ -1095,7 +1095,7 @@ function fallbackForAction(action, conversationState, project, context = {}) {
   const acknowledgement = appreciationAcknowledgement(context, project, conversationState);
   const naturalAcknowledgement = clientFacingAcknowledgement(context, project, action);
   if (naturalAcknowledgement && !["issue_reason", "service_followup", "observation_reason"].includes(action.type)) {
-    const praise = acknowledgement && !responseAcknowledgesAppreciation(naturalAcknowledgement) ? acknowledgement : "";
+    const praise = acknowledgement && !responseAcknowledgesAppreciation(naturalAcknowledgement, context) ? acknowledgement : "";
     return [naturalAcknowledgement, praise, baseFallbackForAction(action, conversationState, project, context)].filter(Boolean).join(" ");
   }
   const processConcern = (context.observations || []).find((item) =>
@@ -1153,14 +1153,15 @@ function closingGraceMessage(poc, conversationState = {}, context = {}, project 
     const natural = clientFacingAcknowledgement(context, project, { type: "close" });
     const acknowledgement = appreciation
       ? appreciationAcknowledgement(context, project, conversationState)
-      : "Thank you.";
+      : "";
     const recorded = appreciation && !natural
       ? "We will share your kind words with the relevant team, and I have added your appreciation to your recorded feedback."
       : "I have added that to your recorded feedback.";
     const addedConcern = concernAcknowledgement(context, conversationState, project);
     const addedRequest = requestAcknowledgement(context);
-    const praise = natural && appreciation && !responseAcknowledgesAppreciation(natural) ? acknowledgement : "";
-    return `${[natural || [addedConcern, addedRequest, acknowledgement].filter(Boolean).join(" "), praise].filter(Boolean).join(" ")} ${recorded} ${ratingText[0].toUpperCase()}${ratingText.slice(1)} remains recorded, and the original 10-minute window is still open if you want to add or correct anything else.`;
+    const praise = natural && appreciation && !responseAcknowledgesAppreciation(natural, context) ? acknowledgement : "";
+    return [natural || [addedConcern, addedRequest, acknowledgement].filter(Boolean).join(" "), praise, recorded,
+      `${ratingText[0].toUpperCase()}${ratingText.slice(1)} remains recorded, and the original 10-minute window is still open if you want to add or correct anything else.`].filter(Boolean).join(" ");
   }
   const closingLine = conversationState.sessionType === "project_end"
     ? "Thank you again for your honesty, time and trust. We appreciate the opportunity to have worked with you and wish you every success ahead."
@@ -1169,7 +1170,7 @@ function closingGraceMessage(poc, conversationState = {}, context = {}, project 
   const natural = hasNewFacts ? clientFacingAcknowledgement(context, project, { type: "close" }) : "";
   const appreciation = appreciationAcknowledgement(context, project, conversationState);
   const acknowledgement = natural
-    ? [natural, appreciation && !responseAcknowledgesAppreciation(natural) ? appreciation : ""].filter(Boolean).join(" ")
+    ? [natural, appreciation && !responseAcknowledgesAppreciation(natural, context) ? appreciation : ""].filter(Boolean).join(" ")
     : [concernAcknowledgement(context, conversationState, project), requestAcknowledgement(context), appreciation].filter(Boolean).join(" ");
   return `${acknowledgement ? `${acknowledgement}\n\n` : ""}Thank you, ${salutation}. ${recorded} been successfully recorded for confidential review by the Directors.\n\nThis feedback session will remain active for the next 10 minutes. During this time, you can add anything else you would like the Directors to know, revise your rating, share further feedback or appreciation, ask a question, or request a callback.\n\nAfter 10 minutes, this automated feedback session will close. You can, of course, contact SRV Media at any time if you need us.\n\n${closingLine}`;
 }
@@ -1975,11 +1976,22 @@ function fallbackGeneralConcernObservation(
   };
 }
 
-function responseAcknowledgesAppreciation(message) {
+function responseAcknowledgesAppreciation(message, context = {}) {
   const source = String(message || "");
-  return /\b(?:glad|pleased|happy|delighted) to (?:hear|know|learn)\b/i.test(source)
+  const explicitAppreciation = /\b(?:glad|pleased|happy|delighted) to (?:hear|know|learn)\b/i.test(source)
     || /\b(?:thank(?:s| you)?(?: for)?|appreciat(?:e|ed|ing|ion)|kind words|special mention|glad to hear)\b/i.test(source)
     && /\b(?:share|pass|convey|team|person|people|them|him|her|support|work|words|mention|feedback)\b/i.test(source);
+  if (explicitAppreciation) return true;
+  // A positive outcome can already be acknowledged without mentioning a
+  // team or promising to pass on praise. Match only this turn's grounded
+  // appreciation, not an earlier topic, and never create new facts here.
+  const recognisesPositiveOutcome = /\b(?:good|great|glad|pleased|happy|encouraging|delighted|successful(?:ly)?|positive)\b|\b(?:went|going|gone) well\b/i.test(source);
+  return recognisesPositiveOutcome && (context.appreciations || []).some((item) =>
+    contentOverlap(source, `${item.subject || ""} ${item.detail || ""}`).shared >= 2);
+}
+
+function hasNaturalAcknowledgement(message) {
+  return /\b(?:thank|noted|recorded|added|appreciat\w*|sorry|hear you)\b|\b(?:we|i) (?:hear|understand|recognise|recognize|see|value)\b/i.test(String(message || ""));
 }
 
 function factFreeControlReply(text, interpretation = null) {
@@ -4065,9 +4077,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       const latestConcerns = latestConcernFacts(conducted);
       const needsConcernAcknowledgement = latestConcerns.length > 0
         || (["issue_reason", "service_followup"].includes(requiredAction.type) && requiredService?.sentiment === "negative");
-      const hasConcernAcknowledgement = /\b(?:sorry|hear you|noted|recorded|concerns?|issues?|improv\w*|review|thank you for (?:raising|explaining|flagging))\b/i.test(conducted.text);
+      const hasConcernAcknowledgement = /\b(?:sorry|hear you|noted|recorded|concerns?|issues?|improv\w*|review|thank you for (?:raising|explaining|flagging))\b|\b(?:we|i) (?:hear|understand|recognise|recognize)\b/i.test(conducted.text);
       const needsAppreciationAcknowledgement = Boolean(conducted.appreciations?.length)
-        && !responseAcknowledgesAppreciation(conducted.text);
+        && !responseAcknowledgesAppreciation(conducted.text, conducted);
       const unsupportedResponseTopic = responseIntroducesUnsupportedTopic(
         conducted.text,
         text,
@@ -4079,7 +4091,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         || internalSummaryLanguage(conducted.text)
         || needsAppreciationAcknowledgement
         || (requiredAction.type === "rating_feedback"
-          && !/\b(?:thank|noted|recorded|added|appreciat\w*|sorry|hear you)\b/i.test(conducted.text))
+          && !hasNaturalAcknowledgement(conducted.text))
         || unsupportedResponseTopic
         || /\b(?:(?:have|has|already)\s+(?:notified|alerted|emailed)|(?:directors|management|team)\s+(?:have|has)\s+been\s+(?:notified|alerted|informed))\b/i.test(conducted.text);
 
@@ -8551,7 +8563,7 @@ function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText, pr
   const appreciationText = appreciation ? ` ${appreciation}` : "";
   const natural = clientFacingAcknowledgement(interpretation || {}, project, { type: "close" });
   if (natural) {
-    return `${natural}${appreciation && !responseAcknowledgesAppreciation(natural) ? appreciationText : ""} Your feedback has been recorded for confidential management review. ${windowText}`;
+    return `${natural}${appreciation && !responseAcknowledgesAppreciation(natural, interpretation) ? appreciationText : ""} Your feedback has been recorded for confidential management review. ${windowText}`;
   }
   const request = requestAcknowledgement(interpretation || {});
   if (!concernPoints.length) {

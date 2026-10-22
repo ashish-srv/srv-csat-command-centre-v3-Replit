@@ -15,6 +15,14 @@ The initial records/export/expiry patch left conversation wording and progressio
 
 The additional five-file pre-correction snapshot is in ../local-backups/before-request-acknowledgement-fix-22-oct. It preserves the prior records/export work as well as the unchanged conversational baseline. The full Pooja replay covers praise, explained concerns, transition, CSAT 8, NPS 9, completion, the visit request and its timing clarification. Variations cover indirect requests, overlapping mixed concerns/requests, and quick-check-in additions. These are controlled extraction/writer fixtures, not proof that every live model output will be identical.
 
+## Acknowledgement wording follow-up — 23 October 2026
+
+- Preserve natural, specific replies such as "We hear your feedback..." rather than rejecting them solely for lacking a canned thank-you/recording phrase. Existing topic, claim, and next-question checks still apply.
+- Recognising a positive outcome counts as acknowledging it; do not append a second abstract-topic thank-you. Apply this consistently to monthly, project-end and quick-check-in replies, including closing-window additions.
+- Extraction and reply-writing prompts request concise, specific recognition of the difficulty and impact, preserve the client's uncertainty, and avoid mandatory repeated thanks/apologies. Wording remains separate from factual extraction; the broad writer-fact merge remains disabled.
+- No question progression, rating ownership, one-hour prompt eligibility or ten-minute deadline changes. No new schema, secrets, or workflow edits for this follow-up.
+- Backup: `../local-backups/before-acknowledgement-wording-23-oct-0bfaa5f`, plus the unchanged baseline commit `0bfaa5f`. Historical and API replays cover the repeated positive-outcome sentence, the fuller delivery/SPOC acknowledgement, mixed praise/concerns, varied outcome topics, and quick-check-in windows. These use controlled model responses, not live Gemini/WhatsApp sends.
+
 ## One-time idle rating prompt
 
 - Applies to monthly (`pulse`) and project-end sessions only, after a newly processed meaningful overall review. No historical-session backfill and no trigger from only a greeting/start/acknowledgement.

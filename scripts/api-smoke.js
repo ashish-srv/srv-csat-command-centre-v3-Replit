@@ -6442,11 +6442,18 @@ async function scenario(name, fn) {
       assert.doesNotMatch(result.whatsappReplyText, /appreciating Overall Engagement|kind words with them/i);
       assert.match(result.whatsappReplyText, /anything else.*overall rating\?/i);
 
+      const repeatedPraiseAck = "Thank you for confirming that the overall engagement went well and that your registration targets were successfully met.";
+      result = await send(praise, { sentiment: "positive", serviceScope: "overall_feedback", acknowledgement: repeatedPraiseAck,
+        appreciations: [{ subject: "Overall Engagement", detail: praise }] });
+      assert.equal(result.whatsappReplyText, repeatedPraiseAck, "already acknowledged positive outcomes must not receive a second abstract-topic thank-you");
+      assert.equal(result.session.conversationState.overallRating, null);
+
       const concern = "Yes would request the deliverables to be provided in shorter time. Currently it seems the SRV Spoc assigned handles other campaigns and this slows down overall response time or leads to minor mistakes";
+      const specificConcernAck = "We hear your feedback regarding the turnaround times and the response delays from your assigned point of contact. We also understand your concern that handling multiple campaigns may be affecting response speed and attention to detail, including minor mistakes.";
       result = await send(concern, { sentiment: "negative", isObservation: true, explainsProblem: true,
         acknowledgement: "I have noted your concern about delivery turnaround, slow responses and minor mistakes, and your impression that the SPOC may be handling other campaigns.",
-        observations: [{ topic: "Delivery Turnaround", detail: concern, sentiment: "negative", needsFollowUp: false }] });
-      assert.match(result.whatsappReplyText, /turnaround.*slow responses.*minor mistakes/i);
+        observations: [{ topic: "Delivery Turnaround", detail: concern, sentiment: "negative", needsFollowUp: false }] }, { message: specificConcernAck });
+      assert.equal(result.whatsappReplyText, specificConcernAck, "a specific natural acknowledgement must not be rejected for lacking a canned Thank you/recorded prefix");
       assert.doesNotMatch(result.whatsappReplyText, /anything else.*overall rating\?/i);
       assert.equal(result.session.conversationState.idleRatingPromptEligible, true);
       assert.doesNotMatch(result.whatsappReplyText, /what specifically happened|Senior Involvement/i);
@@ -6644,6 +6651,43 @@ async function scenario(name, fn) {
           assert.equal(stored.observations[0].sentiment, "neutral");
           assert.equal((stored.concerns || []).length, 0);
         }
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
+  await scenario("Quick check-in recognises positive outcomes once without changing its response window", async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+    const priorSession = store._session, priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    calls.messages.length = 0;
+    const text = "Overall engagement was good; we met our registration numbers.";
+    const acknowledgement = "Thank you for confirming that the overall engagement went well and that your registration targets were successfully met.";
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+      intent: "feedback", sentiment: "positive", acknowledgement, serviceScope: "overall_feedback",
+      appreciations: [{ subject: "Overall Engagement", detail: text }], observations: [], concerns: []
+    }) }) });
+    try {
+      for (const state of ["quick_checkin_detail", "quick_checkin_window"]) {
+        const deadline = "2099-01-01T00:10:00.000Z";
+        store._session = { id: "sess_1", cycleId: "cyc_quick", projectId: project.id, clientPocId: poc.id,
+          status: "partial", completionStatus: "partial", sessionType: "quick_checkin", conversationState: {
+            state, quickCheckinOutcome: state === "quick_checkin_window" ? "feedback_shared" : "needs_improvement",
+            quickCheckinWindowExpiresAt: state === "quick_checkin_window" ? deadline : null
+          } };
+        const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
+          text, providerMessageId: "wamid.quick-outcome-" + state
+        });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201);
+        assert.equal(result.state, "quick_checkin_window");
+        assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+        assert.equal((result.whatsappReplyText.match(/Thank you/gi) || []).length, 1, result.whatsappReplyText);
+        assert.doesNotMatch(result.whatsappReplyText, /kind words|appreciating Overall Engagement|out of 10|recommend|anything else about/i);
+        if (state === "quick_checkin_window") assert.equal(result.session.conversationState.quickCheckinWindowExpiresAt, deadline);
       }
     } finally {
       global.fetch = priorFetch;
