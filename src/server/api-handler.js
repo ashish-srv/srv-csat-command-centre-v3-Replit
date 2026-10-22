@@ -847,7 +847,8 @@ function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpr
   const feedbackContinuation = suppliedFacts || ["feedback", "more_detail"].includes(interpretation?.intent);
   const firstOverallReview = !before.overallRatingAsked && !before.askedForOverallRating && feedbackContinuation
     && (state.projectEndReviewCaptured
-      || (state.generalFeedbackText && state.serviceScopeStatus !== "service_by_service"));
+      || ((state.generalFeedbackText || state.generalConcernText) && state.serviceScopeStatus !== "service_by_service")
+      || (project && buildChecklist(state, project).overallRatingStillNeeded));
   const ratingType = previousPause?.ratingType
     || (["overall_rating", "nps"].includes(pending) ? pending : null)
     || (firstOverallReview ? "overall_rating" : null);
@@ -885,15 +886,21 @@ function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpr
   );
   const affirmativeCompletion = answeringRatingChoice
     && (interpretation?.intent === "affirmative" || detectors.isAffirmative(text));
-  const finished = ["feedback", "conversation"].includes(completion)
+  const verifiedSkip = interpretation?.controlVerification === "verified"
+    && interpretation.serviceScope === SERVICE_SCOPE_DECISIONS.SKIP_REMAINING_SERVICES;
+  const finished = verifiedSkip || ["feedback", "conversation"].includes(completion)
     || (!suppliedFacts && (!feedbackContinuation || factFreeControlReply(text, interpretation)) && (completion === "topic" || interpretation?.intent === "negative"
       || affirmativeCompletion || isMoveOnReply(text)
       || soundsLikeFarewell(text) || detectors.isNegativeSkip(text)));
   if (finished) {
     state.ratingFeedbackPause = null;
-    if (project && previousPause?.overallReview && state.sessionType !== "project_end") finishFeedbackQuestions(state, project);
+    if (project && (verifiedSkip || (previousPause?.overallReview && state.sessionType !== "project_end"))) finishFeedbackQuestions(state, project);
   } else if (feedbackContinuation) {
     state.ratingFeedbackPause = previousPause ? { ...previousPause } : { ratingType, choiceAsked: false, overallReview: Boolean(firstOverallReview) };
+    // A failed control check must not fall into an acknowledgement-only dead
+    // end. If no new facts were supplied, clarify the pending choice instead.
+    if (interpretation?.controlVerification === "unverified" && !suppliedFacts) state.ratingFeedbackPause.choiceAsked = false;
+    if (ratingType === "overall_rating" && !before.overallRatingAsked) state.overallRatingAsked = false;
   }
 }
 
@@ -1362,6 +1369,14 @@ function pendingQuestionTypeFor(conversationState) {
 }
 
 function applyTurnServiceScope(conversationState, project, text, interpretation, conducted = {}, stateBefore = {}) {
+  // A response to the offered rating choice is survey control, not a new
+  // whole-project review, even if extraction incorrectly labels its scope.
+  const ratingChoice = stateBefore.pendingQuestionType === "rating_feedback"
+    || Boolean(stateBefore.ratingFeedbackPause);
+  const controlOnly = /^\s*(?:\d{1,2}(?:\.\d+)?(?:\s*\/\s*10)?|rating|score|overall rating|overall score|csat(?: rating)?|nps(?: rating)?)\s*[.!?]*\s*$/i.test(String(text || ""));
+  if (controlOnly && (ratingChoice || ["overall_rating", "nps"].includes(pendingQuestionTypeFor(stateBefore)))) {
+    return conversationState;
+  }
   const valid = new Set(Object.values(SERVICE_SCOPE_DECISIONS));
   // Service scope is a fact about what the client chose. Only the dedicated
   // latest-reply interpretation may supply it; the response-writing model is
@@ -3173,7 +3188,7 @@ function shouldUseFinalRatingReminder(session) {
 
 async function notifyAutomation(store, eventType, payload, dedupeKey = null) {
   if (dedupeKey && pendingAutomationKeys.has(dedupeKey)) {
-    return { eventType, status: "duplicate", dedupeKey };
+    return { eventType, status: "pending", delivered: false, dedupeKey };
   }
   if (dedupeKey) pendingAutomationKeys.add(dedupeKey);
 
@@ -3181,7 +3196,14 @@ async function notifyAutomation(store, eventType, payload, dedupeKey = null) {
     let claim = null;
     if (dedupeKey && typeof store.claimAutomationEvent === "function") {
       claim = await store.claimAutomationEvent(eventType, payload, dedupeKey);
-      if (!claim) return { eventType, status: "duplicate", dedupeKey };
+      if (!claim) {
+        const prior = typeof store.getAutomationEventByDedupeKey === "function"
+          ? await store.getAutomationEventByDedupeKey(dedupeKey) : null;
+        // A timed-out send may have delivered. Do not automatically resend it,
+        // but equally do not report a failed/pending attempt as delivered.
+        return { eventType, status: prior?.status === "sent" ? "duplicate" : prior?.status || "pending",
+          delivered: prior?.status === "sent", dedupeKey, error: prior?.error || null };
+      }
     }
 
     if (WHATSAPP_AUTOMATION_EVENTS.has(eventType) && !await whatsappMessagingEnabled(store)) {
@@ -3258,23 +3280,37 @@ function claimedInactiveFinalSweepState(session, nowIso) {
 }
 
 async function notifyCycleSummaryAfterAutomaticCompletion(store, session, baseUrl) {
-  if (
-    !session?.cycleId
-    || typeof store.isCycleComplete !== "function"
-    || typeof store.cycleSummary !== "function"
-    || !(await store.isCycleComplete(session.cycleId))
-  ) return;
-  const summary = await store.cycleSummary(session.cycleId);
-  if (!summary || !(summary.sessions || []).length) return;
-  await notifyAutomation(
-    store,
-    "cycle_completed",
-    cycleCompletedPayload(
-      summary,
-      buildResumeUrl(baseUrl, summary.project, session)
-    ),
-    `cycle_completed:cycle:${session.cycleId}`
-  );
+  if (!session?.id || typeof store.feedbackSessionSummary !== "function") return null;
+  if (typeof store.queueFeedbackSummary === "function") await store.queueFeedbackSummary(session.id);
+  const latestSession = await store.getSession(session.id);
+  if (latestSession?.id === session.id) session = latestSession;
+  const state = session.conversationState || {};
+  if (state.summaryDeliveryStatus === "sent") return { status: "duplicate", delivered: true };
+  if (state.state === STATES.CLOSING_GRACE && Date.parse(state.closingGraceExpiresAt || "") > Date.now()) return null;
+  if (state.state === "quick_checkin_window" && Date.parse(state.quickCheckinWindowExpiresAt || "") > Date.now()) return null;
+  const summary = await store.feedbackSessionSummary(session.id);
+  if (!summary?.project || !summary.poc) return null;
+  const quick = session.sessionType === "quick_checkin";
+  const event = await notifyAutomation(store, "cycle_completed", {
+    ...cycleCompletedPayload(summary, buildResumeUrl(baseUrl, summary.project, session)),
+    summaryType: quick ? "quick_checkin_poc" : "feedback_poc",
+    poc: summary.poc, messages: summary.messages || [],
+    csatScore: summary.sessions[0]?.csatScore ?? null,
+    npsScore: summary.sessions[0]?.npsScore ?? null,
+    quickCheckinOutcome: state.quickCheckinOutcome || null,
+    quickCheckinDetail: state.quickCheckinDetail || null
+  }, quick ? `cycle_completed:quick_checkin:session:${session.id}` : `cycle_completed:feedback:session:${session.id}`);
+  if (typeof store.markFeedbackSummaryDelivery === "function") await store.markFeedbackSummaryDelivery(session.id, event);
+  return event;
+}
+
+async function finalizeFeedbackWindowsAndNotify(store, nowIso, baseUrl) {
+  const closed = typeof store.finalizeExpiredInactiveFinalSweeps === "function"
+    ? await store.finalizeExpiredInactiveFinalSweeps(nowIso) : [];
+  const pending = typeof store.pendingFeedbackSummaries === "function"
+    ? await store.pendingFeedbackSummaries(nowIso) : [];
+  for (const session of pending) await notifyCycleSummaryAfterAutomaticCompletion(store, session, baseUrl);
+  return closed;
 }
 
 function clientQuestionsFromSessions(sessions = []) {
@@ -3309,6 +3345,10 @@ async function notifyExpiredQuickCheckinSummaries(store, expiration, baseUrl) {
   for (const session of expiration?.sessions || []) {
     const state = session.conversationState || {};
     if (state.closureReason !== "quick_checkin_window_elapsed") continue;
+    if (typeof store.feedbackSessionSummary === "function") {
+      notifications.push(await notifyCycleSummaryAfterAutomaticCompletion(store, session, baseUrl));
+      continue;
+    }
     if (typeof store.quickCheckinSessionSummary !== "function") continue;
     const summary = await store.quickCheckinSessionSummary(session.id);
     if (!summary?.project || !summary.poc) continue;
@@ -3697,7 +3737,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       project,
       question: lastQuestion ? lastQuestion.body : "",
       text,
-      pendingRatingChoice: stateBefore.ratingFeedbackPause?.ratingType || null
+      pendingRatingChoice: stateBefore.ratingFeedbackPause?.ratingType || null,
+      verifySurveyControls: true
     });
 
     // If Gemini could not be reached, let the rules fall back to their keyword
@@ -4319,7 +4360,10 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         predictSatisfaction({
           project,
           conversationState: turn.conversationState,
-          messages: transcript
+          messages: transcript,
+          // Automatic replies share the bounded terminal-analysis window.
+          // Keep the longer retry policy for explicit dashboard scoring only.
+          callOptions: { maxAttempts: 1, timeoutMs: 6000 }
         }),
         reviewIssues({
           project,
@@ -4548,7 +4592,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         error: handoffError.message
       };
     }
-    if (!["sent", "duplicate"].includes(postCompletionHandoffEvent?.status)) {
+    if (!(postCompletionHandoffEvent?.status === "sent" || (postCompletionHandoffEvent?.status === "duplicate" && postCompletionHandoffEvent.delivered === true))) {
       const salutation = poc?.salutation || poc?.name || "there";
       replyText = `Thank you, ${salutation}. This feedback cycle is already closed, and I could not pass this new message to the team automatically. Please contact your SRV representative directly so it is not missed.`;
     }
@@ -4572,6 +4616,12 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
           deferRequested: interpretation.deferRequested === true,
           completionScope: detectors.completionScopeFor(text, interpretation),
           completionEvidence: interpretation.completionEvidence || null,
+          controlVerification: interpretation.controlVerification || "not_requested",
+          controlVerificationError: interpretation.controlVerificationError || null,
+          proposedControl: interpretation.proposedControl || null,
+          verifiedControl: interpretation.verifiedControl || null,
+          ratingChoice: interpretation.ratingChoice || "none",
+          ratingChoiceEvidence: interpretation.ratingChoiceEvidence || null,
           serviceScope: interpretation.serviceScope,
           sentiment: interpretation.sentiment,
           serviceKeys: interpretation.serviceKeys,
@@ -4585,6 +4635,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       interpretedIntent: interpretation ? interpretation.intent : null,
       // What the machine did with it, so the two can be compared side by side.
       stateAfter: turn.conversationState.state,
+      pendingQuestionType: turn.conversationState.pendingQuestionType || null,
+      ratingFeedbackPause: turn.conversationState.ratingFeedbackPause || null,
       serviceScopeStatus: turn.conversationState.serviceScopeStatus || null,
       servicesAfter: Object.keys(turn.conversationState.mentionedServices || {}),
       // Recorded so the timeline shows WHY a turn was not understood, rather
@@ -4631,37 +4683,21 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   const terminalNotificationsAllowed = sessionEnded && !control.suppressTerminalNotifications;
   let cycleSummaryQueued = false;
 
-  // Per-issue emails are gone: a manager received four separate messages about
-  // one conversation, each with a partial picture. Everything now goes out once
-  // per project when the CYCLE ends, routed to the owner of each service.
+  // Queue one POC summary, but do not freeze it at the opening of the ten-minute
+  // correction window. Other POCs do not have to finish first.
   if (
     terminalNotificationsAllowed
     && !control.forceManagerAlert
     && !control.notify
-    && typeof store.cycleSummary === "function"
+    && typeof store.feedbackSessionSummary === "function"
     && updatedSession.cycleId
   ) {
-    const cycleDone = typeof store.isCycleComplete === "function"
-      ? await store.isCycleComplete(updatedSession.cycleId)
-      : true;
-
-    if (cycleDone) {
-      const summary = await store.cycleSummary(updatedSession.cycleId);
-      // A completed cycle is worth reporting even when nobody replied. The
-      // response status is itself management information and must be visible in
-      // the one-email-per-project summary.
-      const worthSending = summary && (summary.sessions || []).length;
-
-      if (worthSending) {
-        cycleSummaryQueued = true;
-        notifyAutomationAsync(
-          store,
-          "cycle_completed",
-          cycleCompletedPayload(summary, resumeUrl, pendingQuestions),
-          `cycle_completed:cycle:${updatedSession.cycleId}`,
-          waitUntil
-        );
-      }
+    try {
+      await notifyCycleSummaryAfterAutomaticCompletion(store, updatedSession, baseUrl);
+      cycleSummaryQueued = true;
+    } catch (summaryError) {
+      // The saved conversation and its reply must survive an email/audit outage.
+      console.warn("[summary] could not queue POC summary:", summaryError.message);
     }
   }
 
@@ -6098,28 +6134,9 @@ async function handleApiRequest(request) {
       console.warn("[cycle] stopped session could not be scored:", scoreError.message);
       stopScore = { attempted: true, scored: false, reason: scoreError.message };
     }
-    const resumeUrl = buildResumeUrl(baseUrl, project, session);
-
-    // If this was the final open POC, close the project cycle and queue the
-    // normal single cycle summary. Failure to email must not undo the stop.
+    // Report this POC independently. Failure to email must not undo the stop.
     try {
-      if (
-        session.cycleId
-        && typeof store.isCycleComplete === "function"
-        && typeof store.cycleSummary === "function"
-        && await store.isCycleComplete(session.cycleId)
-      ) {
-        const summary = await store.cycleSummary(session.cycleId);
-        if (summary && (summary.sessions || []).length) {
-          notifyAutomationAsync(
-            store,
-            "cycle_completed",
-            cycleCompletedPayload(summary, resumeUrl),
-            `cycle_completed:cycle:${session.cycleId}`,
-            request.waitUntil
-          );
-        }
-      }
+      await notifyCycleSummaryAfterAutomaticCompletion(store, session, baseUrl);
     } catch (summaryError) {
       console.warn("[cycle] could not queue summary after administrator stop:", summaryError.message);
     }
@@ -6283,8 +6300,12 @@ async function handleApiRequest(request) {
   // ---- Automation / scheduler
   if (method === "POST" && pathname === "/api/automation/complete-inactive-final-responses") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    const now = body.now ? new Date(body.now) : new Date();
+    if (Number.isNaN(now.getTime())) return error(400, "Invalid automation time");
+    const nowIso = now.toISOString();
+    const closed = await finalizeFeedbackWindowsAndNotify(store, nowIso, baseUrl);
     if (!await whatsappMessagingEnabled(store)) {
-      return json(200, { paused: true, sent: [], closedWithoutMessage: [], duplicates: [], failed: [], ignored: 0 });
+      return json(200, { paused: true, closed, sent: [], closedWithoutMessage: [], duplicates: [], failed: [], ignored: 0 });
     }
     if (
       typeof store.getInactiveFinalSweepCandidates !== "function"
@@ -6295,12 +6316,6 @@ async function handleApiRequest(request) {
       return error(503, "Six-hour completion is not supported by the configured data provider");
     }
 
-    const now = body.now ? new Date(body.now) : new Date();
-    if (Number.isNaN(now.getTime())) return error(400, "Invalid automation time");
-    const nowIso = now.toISOString();
-    const closed = typeof store.finalizeExpiredInactiveFinalSweeps === "function"
-      ? await store.finalizeExpiredInactiveFinalSweeps(nowIso)
-      : [];
     const candidates = await store.getInactiveFinalSweepCandidates(nowIso);
     const sent = [];
     const closedWithoutMessage = [];
@@ -6550,10 +6565,12 @@ async function handleApiRequest(request) {
 
   if (method === "POST" && pathname === "/api/automation/create-due-quick-checkins") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    const nowIso = body.now || new Date().toISOString();
+    if (!Number.isFinite(Date.parse(nowIso))) return error(400, "Invalid automation time");
+    const expired = await expireQuickCheckinsAndNotify(store, nowIso, baseUrl);
     if (!await whatsappMessagingEnabled(store)) {
-      return json(200, { paused: true, scheduleKey: null, cycles: [], skipped: [], expired: 0 });
+      return json(200, { paused: true, scheduleKey: null, cycles: [], skipped: [], expired: expired.expired });
     }
-    const expired = await expireQuickCheckinsAndNotify(store, body.now, baseUrl);
     const due = await store.getDueQuickCheckinTargets(body.now);
     const cycles = [];
     const skipped = [];
@@ -6602,16 +6619,18 @@ async function handleApiRequest(request) {
 
   if (method === "POST" && pathname === "/api/automation/process-due-reminders") {
     if (!isAutomationAuthorized(request.headers)) return error(401, "Unauthorized automation request");
+    const nowIso = body.now || new Date().toISOString();
+    if (!Number.isFinite(Date.parse(nowIso))) return error(400, "Invalid automation time");
+    await finalizeFeedbackWindowsAndNotify(store, nowIso, baseUrl);
+    const expiredQuickCheckins = await expireQuickCheckinsAndNotify(store, nowIso, baseUrl);
     if (!await whatsappMessagingEnabled(store)) {
       return json(200, { paused: true, reminders: [], closed: [], deferredClosures: [], failed: [] });
     }
-    const expiredQuickCheckins = await expireQuickCheckinsAndNotify(store, body.now, baseUrl);
     const targets = await store.getDueReminderTargets(body.now);
     const reminders = [];
     const closed = [];
     const closureReviewTasks = [];
     const deferredClosures = [];
-    const closedCycleContexts = new Map();
 
     for (const target of targets) {
       // Opted-out or handed-off POCs are never re-pinged.
@@ -6676,12 +6695,6 @@ async function handleApiRequest(request) {
           finalAnalysisQueued: isPartial && typeof store.applyFinalPartialAnalysis === "function"
         };
         closed.push(closedEntry);
-        if (closedSession.cycleId) {
-          closedCycleContexts.set(closedSession.cycleId, {
-            projectKey: target.projectKey,
-            session: closedSession
-          });
-        }
 
         if (closedEntry.finalAnalysisQueued) closureReviewTasks.push(async () => {
           let session = closedSession;
@@ -6744,25 +6757,11 @@ async function handleApiRequest(request) {
     }
 
     const finishClosedCycles = async () => {
-      // Review separate POCs concurrently. The cycle summary waits for all of
-      // them, so a mixed partial/no-response cycle cannot email an incomplete
-      // score simply because its no-response POC closed first.
+      // Finish each POC's analysis before taking their final summary snapshot.
       await Promise.all(closureReviewTasks.map((task) => task()));
-      for (const [cycleId, context] of closedCycleContexts) {
-        if (
-          typeof store.isCycleComplete !== "function"
-          || typeof store.cycleSummary !== "function"
-          || !(await store.isCycleComplete(cycleId))
-        ) continue;
-        const summary = await store.cycleSummary(cycleId);
-        if (!summary || !(summary.sessions || []).length) continue;
-        const resumeUrl = buildResumeUrl(baseUrl, { key: context.projectKey }, context.session);
-        await notifyAutomation(
-          store,
-          "cycle_completed",
-          cycleCompletedPayload(summary, resumeUrl),
-          `cycle_completed:cycle:${cycleId}`
-        );
+      for (const entry of closed) {
+        const latest = await store.getSession(entry.session.id) || entry.session;
+        await notifyCycleSummaryAfterAutomaticCompletion(store, latest, baseUrl);
       }
     };
 
@@ -8252,7 +8251,9 @@ function quickCheckinDetailDecision(text, interpretation) {
     || (interpretation?.sentiment === "negative" && interpretation?.explainsProblem === true);
   if (hasSubstantiveNegativeFeedback) return "feedback";
   if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) return "covered";
-  if (interpretation?.intent === "negative") return "covered";
+  // Negative intent alone is not a refusal: it may be a complaint whose
+  // structured details were omitted. Only verified completion can close it.
+  if (interpretation?.intent === "negative") return "needs_detail";
   if (interpretation?.intent === "affirmative") return "acknowledgement";
   if (interpretation?.intent === "off_topic" || interpretation?.intent === "rating") return "off_topic";
   if (["more_detail", "unclear"].includes(interpretation?.intent)) return "needs_detail";
@@ -8560,7 +8561,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       project,
       question: `What needs improvement, what is going well, or what should management know about ${project.name}?`,
       text,
-      longForm: true
+      longForm: true,
+      verifySurveyControls: true
     }));
   const recordDetail = async (inputInterpretation) => {
     let interpretation = inputInterpretation;
@@ -8583,7 +8585,6 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     }
     return recorded;
   };
-  const interpretAndRecord = async () => recordDetail(await interpretDetail());
 
   const responseDeadline = Date.parse(
     state.state === "quick_checkin_window"
@@ -8605,7 +8606,9 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   } else if (state.state === "quick_checkin_window") {
     if (allGood) {
       result = { session };
-      replyText = "Glad to hear that. Your All good response is already recorded, and the original 10-minute window remains open if you would like to add or correct anything else.";
+      replyText = state.quickCheckinOutcome === "all_good"
+        ? "Glad to hear that. Your All good response is already recorded, and the original 10-minute window remains open if you would like to add or correct anything else."
+        : "Thank you for the update. Your earlier feedback remains recorded, and the original 10-minute window remains open if you would like to add or correct anything else.";
     } else if (shareChoice) {
       result = { session };
       replyText = "Please share what needs improvement, any issue you are facing, or anything you would like management to be aware of. The original 10-minute window remains open.";
@@ -8613,14 +8616,15 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       result = { session };
       replyText = "Thank you. Your response is recorded, and the original 10-minute window remains open if you would like to add or correct anything else.";
     } else {
-      result = await interpretAndRecord();
-      replyText = quickCheckinFeedbackAcknowledgement(
-        poc,
-        recordedInterpretation,
-        "The original 10-minute window remains open if you would like to add or correct anything else.",
-        project,
-        state.quickCheckinOutcome === "feedback_shared"
-      );
+      const interpretation = await interpretDetail();
+      const decision = quickCheckinDetailDecision(text, interpretation);
+      result = decision === "feedback" ? await recordDetail(interpretation) : { session };
+      const windowText = "The original 10-minute window remains open if you would like to add or correct anything else.";
+      replyText = decision === "feedback"
+        ? quickCheckinFeedbackAcknowledgement(poc, recordedInterpretation, windowText, project, state.quickCheckinOutcome === "feedback_shared")
+        : ["covered", "acknowledgement", "defer"].includes(decision)
+          ? `Thank you. Your earlier feedback remains recorded. ${windowText}`
+          : `If there is anything you would like the Directors to specifically note or follow up on, please feel free to share it here. ${windowText}`;
     }
   } else if (allGood) {
     result = await store.applyQuickCheckinResponse(session.id, { outcome: "all_good" });
@@ -8662,7 +8666,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       replyText = `Thank you, ${poc.salutation || poc.name}. We understand there is nothing further you would like the Directors to note at the moment. Your response has been recorded for confidential management review. This quick check-in will remain open for the next 10 minutes, during which you can add anything else or correct your response.`;
     } else if (decision === "meeting_reference") {
       result = { session };
-      replyText = `Thank you for letting us know, ${poc.salutation || poc.name}. We understand this was discussed in today's meeting. If there is anything you would like the Directors to specifically note or follow up on, please feel free to share it here. If everything is covered, just let us know.`;
+      replyText = `Thank you for letting us know, ${poc.salutation || poc.name}. If there is anything you would like the Directors to specifically note or follow up on, please feel free to share it here. If everything is covered, just let us know.`;
     } else if (decision === "acknowledgement") {
       result = { session };
       replyText = `Thank you, ${poc.salutation || poc.name}. Please share the feedback whenever convenient.`;
@@ -8736,7 +8740,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       postCompletionHandoffEvent = { status: "failed", error: handoffError.message };
     }
 
-    const handoffAccepted = ["sent", "duplicate"].includes(postCompletionHandoffEvent?.status);
+    const handoffAccepted = postCompletionHandoffEvent?.status === "sent"
+      || (postCompletionHandoffEvent?.status === "duplicate" && postCompletionHandoffEvent.delivered === true);
     replyText = handoffAccepted
       ? "This automated quick check-in has closed, so I cannot add this message to it. I have passed your message to the SRV team, and someone will respond directly."
       : "This automated quick check-in has closed, and I could not pass this new message to the team automatically. Please contact your SRV representative directly so it is not missed.";

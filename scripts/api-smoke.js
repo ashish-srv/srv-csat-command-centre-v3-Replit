@@ -436,6 +436,17 @@ const store = {
     if (row) Object.assign(row, event);
     return row || null;
   },
+  getAutomationEventByDedupeKey: async (key) => calls.automationClaims.get(key) || null,
+  queueFeedbackSummary: async (sessionId) => {
+    if (sessionId === store._session.id) store._session.conversationState.summaryPendingSince ||= new Date().toISOString();
+  },
+  feedbackSessionSummary: async (sessionId) => {
+    const expired = store._expiredQuickCheckins.sessions.find((session) => session.id === sessionId);
+    if (expired?.sessionType === "quick_checkin") {
+      return { ...(await store.quickCheckinSessionSummary(sessionId)), sessions: [expired] };
+    }
+    return store._cycleSummary ? { ...store._cycleSummary, poc, sessions: [store._session], messages: calls.messages } : null;
+  },
   isCycleComplete: async () => store._cycleComplete,
   cycleSummary: async () => store._cycleSummary,
   getDirectory: async () => ({ clusters: [{ id: "clu_1", name: "Existing" }], clients: [{ id: "cl_1", key: "test", name: "Test Client" }], projects: [project], pocLevels: [{ id: "normal", name: "Normal", weight: 40 }, { id: "important", name: "Important", weight: 60 }], departments: [], subDepartments: [], internalPocs: [] }),
@@ -2791,11 +2802,12 @@ async function scenario(name, fn) {
     const priorMessages = [...calls.messages];
     const priorSession = store._session;
     process.env.GEMINI_API_KEY = "test-key";
-    global.fetch = async () => ({
+    global.fetch = async (_url, options) => ({
       ok: true,
       status: 200,
       json: async () => ({
-        output_text: JSON.stringify({
+        output_text: JSON.stringify(JSON.parse(options.body).input.includes("Task: verify ONLY")
+          ? { decision: "feedback", evidence: "I think we have taken care of everything already" } : {
           intent: "negative", deferRequested: false, serviceScope: "none", sentiment: "neutral", rating: null,
           serviceHint: null, serviceHints: [], explainsProblem: false, isObservation: false,
           serviceFeedback: [], observations: [], appreciations: []
@@ -2867,6 +2879,34 @@ async function scenario(name, fn) {
       calls.messages.length = 0;
       calls.messages.push(...priorMessages);
       store._session = priorSession;
+    }
+  });
+
+  await scenario("quick check-in closing window preserves concerns and does not record a deferral as new feedback", async () => {
+    const priorSession = store._session;
+    const priorFetch = global.fetch;
+    const priorKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "fixture";
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
+      intent: "defer", deferRequested: true, serviceScope: "none", sentiment: "neutral",
+      completionScope: "none", explainsProblem: false, serviceFeedback: [], observations: [], concerns: [], appreciations: []
+    }) }) });
+    store._session = { id: "sess_1", cycleId: "cyc_quick", projectId: project.id, clientPocId: poc.id,
+      sessionType: "quick_checkin", status: "partial", completionStatus: "partial",
+      conversationState: { state: "quick_checkin_window", quickCheckinOutcome: "feedback_shared",
+        quickCheckinDetail: "The reporting totals are inaccurate.", quickCheckinWindowExpiresAt: "2099-01-01T00:10:00.000Z" } };
+    const before = calls.quickCheckinResponses.length;
+    try {
+      const positive = JSON.parse((await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "all good" })).body);
+      assert.match(positive.whatsappReplyText, /earlier feedback remains recorded/i);
+      assert.doesNotMatch(positive.whatsappReplyText, /All good response is already recorded/i);
+      const later = JSON.parse((await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "I will send the rest tomorrow" })).body);
+      assert.equal(later.session.conversationState.quickCheckinDetail, "The reporting totals are inaccurate.");
+      assert.equal(later.session.conversationState.quickCheckinWindowExpiresAt, "2099-01-01T00:10:00.000Z");
+      assert.equal(calls.quickCheckinResponses.length, before);
+    } finally {
+      store._session = priorSession; global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
     }
   });
 
@@ -3188,7 +3228,7 @@ async function scenario(name, fn) {
     assert.deepStrictEqual(humanEvents, []);
   });
 
-  await scenario("cycle summary is queued once and not resent after completion", async () => {
+  await scenario("POC summary waits for the correction window and is not resent after completion", async () => {
     const mentionedServices = Object.fromEntries(project.services.map((service) => [
       service.serviceKey,
       { serviceKey: service.serviceKey, serviceName: service.name, status: "captured", sentiment: "neutral" }
@@ -3218,15 +3258,27 @@ async function scenario(name, fn) {
       recipients: ["owner@srvmedia.com"]
     };
     calls.automation.length = 0;
-    calls.automationClaims.delete("cycle_completed:cycle:cyc_1");
+    calls.automationClaims.delete("cycle_completed:feedback:session:sess_1");
 
     await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "8" });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(calls.automation.filter((e) => e.eventType === "cycle_completed").length, 1);
+    assert.strictEqual(calls.automation.filter((e) => e.eventType === "cycle_completed").length, 0);
+    assert.ok(store._session.conversationState.summaryPendingSince);
 
     await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text: "ok" });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(calls.automation.filter((e) => e.eventType === "cycle_completed").length, 1);
+    assert.strictEqual(calls.automation.filter((e) => e.eventType === "cycle_completed").length, 0);
+    store._session.conversationState = { ...store._session.conversationState,
+      state: "completed", closingGraceExpiresAt: "2020-01-01T00:00:00Z" };
+    store.pendingFeedbackSummaries = async () => [store._session];
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await req("POST", "/api/automation/process-due-reminders", {});
+        assert.equal(result.statusCode, 200);
+        assert.strictEqual(calls.automation.filter((e) => e.eventType === "cycle_completed").length, 1);
+      }
+      assert.equal(calls.automation.find((e) => e.eventType === "cycle_completed").payload.summaryType, "feedback_poc");
+    } finally { delete store.pendingFeedbackSummaries; }
     store._cycleComplete = false;
     store._cycleSummary = null;
   });
@@ -4208,6 +4260,7 @@ async function scenario(name, fn) {
     };
     calls.automation.length = 0;
     calls.automationClaims.delete("cycle_completed:cycle:cyc_1");
+    calls.automationClaims.delete("cycle_completed:feedback:session:sess_1");
 
     try {
       const res = await req("POST", "/api/automation/process-due-reminders", {});
@@ -5971,10 +6024,13 @@ async function scenario(name, fn) {
       sentiment: "neutral", serviceFeedback: [], observations: [], concerns: [], appreciations: []
     }, answer];
     let modelCalls = 0;
-    global.fetch = async () => ({
-      ok: true, status: 200,
-      json: async () => ({ output_text: JSON.stringify(replies[modelCalls++] || answer) })
-    });
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options?.body || "{}").input || "";
+      const result = input.includes("Task: verify ONLY the client's survey-control instruction")
+        ? { decision: "feedback", evidence: done }
+        : replies[modelCalls++] || answer;
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+    };
     store._session = {
       id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
       status: "started", completionStatus: "no_response", sessionType: "project_end",
@@ -6020,6 +6076,154 @@ async function scenario(name, fn) {
     }
   });
 
+  for (const sessionType of ["pulse", "project_end"]) for (const variant of ["incorrect skip", "courtesy completion", "incorrect service consent", "no scope", "incorrect completion intent", "verification timeout"]) {
+    await scenario(`${sessionType} first broad review cannot bypass the invitation with ${variant}`, async () => {
+      const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+      const priorSession = store._session, priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      const text = "Hi thanks a lot for your message. I believe we were all working in the direction to make things better for all so we could achieve what we had envisaged for this year likewise as done in the past. I appreciate your taking the feedback in a positive manner as I stepped in for the first time though I have been in the system for more than 8 years. I hope we keep up the good work giving our best and carry on with a mutually beneficial relationship in the times to come as well. Once again thanks for all the support you and your team has extended and for taking things in a positive stride I guess that is how we all learn and improvise, applies to us also and would like to learn and benefit from your expertise in the field.";
+      const acknowledgement = "Thank you for your kind words and trust. We value the partnership and the support you have recognised.";
+      let controlCalls = 0;
+      global.fetch = async (_url, options) => {
+        const input = JSON.parse(options?.body || "{}").input || "";
+        if (input.includes("Task: verify ONLY the client's survey-control instruction")) {
+          controlCalls += 1;
+          if (variant === "verification timeout") throw new Error("simulated survey-control verification timeout");
+          return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({ decision: "none", evidence: null }) }) };
+        }
+        const result = input.includes("Task: interpret ONE client reply") ? {
+          intent: variant === "incorrect completion intent" ? "negative" : "feedback", sentiment: "positive", acknowledgement,
+          serviceScope: variant === "incorrect skip" ? "skip_remaining_services" : variant === "incorrect service consent" ? "continue_service_by_service" : variant === "no scope" ? "none" : "overall_feedback",
+          completionScope: ["courtesy completion", "verification timeout"].includes(variant) ? "feedback" : "none",
+          completionEvidence: "Once again thanks for all the support you and your team has extended",
+          appreciations: [{ subject: "SRV Team", detail: "I appreciate your taking the feedback in a positive manner" }]
+        } : { message: `${acknowledgement} On a scale of 0 to 10, how would you rate your overall experience?`,
+          acknowledgement, askedForOverallRating: true, readyToClose: false };
+        return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+      };
+      store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+        status: "partial", completionStatus: "partial", sessionType, conversationState: {
+          state: sessionType === "project_end" ? "waiting_for_open_feedback" : "waiting_for_service_feedback", sessionType,
+          pendingQuestionType: sessionType === "project_end" ? "project_end_review" : "service",
+          pendingServiceKey: sessionType === "project_end" ? null : "ppc",
+          projectEndReviewAsked: sessionType === "project_end", overallRatingAsked: false, mentionedServices: {}
+        } };
+      try {
+        const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text,
+          providerMessageId: `wamid.first-review-${sessionType}-${variant}` });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201);
+        assert.equal(result.session.conversationState.pendingQuestionType, "rating_feedback", result.whatsappReplyText);
+        assert.match(result.whatsappReplyText, /add anything else.*overall rating/i);
+        assert.doesNotMatch(result.whatsappReplyText, /on a scale|out of 10|missed.*department|one by one/i);
+        assert.equal(result.session.conversationState.overallRating, null);
+        assert.equal(result.session.conversationState.npsScore, null);
+        assert.notEqual(result.session.conversationState.overallRatingAsked, true, "an internal draft must not count as an asked rating");
+        assert.notEqual(result.session.conversationState.serviceScopeStatus, "skipped");
+        if (variant !== "no scope") assert.equal(controlCalls, 1);
+        assert.equal(result.nextMessage.metadata.pendingQuestionType, "rating_feedback");
+        if (variant !== "no scope") assert.equal(result.nextMessage.metadata.interpretation.controlVerification, "unverified");
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+        calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+      }
+    });
+  }
+
+  for (const [text, decision, evidence] of [
+    ["The reports arrived late. That covers everything I wanted to share", "feedback", "That covers everything I wanted to share"],
+    ["The reports arrived late. Hope this feedback is sufficient", "feedback", "Hope this feedback is sufficient"],
+    ["The reports arrived late. Ab rating poochiye", "proceed_to_rating", "Ab rating poochiye"],
+    ["The reports arrived late. Please leave the rest of the service questions", "skip_remaining_services", "Please leave the rest of the service questions"],
+    ["The reports arrived late. I prefer not to answer any further questions", "conversation", "I prefer not to answer any further questions"]
+  ]) await scenario(`A verified '${decision}' instruction in a first review is honoured without losing its concern`, async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+    const priorSession = store._session, priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    calls.messages.length = 0;
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options?.body || "{}").input || "";
+      const result = input.includes("Task: verify ONLY the client's survey-control instruction") ? { decision, evidence }
+        : input.includes("Task: interpret ONE client reply") ? {
+          intent: "feedback", sentiment: "negative", serviceScope: "overall_feedback", completionScope: "feedback", completionEvidence: evidence,
+          acknowledgement: "I am sorry the reports arrived late.",
+          serviceFeedback: [{ serviceHint: "PPC / Media", summary: "The reports arrived late", sentiment: "negative", needsFollowUp: false }]
+        } : { message: "Thank you. Anything else about PPC / Media?", askedServiceFollowUpKey: "ppc" };
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+    };
+    store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+      status: "partial", completionStatus: "partial", sessionType: "pulse", conversationState: {
+        state: "waiting_for_service_feedback", sessionType: "pulse", pendingQuestionType: "service", pendingServiceKey: "ppc",
+        overallRatingAsked: false, mentionedServices: {}
+      } };
+    try {
+      const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text,
+        providerMessageId: `wamid.first-review-explicit-${evidence}` });
+      const result = JSON.parse(response.body);
+      assert.equal(response.statusCode, 201);
+      assert.match(result.session.conversationState.mentionedServices.ppc.reasonText, /reports arrived late/i);
+      assert.equal(result.session.conversationState.overallRating, null);
+      if (decision === "conversation") {
+        assert.equal(result.state, "closing_grace");
+        assert.doesNotMatch(result.whatsappReplyText, /\?/);
+      } else {
+        assert.equal(result.session.conversationState.pendingQuestionType, "overall_rating", result.whatsappReplyText);
+        assert.match(result.whatsappReplyText, /overall.*out of 10/i);
+        assert.doesNotMatch(result.whatsappReplyText, /Would you like to add anything else/);
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
+  await scenario("An uncertain rating-choice verification reoffers the choice instead of an acknowledgement-only dead end", async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+    const priorSession = store._session, priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    calls.messages.length = 0;
+    let text = "We can proceed to the score now";
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options?.body || "{}").input || "";
+      if (input.includes("Task: verify ONLY the client's survey-control instruction")) throw new Error("simulated control timeout");
+      const result = input.includes("Task: interpret ONE client reply")
+        ? { intent: "feedback", sentiment: "neutral", ratingChoice: "proceed", ratingChoiceEvidence: text }
+        : { message: "Thank you for confirming.", acknowledgement: "Thank you for confirming." };
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+    };
+    store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+      status: "partial", completionStatus: "partial", sessionType: "pulse", conversationState: {
+        state: "waiting_for_overall_rating", sessionType: "pulse", pendingQuestionType: "rating_feedback",
+        ratingFeedbackPause: { ratingType: "overall_rating", choiceAsked: true, overallReview: true },
+        generalFeedbackText: "The partnership has been good", serviceScopeStatus: "awaiting_choice", mentionedServices: {},
+        overallRatingAsked: false, overallRating: null, lastQuestionAsked: "Thank you for confirming."
+      } };
+    try {
+      const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text, providerMessageId: "wamid.uncertain-control-choice" });
+      const result = JSON.parse(response.body);
+      assert.equal(response.statusCode, 201);
+      assert.match(result.whatsappReplyText, /add anything else.*overall rating/i);
+      assert.equal(result.session.conversationState.pendingQuestionType, "rating_feedback");
+      assert.equal(result.session.conversationState.overallRating, null);
+      assert.equal(result.nextMessage.metadata.interpretation.controlVerification, "unverified");
+      assert.ok(result.nextMessage.metadata.interpretation.controlVerificationError);
+      text = "rating";
+      const retry = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text, providerMessageId: "wamid.uncertain-control-resolved" });
+      const retried = JSON.parse(retry.body);
+      assert.equal(retry.statusCode, 201);
+      assert.match(retried.whatsappReplyText, /overall.*out of 10/i);
+      assert.equal(retried.session.conversationState.pendingQuestionType, "overall_rating");
+      assert.equal(retried.session.conversationState.overallRating, null);
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+    }
+  });
+
   for (const [sessionType, ratingType] of [["pulse", "overall_rating"], ["project_end", "overall_rating"], ["project_end", "nps"]]) {
     for (const [text, semanticChoice, evidence, timeout] of [
       ["rating", "none", null, false],
@@ -6034,6 +6238,9 @@ async function scenario(name, fn) {
       let extractionPrompt = "";
       global.fetch = async (_url, options) => {
         const input = JSON.parse(options?.body || "{}").input || "";
+        if (input.includes("Task: verify ONLY the client's survey-control instruction")) return {
+          ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({ decision: "proceed_to_rating", evidence }) })
+        };
         if (input.includes("Task: interpret ONE client reply")) {
           extractionPrompt = input;
           return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
@@ -8678,6 +8885,8 @@ async function scenario(name, fn) {
       feedback_cycles: { cycle_type: "pulse" }
     };
     let savedState = null;
+    let recomputed = false;
+    provider.recomputeCycle = async () => { recomputed = true; };
     provider.request = async (table, options) => {
       assert.strictEqual(table, "feedback_sessions");
       if (!options.method) return [row];
@@ -8688,6 +8897,7 @@ async function scenario(name, fn) {
     assert.strictEqual(closed.length, 1);
     assert.strictEqual(savedState.state, "completed");
     assert.strictEqual(savedState.closureReason, "final_sweep_inactive_six_hours");
+    assert.equal(recomputed, true);
   });
 
   let failed = 0;

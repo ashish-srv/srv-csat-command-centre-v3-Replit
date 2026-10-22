@@ -87,8 +87,16 @@ function sessionIsTerminal(session) {
   if (!session) return false;
   const state = (session.conversationState && session.conversationState.state) || "";
   return ["completed", "opted_out"].includes(session.status)
+    || session.completionStatus === "completed"
     || ["completed", "opted_out", "handed_off"].includes(state)
     || reminderLoopExhausted(session);
+}
+
+function sessionHasOpenResponseWindow(session, nowMs = Date.now()) {
+  const state = session?.conversationState || {};
+  const deadline = state.state === "closing_grace" ? state.closingGraceExpiresAt
+    : state.state === "quick_checkin_window" ? state.quickCheckinWindowExpiresAt : null;
+  return Boolean(deadline && Date.parse(deadline) > nowMs);
 }
 
 function performanceNumber(value) {
@@ -661,13 +669,10 @@ class SupabaseStore {
 
   async getActiveSessionForPoc(clientPocId) {
     const rows = await this.request("feedback_sessions", {
-      query: `client_poc_id=eq.${encodeURIComponent(clientPocId)}&status=in.(started,partial,no_response)&select=*,feedback_cycles(cycle_type)&order=started_at.desc&limit=1`
+      query: `client_poc_id=eq.${encodeURIComponent(clientPocId)}&select=*,feedback_cycles(cycle_type)&order=started_at.desc&limit=20`
     });
-    if (!rows.length) return null;
-    const session = toSession(rows[0], {
-      cycleType: rows[0].feedback_cycles ? rows[0].feedback_cycles.cycle_type : null
-    });
-    return sessionIsTerminal(session) ? null : session;
+    return rows.map((row) => toSession(row, { cycleType: row.feedback_cycles?.cycle_type }))
+      .find((session) => sessionHasOpenResponseWindow(session) || !sessionIsTerminal(session)) || null;
   }
 
   async getLatestSessionForPoc(clientPocId) {
@@ -1050,9 +1055,14 @@ class SupabaseStore {
 
   async hasOpenCycle(projectId, cycleType) {
     const rows = await this.request("feedback_cycles", {
-      query: `project_id=eq.${encodeURIComponent(projectId)}&cycle_type=eq.${encodeURIComponent(cycleType)}&status=eq.open&select=id&limit=1`
+      query: `project_id=eq.${encodeURIComponent(projectId)}&cycle_type=eq.${encodeURIComponent(cycleType)}&status=eq.open&select=id`
     });
-    return rows.length > 0;
+    for (const row of rows) {
+      const sessions = await this.listCycleSessions(row.id);
+      if (!sessions.length || !sessions.every(sessionIsTerminal)) return true;
+      await this.recomputeCycle(row.id, projectId);
+    }
+    return false;
   }
 
   async hasAnyCycle(projectId, cycleType) {
@@ -1969,6 +1979,61 @@ class SupabaseStore {
     return rows && rows[0] ? rows[0] : null;
   }
 
+  async getAutomationEventByDedupeKey(dedupeKey) {
+    const rows = await this.request("automation_events", {
+      query: `dedupe_key=eq.${encodeURIComponent(dedupeKey)}&select=*&limit=1`
+    });
+    return rows[0] || null;
+  }
+
+  async queueFeedbackSummary(sessionId) {
+    const session = await this.getSession(sessionId);
+    if (!session) return;
+    const state = session.conversationState || {};
+    if (state.summaryDeliveryStatus === "sent" || state.summaryPendingSince) return;
+    const legacy = session.cycleId && session.sessionType !== "quick_checkin"
+      ? await this.getAutomationEventByDedupeKey(`cycle_completed:cycle:${session.cycleId}`) : null;
+    await this.request("feedback_sessions", {
+      method: "PATCH", query: `id=eq.${encodeURIComponent(sessionId)}`,
+      body: { conversation_state: { ...state, summaryPendingSince: new Date().toISOString(),
+        ...(legacy?.status === "sent" ? { summaryDeliveryStatus: "sent", summarySentAt: legacy.sent_at || null } : {})
+      } }
+    });
+  }
+
+  async pendingFeedbackSummaries(nowIso = new Date().toISOString()) {
+    const sessions = [];
+    for (let offset = 0; ; offset += 1000) {
+      const rows = await this.request("feedback_sessions", {
+        query: `select=*,feedback_cycles(cycle_type)&order=started_at.desc&limit=1000&offset=${offset}`
+      });
+      for (const row of rows) {
+        const session = toSession(row, this.sessionExtras(row));
+        const state = session.conversationState || {};
+        // Explicitly queued completions only: deployment must not email the
+        // entire historical database. A grace window is not a final snapshot.
+        if (state.summaryPendingSince && state.summaryDeliveryStatus !== "sent"
+          && sessionIsTerminal(session) && !sessionHasOpenResponseWindow(session, Date.parse(nowIso))) sessions.push(session);
+      }
+      if (rows.length < 1000) break;
+    }
+    return sessions;
+  }
+
+  async markFeedbackSummaryDelivery(sessionId, event) {
+    const session = await this.getSession(sessionId);
+    if (!session) return;
+    const delivered = event.status === "sent" || (event.status === "duplicate" && event.delivered === true);
+    await this.request("feedback_sessions", {
+      method: "PATCH", query: `id=eq.${encodeURIComponent(sessionId)}`,
+      body: { conversation_state: { ...session.conversationState,
+        summaryDeliveryStatus: delivered ? "sent" : event.status,
+        summaryDeliveryError: event.error || null,
+        ...(delivered ? { summarySentAt: new Date().toISOString() } : {})
+      } }
+    });
+  }
+
   // -------------------------------------------------------------------
   // Scheduler targets
   // -------------------------------------------------------------------
@@ -2047,9 +2112,14 @@ class SupabaseStore {
   async finalizeExpiredInactiveFinalSweeps(nowIso = new Date().toISOString()) {
     const nowMs = new Date(nowIso).getTime();
     if (!Number.isFinite(nowMs)) throw new Error("Invalid automation time");
-    const rows = await this.request("feedback_sessions", {
-      query: "completion_status=eq.completed&select=*,feedback_cycles(cycle_type)&order=completed_at.desc&limit=1000"
-    });
+    const rows = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = await this.request("feedback_sessions", {
+        query: `completion_status=eq.completed&select=*,feedback_cycles(cycle_type)&order=completed_at.desc&limit=1000&offset=${offset}`
+      });
+      rows.push(...page);
+      if (page.length < 1000) break;
+    }
     const closed = [];
     for (const row of rows) {
       const session = toSession(row, {
@@ -2059,7 +2129,6 @@ class SupabaseStore {
       const expiresAt = Date.parse(state.closingGraceExpiresAt || "");
       if (
         state.state !== "closing_grace"
-        || !(state.sixHourAutoCompletionSentAt || state.sixHourAutoCompletionDeliveryUncertainAt)
         || !Number.isFinite(expiresAt)
         || expiresAt > nowMs
       ) continue;
@@ -2069,7 +2138,8 @@ class SupabaseStore {
         state: "completed",
         pendingQuestionType: null,
         closingGraceClosedAt: nowIso,
-        closureReason: "final_sweep_inactive_six_hours"
+        closureReason: (state.sixHourAutoCompletionClaimedAt || state.sixHourAutoCompletionSentAt || state.sixHourAutoCompletionDeliveryUncertainAt)
+          ? "final_sweep_inactive_six_hours" : "closing_window_elapsed"
       };
       const updatedRows = await this.request("feedback_sessions", {
         method: "PATCH",
@@ -2081,6 +2151,7 @@ class SupabaseStore {
         pocName: session.pocName,
         pocWeight: session.pocWeight
       }));
+      await this.recomputeCycle(session.cycleId, session.projectId);
     }
     return closed;
   }
@@ -2127,7 +2198,8 @@ class SupabaseStore {
       query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,no_response,partial)&select=*,client_pocs(name,salutation,honorific,contact_whatsapp,contact_email,poc_level_id,weight_percentage,removed_at),feedback_cycles(cycle_type),projects(project_key,name)&order=reminder_due_at.asc`
     });
 
-    return rows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin" && !row.client_pocs?.removed_at).map((row) => ({
+    return rows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin" && !row.client_pocs?.removed_at
+      && !sessionIsTerminal(toSession(row, this.sessionExtras(row)))).map((row) => ({
       session: toSession(row, this.sessionExtras(row)),
       poc: row.client_pocs
         ? toClientPoc(
@@ -2903,11 +2975,17 @@ class SupabaseStore {
     if (!observations.length) return [];
 
     const existing = await this.request("observations", {
-      query: `session_id=eq.${encodeURIComponent(session.id)}&select=topic`
+      query: `session_id=eq.${encodeURIComponent(session.id)}&select=topic,detail,sentiment`
     });
-    const seen = new Set(existing.map((row) => String(row.topic).toLowerCase()));
-
-    const fresh = observations.filter((item) => !seen.has(String(item.topic).toLowerCase()));
+    const key = (item) => [item.topic, item.detail, item.sentiment || "neutral"]
+      .map((value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase()).join("\u0000");
+    const seen = new Set(existing.map(key));
+    const fresh = observations.filter((item) => {
+      const identity = key(item);
+      if (!String(item.detail || "").trim() || seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    });
     if (!fresh.length) return [];
 
     const rows = await this.request("observations", {
@@ -3080,6 +3158,21 @@ class SupabaseStore {
       observations: (full.observations || []).filter(belongsToSession),
       recipients: []
     };
+  }
+
+  async feedbackSessionSummary(sessionId) {
+    const detail = await this.getSessionDetail(sessionId);
+    if (!detail?.session) return null;
+    if (detail.session.sessionType === "quick_checkin") return this.quickCheckinSessionSummary(sessionId);
+    const full = await this.cycleSummary(detail.session.cycleId);
+    if (!full) return null;
+    const belongs = (item) => item.sessionId === sessionId;
+    const issues = (full.issues || []).filter(belongs);
+    const appreciations = (full.appreciations || []).filter(belongs);
+    return { ...full, sessions: [detail.session], poc: detail.poc, messages: detail.messages || [],
+      issues, appreciations, observations: (full.observations || []).filter(belongs),
+      recipients: [...new Set([...issues.flatMap((item) => [item.owner?.email, item.manager?.email]),
+        ...appreciations.map((item) => item.owner?.email)].filter(Boolean))] };
   }
 
   async createProject(input) {
@@ -3593,6 +3686,13 @@ class SupabaseStore {
       };
     });
 
+    const operationalCycles = openCycleRows.flatMap((row) => {
+      const sessions = responseRows.filter((item) => item.cycle_id === row.id)
+        .map((item) => toSession(item, this.sessionExtras(item)));
+      if (sessions.length && sessions.every(sessionIsTerminal)) return [];
+      return [{ ...toCycle(row), awaitingReplyCount: sessions.filter((session) =>
+        !sessionIsTerminal(session) && !sessionHasOpenResponseWindow(session)).length }];
+    });
     return {
       clusters: clusters.map((row) => ({ id: row.id, name: row.name })),
       clients: clients.map((row) => ({
@@ -3606,11 +3706,11 @@ class SupabaseStore {
         projectCount: projects.length,
         avgCsat,
         openIssues: normalizedOpenIssues.length,
-        openCycles: openCycleRows.length,
+        openCycles: operationalCycles.length,
         atRisk: projects.filter((project) => project.riskLevel === "High").length
       },
       openIssues: normalizedOpenIssues,
-      openCycles: openCycleRows.map(toCycle),
+      openCycles: operationalCycles,
       cycles: allCycleRows.map(toCycle),
       responseTracker,
       projectPocCounts: activePocRows.reduce((counts, row) => {

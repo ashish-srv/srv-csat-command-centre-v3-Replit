@@ -28,7 +28,7 @@ const QUICK_CHECKIN_OUTCOMES = [
 ];
 
 function sessionCanBeStopped(session) {
-  if (!session || ["completed", "opted_out"].includes(session.status)) return false;
+  if (!session || session.completionStatus === "completed" || ["completed", "opted_out"].includes(session.status)) return false;
   const state = session.conversationState || {};
   return !["completed", "opted_out", "handed_off"].includes(state.state)
     && !state.reminderExhausted
@@ -36,7 +36,7 @@ function sessionCanBeStopped(session) {
 }
 
 function sessionCanReceiveReminder(session) {
-  if (!session || session.sessionType === "quick_checkin" || ["completed", "opted_out"].includes(session.status)) return false;
+  if (!session || session.completionStatus === "completed" || session.sessionType === "quick_checkin" || ["completed", "opted_out"].includes(session.status)) return false;
   const state = session.conversationState || {};
   if (["completed", "opted_out", "handed_off"].includes(state.state) || state.reminderExhausted || state.stoppedByAdmin) {
     return false;

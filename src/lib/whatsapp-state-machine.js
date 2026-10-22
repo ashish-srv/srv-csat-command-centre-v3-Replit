@@ -934,7 +934,12 @@ function applyServiceScopeDecision(conversationState, project, decision, context
 
   if (decision === SERVICE_SCOPE_DECISIONS.OVERALL_FEEDBACK) {
     const source = String(context.text || "").trim();
-    if (source) conversationState.generalFeedbackText = source.slice(0, 1200);
+    const previous = String(conversationState.generalFeedbackText || "").trim();
+    // Additional feedback belongs alongside the earlier review. Do not replace
+    // an entire review with the latest sentence (or repeatedly append a replay).
+    if (source && !previous.includes(source)) {
+      conversationState.generalFeedbackText = [previous, source].filter(Boolean).join("\n");
+    }
     if (context.sentiment && context.sentiment !== "neutral") {
       conversationState.generalSentiment = context.sentiment;
     }
@@ -2458,9 +2463,9 @@ function processWhatsAppReply({
 
   const answeringServiceScope = answeredQuestionType === "service_scope"
     || priorState === STATES.WAITING_FOR_SERVICE_SCOPE;
-  let serviceScopeDecision = interpretation?.serviceScope
-    && interpretation.serviceScope !== SERVICE_SCOPE_DECISIONS.NONE
-    ? interpretation.serviceScope
+  let serviceScopeDecision = typeof interpretation?.serviceScope === "string"
+    ? (Object.values(SERVICE_SCOPE_DECISIONS).includes(interpretation.serviceScope)
+      ? interpretation.serviceScope : SERVICE_SCOPE_DECISIONS.NONE)
     : explicitServiceScopeDecision(text, answeringServiceScope);
   if (answeringServiceScope) {
     if (detectedServiceKeys.length || said.yes) {

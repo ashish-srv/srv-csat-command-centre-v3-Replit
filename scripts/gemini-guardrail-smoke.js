@@ -3,7 +3,7 @@ const { containsClaim, toneFromRules, TONES, rephraseQuestion, offScriptReply, w
   reviewIssues, interpretReply, conductTurn, readTone, normaliseOverallRating,
   cleanRepeatedText, extractExplicitAppreciations, humaniseGenericAcknowledgement,
   removeObservationDuplicates, normaliseReplyInterpretation,
-  hasSatisfactionEvidence } = require("../src/lib/gemini");
+  hasSatisfactionEvidence, sanitiseSurveyControl } = require("../src/lib/gemini");
 
 const results = [];
 async function scenario(name, fn) {
@@ -212,6 +212,102 @@ const turn = {
     const invalid = normaliseReplyInterpretation({ intent: "feedback", ratingChoice: "finish_everything" }, {}, "test");
     assert.equal(invalid.ratingChoice, "none");
     assert.equal(invalid.ratingChoiceEvidence, null);
+  });
+
+  await scenario("Unverified survey-control labels cannot change the captured facts or discard a narrative", async () => {
+    const text = "The reports were delayed. Thank you for the support and long partnership.";
+    const facts = [{ serviceKey: "account", sentiment: "negative", summary: "The reports were delayed" }];
+    for (const serviceScope of ["skip_remaining_services", "continue_service_by_service", "overall_feedback"]) {
+      for (const completionScope of ["topic", "feedback", "conversation", "rating"]) {
+        const safe = sanitiseSurveyControl({ intent: "negative", serviceScope, completionScope,
+          completionEvidence: "Thank you for the support", captured: facts, rating: null,
+          acknowledgement: "I am sorry about the delayed reports." }, {
+          decision: "none", evidence: null,
+          captured: [{ serviceKey: "senior", summary: "Invented leadership failure" }], rating: 10
+        }, text);
+        assert.equal(safe.completionScope, "none");
+        assert.equal(safe.serviceScope, serviceScope === "overall_feedback" ? "overall_feedback" : "none");
+        assert.equal(safe.intent, "feedback");
+        assert.strictEqual(safe.captured, facts);
+        assert.equal(safe.rating, null);
+        assert.equal(safe.acknowledgement, "I am sorry about the delayed reports.");
+        assert.doesNotMatch(JSON.stringify(safe), /Invented leadership/);
+      }
+    }
+  });
+
+  await scenario("Independent control confirmation needs current evidence and preserves distinct decisions", async () => {
+    for (const [text, decision] of [
+      ["This explains everything I wanted to raise", "feedback"],
+      ["I prefer not to answer any more questions", "conversation"],
+      ["I do not wish to give a number", "rating"],
+      ["Nothing else about the website", "topic"],
+      ["We can go through each service now", "continue_service_by_service"],
+      ["Please leave the rest of the services", "skip_remaining_services"]
+    ]) {
+      const read = { intent: "negative", serviceScope: "overall_feedback" };
+      const safe = sanitiseSurveyControl(read, { decision, evidence: text }, text);
+      assert.equal(safe.controlVerification, "verified");
+      assert.equal(safe.intent, "negative");
+      if (["continue_service_by_service", "skip_remaining_services"].includes(decision)) assert.equal(safe.serviceScope, decision);
+      else assert.equal(safe.completionScope, decision);
+      assert.equal(sanitiseSurveyControl(read, { decision, evidence: "unrelated old words" }, text).controlVerification, "unverified");
+    }
+    const text = "Let us do the number now";
+    const safe = sanitiseSurveyControl({ intent: "feedback" }, { decision: "proceed_to_rating", evidence: text }, text, "nps");
+    assert.equal(safe.ratingChoice, "proceed");
+    assert.equal(safe.rating, undefined);
+  });
+
+  await scenario("Survey controls fail safe on malformed verification and verified facts never come from that check", async () => {
+    const priorFetch = global.fetch, priorKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "test-key";
+    const text = "We appreciate all the support and look forward to another good year together.";
+    try {
+      for (const validation of [null, { decision: "none" }, { decision: "conversation", evidence: "some older message" }]) {
+        let calls = 0;
+        global.fetch = async (_url, options) => {
+          const input = JSON.parse(options.body).input;
+          calls += 1;
+          const result = input.includes("Task: interpret ONE client reply")
+            ? { intent: "feedback", serviceScope: "skip_remaining_services", sentiment: "positive",
+              appreciations: [{ subject: "SRV Team", detail: text }] }
+            : validation;
+          return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+        };
+        const result = await interpretReply({ project: { services: [] }, question: "How was the experience?", text, verifySurveyControls: true });
+        assert.equal(calls, 2);
+        assert.equal(result.serviceScope, "none");
+        assert.equal(result.completionScope, "none");
+        assert.equal(result.appreciations.length, 1);
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+    }
+  });
+
+  await scenario("A start acknowledgement cannot validate an unrelated service-scope decision", async () => {
+    const priorFetch = global.fetch, priorKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "test-key";
+    let calls = 0;
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options.body).input;
+      calls += 1;
+      const result = input.includes("Task: interpret ONE client reply")
+        ? { intent: "affirmative", sentiment: "neutral", serviceScope: "continue_service_by_service" }
+        : { decision: "none", evidence: null };
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+    };
+    try {
+      const read = await interpretReply({ project: { services: [] }, question: "Ready to start feedback?", text: "go ahead", verifySurveyControls: true });
+      assert.equal(calls, 2);
+      assert.equal(read.serviceScope, "none");
+      assert.equal(read.intent, "affirmative");
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+    }
   });
 
   await scenario("interpretation and reply prompts consistently permit completion without repeated service interviews", async () => {

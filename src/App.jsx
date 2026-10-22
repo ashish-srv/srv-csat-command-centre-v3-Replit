@@ -60,7 +60,7 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject, onOpenDa
   const overdue = (dashboard?.openIssues || []).filter(
     (issue) => issue.dueAt && new Date(issue.dueAt).getTime() < now
   );
-  const awaiting = (dashboard?.openCycles || []);
+  const awaiting = (dashboard?.openCycles || []).filter((cycle) => cycle.awaitingReplyCount !== 0);
   const highRisk = (dashboard?.projects || []).filter((project) => project.riskLevel === "High");
   const latestActivity = (dashboard?.responseTracker || [])
     .filter((item) => item.latestClientReplyAt || item.lastClientResponseAt)

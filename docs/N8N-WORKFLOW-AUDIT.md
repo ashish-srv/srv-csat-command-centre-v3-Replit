@@ -29,7 +29,7 @@ This review covers the nine exact workflow exports supplied with the current app
 | 6 | Feedback Started — Email Link | Email, session type, interval, project name, and resume URL match. | Merge/fan out with workflow 2 if both email and WhatsApp are intended. |
 | 8 | Create Due Pulse/Project-End Cycles | URL and 12-hour schedule are correct. The app now initializes a first pulse date for newly created/imported active projects. | Replace Meta credential with CSAT webhook credential; add retry/error handling. |
 | 9 | Process Due Reminders | URL and hourly schedule are correct. | Replace Meta credential with CSAT webhook credential; add retry/error handling. |
-| 10 | Cycle and Quick Check-in Summary | Issues, appreciations, observations, questions, recipients, CSAT, and resume URL match. It also accepts one per-POC quick-check-in completion payload. | Import v5, retain the SMTP credential and Directors' Office address, deactivate the older Workflow 10, then activate v5. |
+| 10 | Cycle and Quick Check-in Summary | Also supports `feedback_poc`: one monthly/project-end POC, their final CSAT/NPS and transcript after their correction window; quick-check-in per-POC payloads remain compatible. | Update Build Summary from the supplied v5 file. Preserve the live Config, SMTP credential and webhook; do not activate a duplicate workflow. |
 
 ## Recommended node retry policy
 

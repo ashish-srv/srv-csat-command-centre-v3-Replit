@@ -67,6 +67,15 @@ async function emitAutomation(eventType, payload) {
     event.status = response.ok ? "sent" : "failed";
     event.statusCode = response.status;
     event.sentAt = new Date().toISOString();
+    // A successful HTTP response can explicitly report that no mail was sent
+    // (for example no recipient). Never turn that into a delivery claim.
+    if (response.ok && typeof response.json === "function") {
+      const result = await response.json().catch(() => null);
+      if (result?.sent === false || result?.ok === false) {
+        event.status = "failed";
+        event.error = result.reason || result.error || "Workflow did not confirm delivery";
+      }
+    }
   } catch (error) {
     event.status = "failed";
     event.error = error.message;

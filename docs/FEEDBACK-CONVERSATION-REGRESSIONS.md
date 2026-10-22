@@ -6,10 +6,12 @@ These changes retain the latest-reply interpretation as the only model source
 for conversational facts. The response-writing pass cannot contribute facts
 from older transcript messages. The broader cross-model merge stays removed.
 
-Approved changes are limited to progression, completion, postponement and
-acknowledgements. Existing CSAT/NPS separation, current-message grounding,
-automatic-reply detection, ten-minute windows and handoff delivery checks remain
-covered. No schema migration or n8n workflow change is required for this update.
+Approved changes cover progression, completion, postponement, acknowledgements,
+context retention and the associated completion/notification defects. Existing
+CSAT/NPS separation, current-message grounding, automatic-reply detection and
+fixed ten-minute windows remain covered. No schema migration or new workflow
+is required. The existing Workflow 10 Build Summary node needs the formatting
+update described below for per-POC monthly and project-end summaries.
 
 ## Historical Conversation Families
 
@@ -83,8 +85,9 @@ of overall disappointment. Mixed messages retain both concerns and appreciation.
 The latest-reply extraction may supply optional client-facing acknowledgement
 wording. This is preferred over transcript-informed wording when available,
 validated for unsupported topics and notification/action claims, and never
-used as evidence for services, concerns or scores. No extra model call or
-cross-model fact merge is introduced. Question-shaped requests also receive a
+used as evidence for services, concerns or scores. Those acknowledgement changes
+introduce no extra model call or cross-model fact merge; the later boundary
+audit below adds a separate control-only verification. Question-shaped requests also receive a
 semantic interpretation before the older off-topic shortcut can intercept them.
 
 Within an existing ten-minute window, acknowledge the actual new points rather
@@ -122,6 +125,86 @@ feedback and completion in monthly and project-end flows. The broader fact
 merge remains removed; quick-check-in behaviour and the deferred one-hour
 reminder are not expanded. No new migration, secret or n8n workflow is required.
 
+## Review-to-Rating Boundary Audit (21 October)
+
+The first overall-review invitation is enforced across the main scope path,
+legacy general-feedback fallback and a first numeric-question candidate. An
+internal draft cannot set the stored rating-asked flag when the actual outgoing
+message offers the feedback-to-rating choice.
+
+Narrative labels that would skip services, finish feedback, refuse questions or
+select a rating receive an independent, narrow survey-control verification.
+Only a whitelisted decision with evidence from the current reply may alter
+progression. This check cannot contribute services, scores, concerns or other
+facts. It does not receive the response-writing output or older conversation.
+Invalid output, missing evidence or a timeout removes the unverified control
+labels while retaining the original grounded facts and acknowledgement. A
+negative *intent* cannot resurrect a rejected completion label. An explicit
+semantic scope of none is not overridden by a fragment-matching lexical skip.
+Whole-message controls retain their contextual handling.
+
+This adds at most one six-second, single-attempt verification call to a control
+candidate, not every feedback message. Automatic terminal satisfaction analysis
+uses a single six-second attempt alongside the other terminal reads, keeping
+the model-wait budgets bounded; longer explicit dashboard scoring retries remain
+unchanged. Timeouts do not invent a score or force the client's feedback closed.
+
+Assistant-message metadata records proposed/verified control fields, rejection
+or timeout status, and the pending question/pause. Tests challenge the same
+review with conflicting scope, completion and intent labels, omitted scope,
+malformed verification and timeout, while preserving genuine completion, rating
+choices, concerns, refusal and the original closing window. The broader fact
+merge remains removed. This control guard itself needs no migration, new secret
+or workflow; the separate summary-email correction below updates Workflow 10.
+
+## Context, Persistence and Lifecycle Audit — 22 October 2026
+
+- Chronological model context retains its newest text within a bounded budget;
+  the response writer also receives the latest client message separately. This
+  prevents a long history from cutting off the current message at 4,000 characters.
+- An exact rating-choice label is recognized only when that choice is pending.
+  It cannot replace the saved overall review. Additional review text is retained,
+  and distinct observations under the same topic are no longer dropped.
+- Completion is independent of risk. A completed `needs_attention` session no
+  longer stays reminder/stop eligible or keeps its cycle awaiting a reply.
+  Its original open correction window still reserves the WhatsApp number and
+  receives additions. Expiry closes that window without sending another message.
+- Quick check-in applies the same control verification. Negative intent alone
+  is not sufficient to close feedback. Acknowledgements/deferrals inside a
+  correction window do not become issue detail, and a later All good reply
+  cannot claim that earlier concerns were an All good response.
+- A newly completed monthly/project-end POC is queued for one consolidated
+  summary after their correction window. The payload includes their final
+  scores, saved points and client transcript, independent of other POCs.
+  Existing quick-check-in per-POC summaries remain supported.
+- Normal and six-hour window finalization use the existing reminder/six-hour
+  scheduler endpoints. Email finalization is not disabled by the WhatsApp toggle.
+  The configured scheduler cadence determines when the email is dispatched
+  after the deadline; this does not extend the client's response window.
+- Historical sessions are not automatically queued on deployment. A recorded
+  successful legacy cycle summary suppresses a second per-POC send for that cycle.
+- A failed/pending automation claim is not reported as a delivered duplicate.
+  An explicit workflow `sent:false` response is a failure even with HTTP 200.
+  Uncertain sends are not blindly retried: inspect the automation event and n8n
+  execution before a deliberate retry, since the remote send might have succeeded.
+  HTTP acknowledgement is not proof of inbox delivery.
+
+### Workflow 10 rollout
+
+Update **Build Summary** in the existing Workflow 10 using
+`n8n/workflows/10 - CSAT v5 - Cycle and Quick Check-in Summary.json`.
+Preserve the live webhook path, Config values, Directors' Office address and
+SMTP credentials; do not activate a second workflow on the same webhook.
+The updated builder supports both old cycle payloads and new `feedback_poc`
+payloads. Monthly summaries omit NPS, and quick check-ins remain unscored.
+The configured Directors' Office address is always included; monthly/project-end
+summaries also include the owners/managers associated with that POC's records.
+
+No database reset, score backfill or production mutation was performed during
+this local repair. Validate a test-number conversation and the real n8n email
+execution before broad rollout. Controlled fixtures cannot prove every possible
+future Gemini interpretation or real delivery.
+
 ## Rollback Discipline
 
 Preserve the pre-change worktree and Git history before updating conversational
@@ -135,6 +218,10 @@ changes do not migrate or rewrite historical scores, messages or cycles.
 ## Test Entry Points
 
 - `npm run test:feedback-history`: sequential historical and paraphrase replays.
+- `npm run test:conversation-lifecycle`: real store methods with in-memory IO,
+  long-context prompts, rating-choice protection, repeated-topic storage,
+  window closure/routing, per-POC email snapshots, delivery deduplication and
+  execution of Workflow 10's actual summary-builder code.
 - `npm run test:api`: real handler pipeline with controlled model responses,
   including successful extraction, conflicting reply wording and timeouts.
 - `npm run test:state`: state transitions, ratings, limits and window handling.
@@ -151,6 +238,15 @@ include supplied messages and representative variations; not every historical
 chat bubble is replayed verbatim.
 
 ## Verification Limits
+
+Local verification on 22 October 2026: `npm run check`, the complete `npm test`
+suite, `npm run build` and `git diff --check` passed. This includes 337 API
+scenarios, 113 state-machine scenarios, 42 historical/paraphrase replays,
+32 Gemini contract scenarios, 14 workspace-navigation scenarios and 11 new
+lifecycle scenarios. The lifecycle suite was rerun successfully after adding
+stale-cycle checks and monthly/quick-check-in email score-exclusion assertions.
+The build reports a non-blocking bundle-size warning. No live browser, model,
+WhatsApp delivery or email-inbox verification was performed for this repair.
 
 Tests use controlled Gemini responses and mocked delivery/storage. They do not
 send WhatsApp messages or email, use a live model, or modify production data.
