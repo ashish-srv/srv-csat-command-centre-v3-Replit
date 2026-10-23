@@ -59,6 +59,16 @@ Pre-feature snapshot: `../local-backups/before-one-time-idle-rating-22-oct`. `np
 
 ## Deployment
 
+### 23 October request-routing and acknowledgement follow-up
+
+- A grounded client request is not discarded by a contradictory off-topic label. A bounded, latest-message-only scope/wording review can recover an explicit request using exact client evidence; it cannot import writer facts, set scores, or choose survey progression. The broader conversation-fact merge remains disabled.
+- Detailed acknowledgements have no conflicting 70-word instruction. The optional review preserves material concerns, comparisons, uncertainty, requests and praise. Invalid output/timeouts retain the existing safe path. The check has one attempt and a four-second timeout; it is not a guarantee of perfect live model interpretation.
+- A captured service opinion no longer gets a duplicate generic Management Feedback concern from the whole-message fallback. Outcome appreciation is distinguished from person/team appreciation.
+- Active-session requests and saved off-topic questions attempt `client_question` immediately through `N8N_HUMAN_HANDOFF_WEBHOOK`, independently of feedback completion and summaries. Monthly, project-end and quick-check-in requests use the same message-level deduplication and audited result. Uncertain timed-out sends are not automatically retried, to avoid duplicate emails.
+- Conversation metadata/UI distinguishes workflow acceptance from missing configuration, pending and failed/unconfirmed notifications. HTTP acceptance does not prove inbox delivery. A failure warning preserves the recorded feedback and leaves the selected next question intact.
+- The supplied Workflow 3 accepts this event and addresses its `Notify Team` email using `Config.CSAT_HANDOFF_EMAIL`; this patch does not change recipients. Confirm delivery in that workflow's execution and email-provider records. No new workflow, secrets, or database migration is introduced by **this follow-up**; the earlier provenance migration below still applies if not already installed.
+- Pre-change source snapshot: `../local-backups/before-request-fidelity-handoff-fdf5a82`; Git baseline: `fdf5a82`. The new `test:request-fidelity` suite is part of `npm test`, alongside historical conversation replays and all existing suites. These are isolated fixture tests, not production emails or live Gemini calls.
+
 Run `npm run db:migrate` against the same database used by the published application **before** publishing this code. Migration `021-feedback-record-provenance.sql` adds nullable provenance fields and an idempotency index; it does not delete or rewrite existing feedback.
 
 No new secrets or n8n workflow edits are required for this patch. Keep the already configured summary/reminder automation active for delivery of queued summaries. The send-availability fix does not depend on a timely scheduler tick.

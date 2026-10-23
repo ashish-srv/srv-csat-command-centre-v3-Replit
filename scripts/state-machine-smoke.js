@@ -1426,7 +1426,8 @@ scenario("G6 client question is deferred, not answered, then flow resumes", () =
   // manager for every off-topic question.
   assert.strictEqual(last.control.collectOffTopic, "when will the invoice be shared?");
   assert.ok(!last.control.notify, "must not notify mid-conversation");
-  assert.ok(/passed that to the SRV team/i.test(last.nextMessage.body));
+  assert.match(last.nextMessage.body, /message has been saved for review/i);
+  assert.doesNotMatch(last.nextMessage.body, /passed that|will respond/i);
   assert.ok(/working well|what is working/i.test(last.nextMessage.body), "must still ask the pending question");
 });
 

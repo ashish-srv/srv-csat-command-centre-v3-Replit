@@ -43,7 +43,7 @@ function webhookTimeoutMs() {
   return Math.min(configured, 60_000);
 }
 
-async function emitAutomation(eventType, payload) {
+async function emitAutomation(eventType, payload, { timeoutMs } = {}) {
   const webhookUrl = webhookFor(eventType);
   const event = {
     eventType,
@@ -61,7 +61,7 @@ async function emitAutomation(eventType, payload) {
         "content-type": "application/json",
         "x-csat-webhook-secret": process.env.N8N_WEBHOOK_SECRET || ""
       },
-      signal: AbortSignal.timeout(webhookTimeoutMs()),
+      signal: AbortSignal.timeout(Number.isFinite(timeoutMs) ? Math.max(1000, Math.min(timeoutMs, webhookTimeoutMs())) : webhookTimeoutMs()),
       body: JSON.stringify({ eventType, ...payload })
     });
     event.status = response.ok ? "sent" : "failed";

@@ -502,7 +502,9 @@ function appreciationAcknowledgement(context = {}, project = {}, conversationSta
     }
     // A subject may be an outcome or the overall experience, not a person.
     // Do not turn an extracted topic into a fictional team with "them".
-    return `Thank you for your kind words about ${subject}.`;
+    return items[0].subjectType === "outcome"
+      ? "Thank you for sharing what went well in your experience."
+      : `Thank you for your kind words about ${subject}.`;
   }
   if (serviceNames.length === 1) {
     return `Thank you for appreciating the ${serviceNames[0]} team. We will share your kind words with them.`;
@@ -1128,6 +1130,11 @@ function safeAcknowledgementCandidates(context, project, action) {
 
 function clientFacingAcknowledgement(context, project, action) {
   const candidates = safeAcknowledgementCandidates(context, project, action);
+  // A latest-message wording review takes precedence over a shorter writer
+  // draft. It supplies no progression markers, services, scores or old facts.
+  if (context.acknowledgementReviewed && candidates.includes(context.extractedAcknowledgement || context.acknowledgement)) {
+    return context.extractedAcknowledgement || context.acknowledgement;
+  }
   let primary = candidates[0] || "";
   const evidence = [context.latestClientText, ...(context.captured || []).map((item) => item.summary),
     ...(context.observations || []).map((item) => item.detail), ...(context.appreciations || []).map((item) => item.detail),
@@ -2214,6 +2221,11 @@ function groundLatestReplyInterpretation(interpretation, text, project = {}) {
 
   return {
     ...interpretation,
+    // Grounded request facts take precedence over a contradictory categorical
+    // label. Do not discard a legitimate request just because it is not a
+    // configured service. Empty/invented observations do not pass grounding.
+    intent: ["off_topic", "unclear"].includes(interpretation.intent)
+      && observations.some((item) => item.kind === "request") ? "feedback" : interpretation.intent,
     deferRequested: detectors.clientRequestedDeferral(text, interpretation),
     serviceKeys,
     captured,
@@ -2280,6 +2292,7 @@ function enrichConductedWithDeterministicFacts(
   conducted.latestClientText = String(text || "");
   // Wording only, never a source of facts or scores.
   conducted.extractedAcknowledgement = interpretation.acknowledgement || "";
+  conducted.acknowledgementReviewed = interpretation.acknowledgementReviewed === true;
   conducted.concerns = (interpretation.concerns || []).map((item) => groundModelFact("concern", item, text, project)).filter(Boolean);
   // The conductor writes the reply; it is not an evidence source. Discard all
   // facts it generated from transcript context and rebuild exclusively from
@@ -2400,7 +2413,7 @@ function enrichConductedWithDeterministicFacts(
   // or change their sentiment based on a second whole-message fallback.
   const deterministicObservation = conducted.observations.length ? null : observationFromInterpretation(groundedInterpretation, text)
     || fallbackDeliveryObservation(text)
-    || (protectSubstantiveConcern
+    || (protectSubstantiveConcern && !conducted.captured.length
       ? fallbackGeneralConcernObservation(text, groundedInterpretation, {
           allowLanguageOnly,
           // Response wording is never evidence. A model apology cannot create
@@ -3258,7 +3271,7 @@ function shouldUseFinalRatingReminder(session) {
     && !hasStatedOverallRating(session);
 }
 
-async function notifyAutomation(store, eventType, payload, dedupeKey = null) {
+async function notifyAutomation(store, eventType, payload, dedupeKey = null, options = {}) {
   if (dedupeKey && pendingAutomationKeys.has(dedupeKey)) {
     return { eventType, status: "pending", delivered: false, dedupeKey };
   }
@@ -3295,7 +3308,7 @@ async function notifyAutomation(store, eventType, payload, dedupeKey = null) {
       return event;
     }
 
-    const event = { ...(await emitAutomation(eventType, payload)), dedupeKey };
+    const event = { ...(await emitAutomation(eventType, payload, options)), dedupeKey };
     if (claim && typeof store.completeAutomationEvent === "function") {
       try {
         await store.completeAutomationEvent(claim.id, event);
@@ -3312,6 +3325,26 @@ async function notifyAutomation(store, eventType, payload, dedupeKey = null) {
     return event;
   } finally {
     if (dedupeKey) pendingAutomationKeys.delete(dedupeKey);
+  }
+}
+
+async function notifyClientRequest(store, { project, poc, session, text, messageId, baseUrl, facts, offTopic = false }) {
+  const requests = (facts?.observations || []).filter((item) => item.kind === "request" && item.detail);
+  if (!offTopic && !requests.length) return null;
+  const dedupeKey = `client_question:message:${messageId}`;
+  try {
+    const event = await notifyAutomation(store, "client_question", {
+      project, poc, session, clientText: text, requests,
+      questionCount: requests.length || 1,
+      guardrail: offTopic ? GUARDRAILS.OUT_OF_SCOPE : null,
+      state: session.conversationState?.state,
+      resumeUrl: buildResumeUrl(baseUrl, project, session)
+    }, dedupeKey, { timeoutMs: 4000 });
+    return { status: event.status, accepted: event.status === "sent"
+      || (event.status === "duplicate" && event.delivered === true), dedupeKey };
+  } catch (error) {
+    console.warn("[automation] client request handoff failed:", error.message);
+    return { status: "failed", accepted: false, dedupeKey };
   }
 }
 
@@ -3882,12 +3915,13 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     });
   }
 
-  // The client asked something off-topic. Collect it; the email goes out once,
-  // at session end, rather than interrupting a manager three times.
+  // Keep questions in the summary, but send their human handoff immediately.
+  // The message-level audit key prevents another dedicated send at closure.
   if (control.collectOffTopic) {
     turn.conversationState.offTopicQuestions = [
       ...(turn.conversationState.offTopicQuestions || []),
-      { text: control.collectOffTopic, at: new Date().toISOString() }
+      { text: control.collectOffTopic, at: new Date().toISOString(),
+        handoffDedupeKey: `client_question:message:${clientMessage.id}` }
     ];
   }
 
@@ -4145,7 +4179,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         conducted,
         requiredAction
       );
-      const machineWordedAction = (needsConcernAcknowledgement && !hasConcernAcknowledgement)
+      const machineWordedAction = conducted.acknowledgementReviewed
+        || (needsConcernAcknowledgement && !hasConcernAcknowledgement)
         || internalSummaryLanguage(conducted.text)
         || needsAppreciationAcknowledgement
         || (requiredAction.type === "rating_feedback"
@@ -4671,6 +4706,13 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 
   const resumeUrl = buildResumeUrl(baseUrl, project, updatedSession);
   const pendingQuestions = turn.conversationState.offTopicQuestions || [];
+  const clientRequestHandoff = !control.notify && !control.forceManagerAlert
+    ? await notifyClientRequest(store, { project, poc, session: updatedSession,
+      text, messageId: clientMessage.id, baseUrl, facts: latestReplyFacts || interpretation,
+      offTopic: Boolean(control.collectOffTopic) }) : null;
+  if (clientRequestHandoff && !clientRequestHandoff.accepted) {
+    replyText = `Your message is saved, but I could not confirm the automatic notification to the team. Please contact your SRV representative directly if it needs attention.\n\n${replyText}`;
+  }
   let postCompletionHandoffEvent = null;
   if (control.notify === "post_completion_message" && !control.forceManagerAlert) {
     try {
@@ -4709,6 +4751,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       provider: replyProvider,
       model: replyModel,
       fallbackReason: replyError,
+      clientRequestHandoff,
       // The FULL interpretation, not just the intent. Diagnosing a wrong turn
       // without seeing what the model actually returned means guessing, and
       // guessing has cost several rounds of rework.
@@ -4721,6 +4764,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
           controlVerification: interpretation.controlVerification || "not_requested",
           controlVerificationError: interpretation.controlVerificationError || null,
           proposedControl: interpretation.proposedControl || null,
+          fidelityReview: interpretation.fidelityReview || "not_requested",
+          acknowledgementReviewed: interpretation.acknowledgementReviewed === true,
           verifiedControl: interpretation.verifiedControl || null,
           ratingChoice: interpretation.ratingChoice || "none",
           ratingChoiceEvidence: interpretation.ratingChoiceEvidence || null,
@@ -4809,14 +4854,14 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     && !control.forceManagerAlert
     && !control.notify
     && !cycleSummaryQueued
-    && pendingQuestions.length
+    && pendingQuestions.some((question) => !question.handoffDedupeKey)
   ) {
     notifyAutomationAsync(store, "client_question", {
       project,
       poc,
       session: updatedSession,
-      clientText: pendingQuestions.map((q, i) => `${i + 1}. ${q.text}`).join("\n"),
-      questionCount: pendingQuestions.length,
+      clientText: pendingQuestions.filter((q) => !q.handoffDedupeKey).map((q, i) => `${i + 1}. ${q.text}`).join("\n"),
+      questionCount: pendingQuestions.filter((q) => !q.handoffDedupeKey).length,
       guardrail: GUARDRAILS.OUT_OF_SCOPE,
       state: turn.conversationState.state,
       resumeUrl
@@ -8694,7 +8739,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       sourceMessage: clientMessage,
       interpretation
     });
-    if (recorded.sentiment !== "positive") {
+    if (quickCheckinConcernPoints(interpretation).length) {
       const concernPoints = quickCheckinConcernPoints(interpretation);
       alertText = concernPoints.length
         ? concernPoints.map((point, index) => `${index + 1}. ${point}`).join("\n")
@@ -8838,6 +8883,13 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
       }, `manager_alert:quick_checkin:${clientMessage.id}`, waitUntil);
   }
 
+  const clientRequestHandoff = !postCompletionHandoff
+    ? await notifyClientRequest(store, { project, poc, session: result.session,
+      text, messageId: clientMessage.id, baseUrl, facts: recordedInterpretation }) : null;
+  if (clientRequestHandoff && !clientRequestHandoff.accepted) {
+    replyText = `Your message is saved, but I could not confirm the automatic notification to the team. Please contact your SRV representative directly if it needs attention.\n\n${replyText}`;
+  }
+
   if (postCompletionHandoff) {
     try {
       // This event cannot be fire-and-forget on Replit. The request may finish
@@ -8870,6 +8922,7 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     body: replyText,
     metadata: {
       source: "quick_checkin",
+      clientRequestHandoff,
       outcome: result.session.conversationState?.quickCheckinOutcome || null,
       postCompletionHandoff,
       postCompletionHandoffStatus: postCompletionHandoffEvent?.status || null

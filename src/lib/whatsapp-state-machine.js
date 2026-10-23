@@ -2288,10 +2288,9 @@ function processWhatsAppReply({
       conversationState, project, poc, text, guardrails,
       state: resume.state,
       guardrail: GUARDRAILS.OUT_OF_SCOPE,
-      body: `I have passed that to the SRV team and they will respond to you directly — I only collect feedback here. ${resume.text}`,
+      body: `Your message has been saved for review. I cannot confirm the answer or make arrangements here. ${resume.text}`,
       control: {
-        // Batched, not sent now. One email at session end beats three
-        // interruptions — but see the terminal case below.
+        // The API persists and immediately attempts the deduplicated handoff.
         collectOffTopic: text,
         // The API layer may ask Gemini for a warmer decline clause. It only
         // ever replaces the FIRST sentence; the question below is appended by

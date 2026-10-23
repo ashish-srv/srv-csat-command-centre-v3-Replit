@@ -1469,10 +1469,10 @@ async function scenario(name, fn) {
       }
     };
     const modelPayloads = [];
-    global.fetch = async () => ({
+    global.fetch = async (_url, options) => ({
       ok: true,
       status: 200,
-      json: async () => ({ output_text: JSON.stringify(modelPayloads.shift()) })
+      json: async () => ({ output_text: JSON.stringify(JSON.parse(options.body).input.includes("Task: review latest-message scope") ? {} : modelPayloads.shift()) })
     });
     try {
       modelPayloads.push(
@@ -1632,10 +1632,10 @@ async function scenario(name, fn) {
         askedForServiceScope: false, askedForRatingTransition: true, askedServiceKey: null
       }
     ];
-    global.fetch = async () => ({
+    global.fetch = async (_url, options) => ({
       ok: true,
       status: 200,
-      json: async () => ({ output_text: JSON.stringify(modelPayloads.shift()) })
+      json: async () => ({ output_text: JSON.stringify(JSON.parse(options.body).input.includes("Task: review latest-message scope") ? {} : modelPayloads.shift()) })
     });
     try {
       const response = await rawReq("POST", "/api/whatsapp/inbound", {
@@ -6035,6 +6035,7 @@ async function scenario(name, fn) {
       const input = JSON.parse(options?.body || "{}").input || "";
       const result = input.includes("Task: verify ONLY the client's survey-control instruction")
         ? { decision: "feedback", evidence: done }
+        : input.includes("Task: review latest-message scope") ? {}
         : replies[modelCalls++] || answer;
       return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
     };
@@ -6472,7 +6473,7 @@ async function scenario(name, fn) {
 
       const visit = "I wish to conduct a small visit with my students to your office and if ull can guide them on AI for branding";
       const beforeRecords = calls.observations.length;
-      result = await send(visit, { isObservation: true, explainsProblem: false,
+      result = await send(visit, { intent: "off_topic", isObservation: true, explainsProblem: false,
         acknowledgement: "I have noted your request for a student office visit and guidance on AI for branding for review by the relevant team.",
         observations: [{ topic: "Office Visit & AI Guidance Request", detail: visit, sentiment: "neutral", kind: "request", needsFollowUp: false }] },
       { message: "I am sorry to hear that. What specifically happened with Management Feedback?", askedObservationReasonTopic: "Management Feedback" });
@@ -6484,6 +6485,8 @@ async function scenario(name, fn) {
       assert.equal(entries.filter((item) => item.kind !== "appreciation").length, 1, JSON.stringify(entries));
       assert.equal(entries[0].sentiment, "neutral");
       assert.equal(entries[0].kind, "request");
+      assert.ok(result.nextMessage.metadata.clientRequestHandoff);
+      assert.ok(calls.automation.some((event) => event.eventType === "client_question" && event.payload.clientText === visit));
 
       const clarification = "No just a field visit like an industry visit early next year";
       result = await send(clarification, { isObservation: true, explainsProblem: false,
@@ -6728,7 +6731,7 @@ async function scenario(name, fn) {
               state, quickCheckinOutcome: state === "quick_checkin_window" ? "feedback_shared" : "needs_improvement",
               quickCheckinWindowExpiresAt: state === "quick_checkin_window" ? "2099-01-01T00:10:00.000Z" : null
             } };
-          extraction = { intent: "feedback", sentiment: "neutral", isObservation: true, explainsProblem: false, acknowledgement,
+          extraction = { intent: "off_topic", sentiment: "neutral", isObservation: true, explainsProblem: false, acknowledgement,
             observations: [{ topic, detail: text, sentiment: "neutral", kind: "request", needsFollowUp: false }] };
           const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", {
             text, providerMessageId: "wamid.quick-visit-" + state + "-" + index
@@ -6736,13 +6739,14 @@ async function scenario(name, fn) {
           const result = JSON.parse(response.body);
           assert.equal(response.statusCode, 201);
           assert.equal(result.state, "quick_checkin_window", result.whatsappReplyText);
-          assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+          assert.ok(result.whatsappReplyText.includes(acknowledgement), result.whatsappReplyText);
           assert.doesNotMatch(result.whatsappReplyText, /sorry|what specifically|Management Feedback|anything else about|out of 10|rate|recommend/i);
           const stored = calls.quickCheckinResponses.at(-1).input.interpretation;
           assert.equal(stored.observations.length, 1);
           assert.equal(stored.observations[0].kind, "request");
           assert.equal(stored.observations[0].sentiment, "neutral");
           assert.equal((stored.concerns || []).length, 0);
+          assert.ok(result.nextMessage.metadata.clientRequestHandoff);
         }
       }
     } finally {
@@ -6777,7 +6781,7 @@ async function scenario(name, fn) {
         const result = JSON.parse(response.body);
         assert.equal(response.statusCode, 201);
         assert.equal(result.state, "quick_checkin_window");
-        assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+        assert.ok(result.whatsappReplyText.includes(acknowledgement), result.whatsappReplyText);
         assert.equal((result.whatsappReplyText.match(/Thank you/gi) || []).length, 1, result.whatsappReplyText);
         assert.doesNotMatch(result.whatsappReplyText, /kind words|appreciating Overall Engagement|out of 10|recommend|anything else about/i);
         if (state === "quick_checkin_window") assert.equal(result.session.conversationState.quickCheckinWindowExpiresAt, deadline);
@@ -6832,7 +6836,7 @@ async function scenario(name, fn) {
         const response = await req("POST", "/api/whatsapp/sessions/sess_1/reply", { text });
         const result = JSON.parse(response.body);
         assert.equal(response.statusCode, 201);
-        assert.ok(result.whatsappReplyText.startsWith(acknowledgement), result.whatsappReplyText);
+        assert.ok(result.whatsappReplyText.includes(acknowledgement), result.whatsappReplyText);
         assert.doesNotMatch(result.whatsappReplyText, /experience has been disappointing|anything else about|rate|recommend/i);
         assert.equal(result.state, "quick_checkin_window");
         if (kind === "request") assert.doesNotMatch(result.whatsappReplyText, /sorry|apolog|concerns|disappoint/i);

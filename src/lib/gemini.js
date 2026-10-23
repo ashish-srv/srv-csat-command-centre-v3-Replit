@@ -18,6 +18,7 @@
 // api-revision header: it pins to the legacy schema, which was removed on
 // 8 June 2026 and makes every call fail.
 const { recentAssistantOpenings, ACKNOWLEDGEMENT_CONTINUITY } = require("./acknowledgement-style");
+const { applyReplyFidelityReview } = require("./reply-fidelity");
 
 // Wording is never truncated mid-thought or used as extraction evidence.
 function boundedAcknowledgement(value) {
@@ -81,7 +82,9 @@ const CLAIM_PATTERNS = [
   /\b(within|by)\s+\d+\s*(hour|day|week|working day)/i,
   /\b(sorry for the delay|apolog\w+ for the (delay|inconvenience))\b/i,
   /\b(ticket|complaint|case|issue)\s*(id|number|#)/i,
-  /\b(assure|guarantee|promise|commit)\w*\b/i
+  // Block assurances authored by the bot, not the client's account of a
+  // previously promised deliverable ("the promised messages appear absent").
+  /\b(?:i|we|srv(?: media)?|(?:our|the) team)\s+(?:(?:can|will|shall|have|has|are|am|already|now|hereby|been)\s+){0,3}(?:assur\w*|guarantee\w*|promis\w*|commit\w*)\b|\b(?:rest assured|i assure you|we assure you|guaranteed resolution)\b/i
 ];
 
 function geminiApiKey() {
@@ -510,7 +513,7 @@ async function rephraseQuestion({ project, poc, text, turn, messages = [] }) {
 
 async function offScriptReply({ project, poc, text, reason }) {
   const fallbacks = {
-    out_of_scope: "I have passed that to the SRV team and they will respond to you directly — I only collect service feedback here.",
+    out_of_scope: "Your message has been saved for review. I cannot confirm the answer or make arrangements here.",
     general_knowledge: "That is outside what I can help with — I am only here to collect your feedback on SRV's services.",
     unparseable: "Sorry, I did not follow that."
   };
@@ -520,8 +523,8 @@ async function offScriptReply({ project, poc, text, reason }) {
   const input = [
     SAFETY_PREAMBLE,
     "Task: the client said something this feedback bot cannot handle.",
-    "Write ONE short sentence, under 30 words, that politely declines and says",
-    "a person from SRV will follow up if it needs one. Do not answer the question.",
+    "Write ONE short sentence, under 30 words, acknowledging the saved message",
+    "without answering the question or claiming that a person has been notified or will respond.",
     "Do not apologise for a delay or imply any action has been taken.",
     "Do not ask a question — the caller appends the next question itself.",
     "Return only the sentence.",
@@ -928,6 +931,7 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
     .filter((item) => item && item.subject && item.detail)
     .map((item) => ({
       subject: String(item.subject).slice(0, 80),
+      subjectType: ["person", "team", "outcome"].includes(item.subjectType) ? item.subjectType : null,
       detail: String(item.detail).slice(0, 600),
       serviceKey: resolveServiceKey(item)
     }));
@@ -1103,7 +1107,10 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "  rating       - they gave a number as a score",
     "  defer        - they want to answer later, e.g. 'I will give feedback",
     "                 after some time', 'not now', 'busy', 'will revert'",
-    "  off_topic    - unrelated to SRV's services",
+    "  off_topic    - unrelated to SRV or its client relationship. A request to",
+    "                 SRV for help, information, arrangements or collaboration",
+    "                 is feedback with a request observation, even if not a",
+    "                 configured service. Do not promise approval or availability.",
     "  unclear      - use this ONLY as a last resort",
     "",
     "deferRequested is independent of intent. Set it true whenever the client",
@@ -1232,6 +1239,8 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "Use one acknowledgement, not a thank-you followed by another thank-you.",
     "Do not address an abstract outcome/topic as a person or team. Preserve",
     "the client's nuance and uncertainty; never add a cause or promise a fix.",
+    "For appreciations set subjectType to person, team or outcome by meaning.",
+    "Results, targets met and a positive overall experience are outcomes, not teams.",
     "No questions, ratings, closing-window text, invented actions or claims that",
     "someone was notified. Use an empty string for a bare score/control reply.",
     "This wording must never be used as evidence for facts, services or scores.",
@@ -1287,6 +1296,13 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     return { ...fallback, error: "rejected_unknown_intent" };
   }
   if (verifySurveyControls) normalized = await verifySurveyControl(normalized, { question, text, pendingRatingChoice });
+  // A bounded, separate wording/scope check, not a writer-fact merge. Bare
+  // ratings and controls bypass it. It cannot advance the survey or add scores.
+  if (["off_topic", "unclear"].includes(normalized.intent)
+    || (normalized.intent === "feedback" && (String(text).length >= 80
+      || normalized.observations.some((item) => item.kind === "request")))) {
+    normalized = await reviewReplyFidelity(normalized, text);
+  }
   console.log(`[gemini] "${String(text).slice(0, 40)}" -> intent=${normalized.intent}`
     + ` defer=${normalized.deferRequested}`
     + ` sentiment=${normalized.sentiment} explains=${normalized.explainsProblem}`
@@ -1294,6 +1310,34 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     + ` services=${JSON.stringify(normalized.serviceKeys)}`);
 
   return { ...normalized, recentAssistantOpenings: recentOpenings.slice(-3) };
+}
+
+async function reviewReplyFidelity(read, text) {
+  const input = [SAFETY_PREAMBLE,
+    "Task: review latest-message scope and acknowledgement ONLY.",
+    "Do not choose survey actions, ask questions, extract ratings, or use older feedback.",
+    "Classify scope as srv_request, feedback, unrelated or uncertain by meaning.",
+    "Requests to SRV for information, reports, assistance, visits, training or collaboration",
+    "are legitimate client requests, not off-topic, even outside configured services.",
+    "A criticism or suggestion is not automatically a request for human contact.",
+    "requestEvidence: exact quotes of explicit requests addressed to SRV; otherwise [].",
+    "Write a faithful, natural acknowledgement of this message, at most 900 characters.",
+    "Connect all material concerns, outcomes, comparisons, requests and appreciation.",
+    "Keep distinguishing details, not just a list of labels. Preserve contrasts and uncertainty:",
+    "suspected causes, estimates and reported comparisons are the client's account, not facts we verified.",
+    "Do not turn 'appears not sent' into 'not sent', or 'seems busy' into a confirmed cause.",
+    "Acknowledge positive outcomes directly; do not thank an abstract topic as if it were a team.",
+    "Do not invent apologies for neutral requests, new topics, promises or notification claims.",
+    "Return JSON: {scope, requestEvidence: [], acknowledgement, preservesUncertainty: true,",
+    "coverage: [{evidence: 'exact client words', responseExcerpt: 'exact words in acknowledgement'}]}.",
+    "Each coverage entry must link an actual client point to its acknowledgement. Do not invent quotes.",
+    fence("client_message", text), fence("draft_acknowledgement", read.acknowledgement || "")
+  ].join("\n");
+  const result = await callGemini(input, THINKING_MINIMAL, { maxAttempts: 1, timeoutMs: 4000 });
+  if (!result.ok) return { ...read, fidelityReview: result.error || "unavailable" };
+  return applyReplyFidelityReview(read, parseJson(result.text), text, (ack) =>
+    !containsClaim(ack, { allowFeedbackRecording: true })
+    && !/\b(?:notified|emailed|alerted|out of 10|on a scale)\b/i.test(ack));
 }
 
 // ---------------------------------------------------------------------
@@ -1379,7 +1423,8 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     ' "completedServiceFollowUpKeys": [], "answeredAppreciation": false,',
     ' "answeredAnythingElse": false}',
     "",
-    "message: the next thing to say. One natural message, under 70 words.",
+    "message: one natural reply. Use enough concise sentences to acknowledge the material",
+    "points of a substantial review, not just topic labels. Maximum 1200 characters.",
     "",
     "captured: what THIS reply told us, so it can be RECORDED. Without it the",
     "conversation moves on but nothing is saved — a client said 'client servicing",

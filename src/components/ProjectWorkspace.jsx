@@ -5,7 +5,7 @@ import { SearchableSelect, cycleInRange, DateRange, FilterBar, MultiSelect, Sing
 import {
   formatCycleCoverage, formatCycleStatus, formatCycleType, formatDate, formatDateTime,
   formatConfidence, confidenceClass, formatGuardrail, formatNps, formatNpsBasis, npsClass, formatPocLevel, formatPocWeightShare, formatResolutionTime, formatScore,
-  formatSessionOutcome, riskClass, scoreClass
+  formatSessionOutcome, formatRequestHandoff, riskClass, scoreClass
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill, TonePill } from "./Ui.jsx";
 import ReportDownloads from "./ReportDownloads.jsx";
@@ -1605,6 +1605,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
                 <span>
                   {formatDateTime(message.createdAt)}
                   {message.metadata?.guardrail ? <b className="guardrail-tag">{formatGuardrail(message.metadata.guardrail)}</b> : null}
+                  {message.metadata?.clientRequestHandoff ? <b className="guardrail-tag">{formatRequestHandoff(message.metadata.clientRequestHandoff)}</b> : null}
                    {message.metadata?.provider === "gemini" ? <b className="ai-tag">rephrased</b> : null}
                    {message.metadata?.manualOutbound ? <b className="manual-message-tag">sent manually</b> : null}
                   {message.metadata?.interpretedIntent ? (

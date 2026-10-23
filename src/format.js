@@ -233,7 +233,7 @@ const GUARDRAIL_LABELS = {
   G3_post_completion: "Message after cycle closed",
   G4_wrong_person: "Wrong number",
   G5_probe_cap: "Handed to a person",
-  G6_out_of_scope: "Question routed to the team",
+  G6_out_of_scope: "Question recorded for review",
   G7_escalation: "Escalation",
   G8_invalid_rating: "Rating scale clarified",
   G9_bare_number: "Number ignored (no rating asked)",
@@ -243,6 +243,14 @@ const GUARDRAIL_LABELS = {
 
 export function formatGuardrail(code) {
   return GUARDRAIL_LABELS[code] || formatEventType(code);
+}
+
+export function formatRequestHandoff(handoff) {
+  if (!handoff) return "";
+  if (handoff.accepted === true) return "Handoff workflow accepted (inbox delivery not verified)";
+  if (handoff.status === "skipped") return "Handoff not configured";
+  if (handoff.status === "pending") return "Handoff pending";
+  return "Handoff failed or not confirmed";
 }
 
 export function riskClass(value) {
