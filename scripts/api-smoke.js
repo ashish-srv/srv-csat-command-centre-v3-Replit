@@ -6502,8 +6502,7 @@ async function scenario(name, fn) {
   });
 
   for (const sessionType of ["project_end", "pulse", "quick_checkin"]) {
-    await scenario(`${sessionType}: Ashish/Alka/Deepak consecutive campaign feedback varies acknowledgement openings without changing progression`, async () => {
-      const { recentAssistantOpenings, repeatsAcknowledgementOpening } = require("../src/lib/acknowledgement-style");
+    await scenario(`${sessionType}: detailed campaign feedback survives wrong questions and service-specific scope without losing its meaning`, async () => {
       const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
       const priorSession = store._session, priorMessages = [...calls.messages];
       process.env.GEMINI_API_KEY = "test-key";
@@ -6551,14 +6550,15 @@ async function scenario(name, fn) {
       };
       try {
         for (const [sampleIndex, [text, topic, acknowledgement, alternativeAcknowledgement]] of samples.entries()) {
-          const previousOpenings = recentAssistantOpenings(calls.messages);
+          const expectedAck = sampleIndex ? alternativeAcknowledgement : acknowledgement;
           const result = await send(text, {
-            isObservation: true, explainsProblem: true, serviceScope: "overall_feedback", acknowledgement, alternativeAcknowledgement,
+            isObservation: true, explainsProblem: true, serviceScope: sampleIndex < 2 ? "none" : "overall_feedback",
+            acknowledgement: sessionType === "quick_checkin" || sampleIndex === 2 ? expectedAck : "Thank you for providing this context.",
+            alternativeAcknowledgement: "Thank you for the context.",
             observations: [{ topic, detail: text, sentiment: "negative", needsFollowUp: false }]
-          }, sampleIndex === 1 ? { message: acknowledgement, acknowledgement, alternativeAcknowledgement }
-            : { message: "On a scale of 0 to 10, how would you rate SRV Media?", askedForOverallRating: true }, sampleIndex === 3);
-          assert.equal(repeatsAcknowledgementOpening(result.whatsappReplyText, previousOpenings), false, result.whatsappReplyText);
-          assert.ok(result.whatsappReplyText.startsWith(sampleIndex === 0 ? acknowledgement : alternativeAcknowledgement), result.whatsappReplyText);
+          }, { message: `${expectedAck} How has Account Management been for you?`, acknowledgement: expectedAck }, sampleIndex === 2);
+          assert.ok(result.whatsappReplyText.startsWith(expectedAck), result.whatsappReplyText);
+          assert.doesNotMatch(result.whatsappReplyText, /How has Account Management/);
           assert.doesNotMatch(result.whatsappReplyText, /Senior Involvement|anything else about Account Management|have notified|has been verified/i);
           if (sessionType === "quick_checkin") {
             assert.equal(result.state, "quick_checkin_window");
@@ -6567,8 +6567,8 @@ async function scenario(name, fn) {
             assert.equal(result.session.conversationState.quickCheckinWindowExpiresAt, deadline);
           } else {
             assert.equal(result.session.conversationState.overallRating, null);
-            assert.equal(result.session.conversationState.idleRatingPromptEligible, true);
-            assert.equal((result.whatsappReplyText.match(/\?/g) || []).length, sampleIndex === 0 ? 1 : 0);
+            assert.equal(Boolean(result.session.conversationState.idleRatingPromptEligible), sessionType === "project_end" || sampleIndex >= 2);
+            assert.equal((result.whatsappReplyText.match(/\?/g) || []).length, sampleIndex === (sessionType === "pulse" ? 2 : 0) ? 1 : 0);
           }
         }
         assert.ok(prompts.some((prompt) => /<recent_assistant_openings>\n\["we hear your concern"/.test(prompt)));

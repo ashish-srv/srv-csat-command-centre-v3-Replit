@@ -26,12 +26,16 @@ const ACKNOWLEDGEMENT_CONTINUITY = [
   "There is no mandatory opening phrase and no rotation of stock responses.",
   "Keep the substance, nuance and uncertainty: client comparisons and suspected",
   "causes are their account, not independently verified findings.",
-  "If there are recent openings, optionally provide alternativeAcknowledgement:",
-  "a second natural rendering of the SAME current points, with a different",
-  "sentence structure. Do not add, omit or strengthen a concern to vary wording.",
-  "Both acknowledgement fields are wording only, never factual evidence; no",
-  "questions, ratings, next steps or closing-window text. Otherwise leave the",
-  "alternative empty. Empty fields are also appropriate for bare scores/controls."
+  "Return ONE faithful acknowledgement, not alternative versions. Substance",
+  "takes priority over variety: never omit a point to avoid repeating an opening.",
+  "For multi-point feedback, connect the material concerns, their stated impact",
+  "or comparison, and any distinct requests or praise. Do not replace this with",
+  "a thank-you and a list of topic labels. Use enough concise sentences for the",
+  "content; a short message needs less detail than a substantial mixed review.",
+  "Describe comparisons, explanations and suspected failures as the client's",
+  "account, not verified market facts or confirmed causes. Do not debate them.",
+  "The acknowledgement is wording only, never factual evidence; no questions,",
+  "ratings, next steps or closing-window text. Leave it empty for bare controls."
 ];
 
 module.exports = { openingWords, recentAssistantOpenings, repeatsAcknowledgementOpening, ACKNOWLEDGEMENT_CONTINUITY };

@@ -133,8 +133,9 @@ scenario("30-day: additional service detail is retained and the optional questio
   const chat = review("pulse", { ...project, services: project.services.slice(0, 2) });
   assert.equal(chat.turn("The account manager never replies", read({ captured: [fact("account", "The account manager never replies")] })).action.type, "service_followup");
   const second = chat.turn("Our requirements are also ignored", read({ captured: [fact("account", "Our requirements are also ignored")] }));
-  assert.equal(second.action.type, "service");
-  assert.equal(second.action.serviceKey, "campaign");
+  assert.equal(second.action.type, "feedback_continuation");
+  assert.doesNotMatch(second.message, /How has|anything else|\?/i);
+  assert.equal(chat.state.mentionedServices.campaign, undefined, "Do not invent an answer for the remaining service");
   assert.match(chat.state.mentionedServices.account.reasonText, /never replies/);
   assert.match(chat.state.mentionedServices.account.reasonText, /requirements are also ignored/);
   assert.equal(chat.state.mentionedServices.account.serviceFollowUpAskCount, 1);
@@ -820,6 +821,97 @@ scenario("missing model acknowledgement does not append a detached Thank you aft
     assert.match(response, new RegExp(topic, "i"));
     if (kind === "request") assert.doesNotMatch(response, /sorry|disappoint|what happened|Management Feedback/i);
   }
+});
+
+scenario("monthly service-specific observations can continue without an unrelated service interview", () => {
+  const texts = [
+    ["Campaign reach is lower than we expected", "negative"],
+    ["Even before the engagement our Instagram posts reached the same numbers", "negative"],
+    ["Please share the spend and delivery evidence for the messages", "neutral"],
+    ["The support from Priya has been helpful, though", "positive"]
+  ];
+  const chat = review("pulse", { ...project, services: project.services.slice(0, 2) });
+  for (const [text, sentiment] of texts) {
+    const result = chat.turn(text, read({ serviceScope: "none", sentiment,
+      observations: [{ topic: "Current Feedback", detail: text, sentiment, kind: sentiment === "neutral" ? "request" : "feedback", needsFollowUp: false }],
+      acknowledgement: `I have noted your feedback about ${text.toLowerCase()}.` }));
+    assert.equal(result.action.type, "feedback_continuation");
+    assert.doesNotMatch(result.message, /\?|How has|anything else about|out of 10/);
+    assert.equal(chat.state.overallRating, null);
+    assert.equal(chat.state.npsScore, null);
+    assert.equal(Boolean(chat.state.idleRatingPromptEligible), false, "Service-only feedback must not arm the overall-review timer");
+    assert.equal(chat.state.mentionedServices.account, undefined);
+  }
+  const done = "That covers what I wanted to share";
+  const next = chat.turn(done, read({ intent: "negative", completionScope: "feedback", completionEvidence: done }));
+  assert.equal(next.action.type, "overall_rating");
+  chat.turn("7");
+  assert.equal(chat.state.overallRating, 7);
+  assert.equal(chat.state.npsScore, null);
+});
+
+scenario("continuation is independent of domain and captures praise, requests and mixed sentiment", () => {
+  for (const [topic, text, sentiment, kind] of [
+    ["Translations", "Spanish captions have mistranslations in three videos", "negative", "feedback"],
+    ["Accessibility", "Keyboard navigation leaves the checkout form unusable", "negative", "feedback"],
+    ["Reporting", "Can we receive the reconciliation sheet every Friday", "neutral", "request"],
+    ["Support", "Priya helped us recover access quickly and explained every step", "positive", "feedback"],
+    ["Delivery", "The new turnaround is much better but invoice errors remain", "negative", "feedback"]
+  ]) {
+    const chat = review("pulse");
+    const first = chat.turn(text, read({ serviceScope: "none", sentiment, observations: [{ topic, detail: text, sentiment, kind, needsFollowUp: false }] }));
+    assert.equal(first.action.type, "feedback_continuation", text);
+    assert.ok(first.facts.observations.some((item) => item.detail.includes(text)), text);
+    assert.doesNotMatch(first.message, /How has|anything else about|out of 10/);
+    const follow = "There is one other detail about this that matters to us";
+    const second = chat.turn(follow, read({ serviceScope: "none", observations: [{ topic, detail: follow, sentiment: "neutral", needsFollowUp: false }] }));
+    assert.equal(second.action.type, "feedback_continuation");
+    const done = "I have nothing further to add";
+    assert.equal(chat.turn(done, read({ intent: "negative", completionScope: "feedback", completionEvidence: done })).action.type, "overall_rating");
+  }
+});
+
+scenario("monthly continuation honours clarification, postponement and explicit refusal without inventing scores", () => {
+  for (const ending of ["pause", "stop", "clarify"]) {
+    const chat = review("pulse");
+    const detail = "The translated subtitles are missing in several clips";
+    chat.turn(detail, read({ serviceScope: "none", observations: [{ topic: "Subtitles", detail, sentiment: "negative", needsFollowUp: false }] }));
+    assert.equal(chat.state.feedbackContinuationPending, true);
+    if (ending === "pause") {
+      const reply = chat.turn("Let me continue tomorrow", read({ intent: "defer", deferRequested: true }));
+      assert.equal(reply.control.deferred, true);
+      assert.doesNotMatch(reply.message, /How has|out of 10/);
+    } else if (ending === "stop") {
+      const text = "Please close this conversation; I do not want any more questions";
+      const reply = chat.turn(text, read({ intent: "negative", completionScope: "conversation", completionEvidence: text }));
+      assert.equal(reply.action.type, "close");
+      assert.equal(chat.state.overallRating, null);
+      assert.equal(chat.state.npsScore, null);
+    } else {
+      const text = "The billing is wrong";
+      const reply = chat.turn(text, read({ serviceScope: "none", observations: [{ topic: "Billing", detail: text, sentiment: "negative", needsFollowUp: true }] }));
+      assert.equal(reply.action.type, "observation_reason");
+      const answer = "There is a duplicate tax line in the latest invoice";
+      const next = chat.turn(answer, read({ serviceScope: "none", observations: [{ topic: "Billing", detail: answer, sentiment: "negative", needsFollowUp: false }] }));
+      assert.equal(next.action.type, "feedback_continuation");
+      assert.doesNotMatch(next.message, /\?|How has/);
+    }
+  }
+});
+
+scenario("monthly continuation respects an explicit return to service questions with new feedback", () => {
+  const chat = review("pulse");
+  const first = "The translated captions are missing";
+  chat.turn(first, read({ serviceScope: "none", observations: [{ topic: "Captions", detail: first, sentiment: "negative", needsFollowUp: false }] }));
+  const detail = "The captions are still missing";
+  const next = chat.turn(`${detail}. Please ask me about each remaining service now.`, read({
+    serviceScope: "continue_service_by_service", controlVerification: "verified",
+    observations: [{ topic: "Captions", detail, sentiment: "negative", needsFollowUp: false }]
+  }));
+  assert.equal(next.action.type, "service");
+  assert.equal(chat.state.feedbackContinuationPending, false);
+  assert.ok(next.facts.observations.some((item) => item.detail === detail));
+  assert.equal(chat.state.overallRating, null);
 });
 
 for (const [status, name, error] of results) console.log(`${status}  ${name}${error ? `\n${error}` : ""}`);

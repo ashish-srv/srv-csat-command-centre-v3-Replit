@@ -9,7 +9,7 @@ const { sendIdleRatingPrompts, ownsPendingRatingReminder } = require("../lib/idl
 const { importAdminWorkbook } = require("../lib/admin-import");
 const { buildCsatImportWorkbook } = require("../lib/csat-workbook-template");
 const { recipientList, sendEmail, smtpConfigured } = require("../lib/email");
-const { recentAssistantOpenings, repeatsAcknowledgementOpening } = require("../lib/acknowledgement-style");
+const { recentAssistantOpenings } = require("../lib/acknowledgement-style");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -239,6 +239,7 @@ function requiredConversationAction(checklist, conversationState) {
   if (ratingPause && missingPausedRating) {
     return { type: "rating_feedback", ratingType: ratingPause.ratingType, offerChoice: !ratingPause.choiceAsked };
   }
+  if (conversationState.feedbackContinuationPending) return { type: "feedback_continuation" };
   const pendingServiceFollowUp = pendingFirst(checklist.servicesWaitingForAnythingElseAnswer);
   const pendingService = pendingServiceFollowUp?.serviceKey
     ? conversationState.mentionedServices?.[pendingServiceFollowUp.serviceKey]
@@ -782,7 +783,26 @@ function settleActionableFinalSweepFacts(conversationState, stateBefore, conduct
     if (conversationState.pendingObservation?.stage === "followup") conversationState.pendingObservation = null;
   }
   updateRatingFeedbackPause(conversationState, stateBefore, conducted, text, interpretation, project);
+  updateFeedbackContinuation(conversationState, stateBefore, conducted, text, interpretation, project);
   return conversationState;
+}
+
+// Defer an unanswered monthly service while the client is supplying useful
+// feedback. This is turn-taking only: no service answers, scores or overall
+// review are invented, and the one-hour rating reminder is not armed here.
+function updateFeedbackContinuation(state, before, facts, text, interpretation, project) {
+  const wasContinuing = before.feedbackContinuationPending === true;
+  state.feedbackContinuationPending = false;
+  if (!project || state.sessionType === "project_end" || state.sessionType === "quick_checkin"
+    || state.closingGraceExpiresAt || state.ratingFeedbackPause || state.clientRequestedClose
+    || state.optedOut || interpretation?.deferRequested
+    || interpretation?.serviceScope === SERVICE_SCOPE_DECISIONS.CONTINUE_SERVICE_BY_SERVICE
+    || [STATES.COMPLETED, STATES.HANDED_OFF, STATES.OPTED_OUT].includes(state.state)) return;
+  const supplied = [facts?.captured, facts?.observations, facts?.appreciations].some((items) => items?.length);
+  if (!supplied || factFreeControlReply(text, interpretation)) return;
+  if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) return;
+  const next = requiredConversationAction(buildChecklist(state, project), state);
+  if (next.type === "service" || wasContinuing) state.feedbackContinuationPending = true;
 }
 
 // A correction window accepts new facts; it is not a fresh service interview.
@@ -849,7 +869,16 @@ function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpr
   const previousPause = before.ratingFeedbackPause;
   const suppliedFacts = (facts.captured || []).length || (facts.observations || []).length || (facts.appreciations || []).length;
   const feedbackContinuation = suppliedFacts || ["feedback", "more_detail"].includes(interpretation?.intent);
+  // A scoped observation can populate generalConcernText in the rule pass;
+  // that storage field alone is not evidence of an overall monthly review.
+  // Do not suppress the existing overall-praise invitation merely because
+  // the reader supplied appreciation without an explicit scope decision.
+  const scopedFacts = (facts.captured || []).length || (facts.observations || []).length;
+  const scopedMonthlyPoint = state.sessionType !== "project_end" && interpretation?.serviceScope === "none"
+    && scopedFacts && !state.generalFeedbackText && project
+    && buildChecklist(state, project).servicesNotYetDiscussedWithKeys?.length > 0;
   const firstOverallReview = !before.overallRatingAsked && !before.askedForOverallRating && feedbackContinuation
+    && !scopedMonthlyPoint
     && (state.projectEndReviewCaptured
       || ((state.generalFeedbackText || state.generalConcernText) && state.serviceScopeStatus !== "service_by_service")
       || (project && buildChecklist(state, project).overallRatingStillNeeded));
@@ -1017,6 +1046,7 @@ function baseFallbackForAction(action, conversationState, project, context = {})
   if (action.type === "final_sweep") {
     return "Before we finish, is there anything else you would like the Directors to know—such as an issue, an area for improvement, or any appreciation you would like us to record? If not, just reply no.";
   }
+  if (action.type === "feedback_continuation") return "";
   if (action.type === "rating_feedback") {
     if (!action.offerChoice) return "";
     return action.ratingType === "nps"
@@ -1080,12 +1110,14 @@ function internalSummaryLanguage(message) {
 function safeAcknowledgementCandidates(context, project, action) {
   const hasRecordedFacts = Boolean((context.captured || []).length || (context.observations || []).length || (context.appreciations || []).length || (context.concerns || []).length);
   const safe = [];
-  // The interpretation saw only this reply, while the writer also saw older
-  // transcript context. Prefer its current-point wording when both are safe.
-  for (const candidate of [context.extractedAcknowledgement, context.acknowledgement,
-    context.extractedAlternativeAcknowledgement, context.alternativeAcknowledgement]) {
+  // Preserve the writer's actual acknowledgement when only its next question
+  // needs repair. Never select a second draft just to change an opening.
+  const draft = String(context.text || "").trim();
+  const writer = String(context.acknowledgement || "").trim();
+  const writerPrefix = writer && (draft === writer || draft.startsWith(`${writer} `) || draft.startsWith(`${writer}\n`)) ? writer : "";
+  for (const candidate of [writerPrefix, !/[?？]/.test(draft) ? draft : "", context.extractedAcknowledgement, writer]) {
     const message = String(candidate || "").trim();
-    if (!message || message.length > 600 || /[?？]/.test(message) || internalSummaryLanguage(message) || containsClaim(message, { allowFeedbackRecording: hasRecordedFacts })) continue;
+    if (!message || message.length > 900 || /[?？]/.test(message) || internalSummaryLanguage(message) || containsClaim(message, { allowFeedbackRecording: hasRecordedFacts })) continue;
     if (/\b(?:out of 10|on a scale|(?:have|has|already)\s+(?:notified|alerted|emailed)|(?:directors|management|team)\s+(?:have|has)\s+been\s+(?:notified|alerted|informed))\b/i.test(message)) continue;
     if (/\b(?:i|we|our team|the team)\s+(?:(?:have|has|already)\s+)*(?:fixed|resolved|implemented|completed)\b/i.test(message)) continue;
     if (!latestConcernFacts(context).length && /\b(?:sorry|apolog\w*|disappoint\w*|regret)\b/i.test(message)) continue;
@@ -1096,34 +1128,21 @@ function safeAcknowledgementCandidates(context, project, action) {
 
 function clientFacingAcknowledgement(context, project, action) {
   const candidates = safeAcknowledgementCandidates(context, project, action);
-  const primary = candidates[0] || "";
-  const openings = context.recentAssistantOpenings || [];
-  if (!repeatsAcknowledgementOpening(primary, openings)) return primary;
+  let primary = candidates[0] || "";
   const evidence = [context.latestClientText, ...(context.captured || []).map((item) => item.summary),
     ...(context.observations || []).map((item) => item.detail), ...(context.appreciations || []).map((item) => item.detail),
     ...(context.concerns || []).map((item) => item.summary)].filter(Boolean).join(" ");
   const courtesyWords = new Set(["i", "you", "your", "us", "thank", "thanks", "feedback", "sharing", "shared", "hear", "concern", "concerns", "request", "noted", "recorded", "review", "team", "service", "project", "client", "management"]);
   const pointWords = [...contentTokens(evidence)].filter((word) => !courtesyWords.has(word) && !/^\d+$/.test(word));
-  // Prefer a safe, specific alternate rendering, never a stock replacement or
-  // generic thanks that loses the point. If none is safe, retain the accurate
-  // wording rather than inventing a continuation or making another model call.
-  return candidates.find((candidate) => !repeatsAcknowledgementOpening(candidate, openings)
-    && pointWords.some((word) => contentTokens(candidate).has(word))) || primary;
-}
-
-function varyAcknowledgementOpening(message, context, project, action) {
-  if (!repeatsAcknowledgementOpening(message, context.recentAssistantOpenings || [])) return message;
-  const replacement = clientFacingAcknowledgement(context, project, action);
-  if (!replacement || repeatsAcknowledgementOpening(replacement, context.recentAssistantOpenings || [])) return message;
-  const opening = safeAcknowledgementCandidates(context, project, action)
-    .filter((candidate) => message === candidate || message.startsWith(`${candidate} `) || message.startsWith(`${candidate}\n`))
-    .sort((left, right) => right.length - left.length)[0];
-  if (!opening || opening === replacement) return message;
-  // Replace only an exact, question-free acknowledgement prefix. The already
-  // validated next question/closing text and all state markers stay untouched.
-  const praise = responseAcknowledgesAppreciation(opening, context)
-    && !responseAcknowledgesAppreciation(replacement, context) ? appreciationAcknowledgement(context, project) : "";
-  return [replacement, praise].filter(Boolean).join(" ") + message.slice(opening.length);
+  const matches = (candidate) => new Set(pointWords.filter((word) => contentTokens(candidate).has(word)));
+  // A conservative wording-only tie-break: an alternative source must retain
+  // all matched current-detail words and add detail. It cannot win just for
+  // being shorter or less repetitive. Synonyms do not cause automatic swaps.
+  for (const candidate of candidates.slice(1)) {
+    const current = matches(primary), other = matches(candidate);
+    if (other.size >= current.size + 2 && [...current].every((word) => other.has(word))) primary = candidate;
+  }
+  return primary;
 }
 
 function fallbackForAction(action, conversationState, project, context = {}) {
@@ -1166,7 +1185,7 @@ function fallbackForAction(action, conversationState, project, context = {}) {
   const concern = !["issue_reason", "service_followup", "observation_reason"].includes(action.type)
     ? concernAcknowledgement(context, conversationState, project) : "";
   const request = requestAcknowledgement(context);
-  const recorded = action.type === "rating_feedback" && !concern && !request && !acknowledgement
+  const recorded = ["rating_feedback", "feedback_continuation"].includes(action.type) && !concern && !request && !acknowledgement
     ? "I have noted your additional feedback for review." : "";
   return [concern, request, acknowledgement, recorded, next].filter(Boolean).join(" ")
     || "Thank you. I have added that to your recorded feedback.";
@@ -1722,6 +1741,7 @@ function applyPendingIssueInterpretation(conversationState, stateBefore, interpr
 function messageMatchesRequiredAction(action, message) {
   const text = String(message || "").trim();
   if (!text) return false;
+  if (action.type === "feedback_continuation") return !/[?？]/.test(text) && !/\b(?:out of 10|on a scale)\b/i.test(text);
   const lowerText = text.toLowerCase();
   const serviceNamed = !action.serviceKey || [action.name, action.serviceKey]
     .filter(Boolean)
@@ -2015,7 +2035,7 @@ function responseAcknowledgesAppreciation(message, context = {}) {
   const source = String(message || "");
   const explicitAppreciation = /\b(?:glad|pleased|happy|delighted) to (?:hear|know|learn)\b/i.test(source)
     || /\b(?:thank(?:s| you)?(?: for)?|appreciat(?:e|ed|ing|ion)|kind words|special mention|glad to hear)\b/i.test(source)
-    && /\b(?:share|pass|convey|team|person|people|them|him|her|support|work|words|mention|feedback)\b/i.test(source);
+    && /\b(?:pass|convey|team|person|people|them|him|her|support|work|words|mention)\b/i.test(source);
   if (explicitAppreciation) return true;
   // A positive outcome can already be acknowledged without mentioning a
   // team or promising to pass on praise. Match only this turn's grounded
@@ -2260,7 +2280,6 @@ function enrichConductedWithDeterministicFacts(
   conducted.latestClientText = String(text || "");
   // Wording only, never a source of facts or scores.
   conducted.extractedAcknowledgement = interpretation.acknowledgement || "";
-  conducted.extractedAlternativeAcknowledgement = interpretation.alternativeAcknowledgement || "";
   conducted.concerns = (interpretation.concerns || []).map((item) => groundModelFact("concern", item, text, project)).filter(Boolean);
   // The conductor writes the reply; it is not an evidence source. Discard all
   // facts it generated from transcript context and rebuild exclusively from
@@ -3910,6 +3929,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     normalizeLegacyServiceFollowups(turn.conversationState);
     settleClosingWindowFacts(turn.conversationState, stateBefore, interpretation || {});
     updateRatingFeedbackPause(turn.conversationState, stateBefore, interpretation || {}, text, interpretation, project);
+    updateFeedbackContinuation(turn.conversationState, stateBefore, interpretation || {}, text, interpretation, project);
     const conductorChecklist = buildChecklist(turn.conversationState, project);
     const preferredAction = requiredConversationAction(conductorChecklist, turn.conversationState);
     const conducted = await conductTurn({
@@ -4139,8 +4159,6 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         }
         conducted.text = fallbackForAction(requiredAction, turn.conversationState, project, conducted);
         conducted.readyToClose = requiredAction.type === "close";
-      } else {
-        conducted.text = varyAcknowledgementOpening(conducted.text, conducted, project, requiredAction);
       }
       const recordedQuestion = recordRequiredQuestion(turn.conversationState, project, requiredAction);
       latestReplyFacts = conducted;
@@ -8235,7 +8253,6 @@ module.exports = {
     messageMatchesRequiredAction,
     internalSummaryLanguage,
     clientFacingAcknowledgement,
-    varyAcknowledgementOpening,
     fallbackForAction,
     closingGraceMessage,
     rememberAcknowledgedConcerns,

@@ -18,6 +18,12 @@
 // api-revision header: it pins to the legacy schema, which was removed on
 // 8 June 2026 and makes every call fail.
 const { recentAssistantOpenings, ACKNOWLEDGEMENT_CONTINUITY } = require("./acknowledgement-style");
+
+// Wording is never truncated mid-thought or used as extraction evidence.
+function boundedAcknowledgement(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text.length <= 900 ? text : "";
+}
 const GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1/interactions";
 const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const TIMEOUT_MS = 12000;
@@ -950,9 +956,7 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
   return {
     intent: parsed.intent,
     acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement, { allowFeedbackRecording: true })
-      ? parsed.acknowledgement.trim().slice(0, 600) : "",
-    alternativeAcknowledgement: typeof parsed.alternativeAcknowledgement === "string" && !containsClaim(parsed.alternativeAcknowledgement, { allowFeedbackRecording: true })
-      ? parsed.alternativeAcknowledgement.trim().slice(0, 600) : "",
+      ? boundedAcknowledgement(parsed.acknowledgement) : "",
     ratingChoice: ["proceed", "continue_feedback"].includes(parsed.ratingChoice) ? parsed.ratingChoice : "none",
     ratingChoiceEvidence: typeof parsed.ratingChoiceEvidence === "string" ? parsed.ratingChoiceEvidence.slice(0, 240) : null,
     completionScope: ["topic", "feedback", "conversation", "rating"].includes(parsed.completionScope) ? parsed.completionScope : "none",
@@ -1074,7 +1078,7 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "Task: interpret ONE client reply. Do not advance the survey or ask a question.",
     "Return strict JSON only, no markdown:",
     '{"intent": "...", "deferRequested": false, "completionScope": "none", "completionEvidence": null, "ratingChoice": "none", "ratingChoiceEvidence": null, "serviceScope": "none", "sentiment": "...", "rating": null,',
-    ' "acknowledgement": "...", "alternativeAcknowledgement": "", "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
+    ' "acknowledgement": "...", "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
     ' "serviceFeedback": [{"serviceHint": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false, "kind": "feedback"}],',
     ' "concerns": [{"title": "...", "summary": "...", "sentiment": "negative", "severity": "watch", "serviceHint": null, "needsFollowUp": false}],',
@@ -1213,8 +1217,8 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "A request does not need a problem explanation. Set needsFollowUp false",
     "for requests; do not start a complaint interview to collect arrangements.",
     "",
-    "acknowledgement is optional client-facing wording only: one to three short",
-    "sentences recognising the actual current request, concern and appreciation.",
+    "acknowledgement is optional client-facing wording only: concise sentences",
+    "recognising the material current requests, concerns and appreciation.",
     "Name the specific points naturally, not just their department. Acknowledge",
     "requests without an unwarranted apology; use proportionate empathy for an",
     "actual problem and recognise praise naturally. Do not label their whole experience",
@@ -1363,7 +1367,7 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "You are collecting service feedback for SRV Media over WhatsApp.",
     "",
     "Return strict JSON only, no markdown:",
-    '{"message": "...", "acknowledgement": "...", "alternativeAcknowledgement": "", "captured": [{"serviceKey": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
+    '{"message": "...", "acknowledgement": "...", "captured": [{"serviceKey": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false}],',
     ' "appreciations": [{"subject": "...", "detail": "...", "serviceKey": null}],',
     ' "overallRating": null, "corrects": false, "readyToClose": false, "deferRequested": false, "serviceScope": "none",',
@@ -1500,15 +1504,18 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "  say SEO sounds okay overall instead of a generic 'thanks for sharing'.",
     "",
     "- If they answer about a DIFFERENT service than the one you asked about,",
-    "  record what they said and follow their lead. An unanswered INITIAL service",
-    "  question may remain outstanding according to the checklist; do not reopen",
-    "  a captured topic or demand an answer to a clarification they declined.",
+    "  record what they said and follow their lead. Outstanding services are not",
+    "  permission to interrupt a continuing point. When the required action is",
+    "  feedback_continuation, acknowledge the current detail without any survey",
+    "  question. Do not invent an answer for the deferred service or mark it done.",
     "",
     "- Acknowledge briefly but specifically, not with a generic thank-you.",
-    "  Also return acknowledgement separately: one or two short sentences",
+    "  Keep message within 1200 characters and acknowledgement within 900.",
+    "  These are ceilings, not targets; preserve important meaning concisely.",
+    "  Also return acknowledgement separately: enough concise sentences",
     "  addressed directly to the client, with no question, rating or next step.",
     "  When present, this must be the exact opening acknowledgement of message,",
-    "  so its wording can be varied without replacing the next question.",
+    "  so a wrong next question can be corrected without losing this wording.",
     ...ACKNOWLEDGEMENT_CONTINUITY,
     fence("recent_assistant_openings", JSON.stringify(recentAssistantOpenings(messages))),
     "  It is wording only, never an additional source of facts. Recognise the",
@@ -1645,7 +1652,7 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     console.warn("[gemini] conductTurn rejected for claim language:", parsed.message.slice(0, 120));
     return { ...fallback, model: result.model, error: "rejected_claim_language" };
   }
-  if (!deferRequested && modelMessage.length > 400) {
+  if (!deferRequested && modelMessage.length > 1200) {
     console.warn("[gemini] conductTurn rejected as too long:", modelMessage.length, "chars");
     return { ...fallback, model: result.model, error: "rejected_too_long" };
   }
@@ -1712,9 +1719,7 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
   return {
     text: message,
     acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement, { allowFeedbackRecording: true })
-      ? parsed.acknowledgement.trim().slice(0, 600) : "",
-    alternativeAcknowledgement: typeof parsed.alternativeAcknowledgement === "string" && !containsClaim(parsed.alternativeAcknowledgement, { allowFeedbackRecording: true })
-      ? parsed.alternativeAcknowledgement.trim().slice(0, 600) : "",
+      ? boundedAcknowledgement(parsed.acknowledgement) : "",
     captured,
     observations,
     appreciations: appreciations.slice(0, 6),

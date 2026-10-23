@@ -327,11 +327,11 @@ const turn = {
     try {
       const project = { name: "Prompt test", services: [{ serviceKey: "account", name: "Account Management" }] };
       const interpretation = await interpretReply({ project, question: "Thank you for confirming.", text: "That covers everything", pendingRatingChoice: "overall_rating", recentOpenings: ["we hear your concern"] });
-      assert.equal(interpretation.alternativeAcknowledgement, "Your experience has been noted for review.");
+      assert.equal(interpretation.alternativeAcknowledgement, undefined);
       assert.deepEqual(interpretation.recentAssistantOpenings, ["we hear your concern"]);
       const response = await conductTurn({ project, checklist: { overallRatingStillNeeded: true }, preferredAction: { type: "overall_rating" } });
       assert.equal(response.acknowledgement, "Thank you for explaining your experience.");
-      assert.equal(response.alternativeAcknowledgement, "Your experience has been noted for review.");
+      assert.equal(response.alternativeAcknowledgement, undefined);
       assert.equal(prompts.length, 2);
       assert.match(prompts[0], /completionEvidence must quote the EXACT current words/);
       assert.match(prompts[0], /were busy.*not.*we are busy/);
@@ -354,6 +354,9 @@ const turn = {
         assert.match(prompt, /no rotation of stock responses/);
         assert.match(prompt, /not independently verified findings/);
         assert.doesNotMatch(prompt, /recognition such as We hear your concern/);
+        assert.doesNotMatch(prompt, /alternativeAcknowledgement/);
+        assert.match(prompt, /Substance\s+takes priority over variety/);
+        assert.match(prompt, /material concerns, their stated impact/);
       }
       assert.match(prompts[0], /<recent_assistant_openings>\n\["we hear your concern"\]/);
       assert.match(prompts[0], /recognise the concrete difficulty and its impact/);
@@ -372,6 +375,29 @@ const turn = {
   // ---- every function must fall back when Gemini is unavailable ----
   delete process.env.GEMINI_API_KEY;
   delete process.env.GOOGLE_API_KEY;
+
+  await scenario("substantive acknowledgements above the old 400-character limit survive without truncation", async () => {
+    const priorFetch = global.fetch, priorKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "test-key";
+    const acknowledgement = "We understand your concern about the admissions strategy and enquiries falling below expectations, and the comparisons you have drawn with CMAT applications and NCR programmes. You are also questioning the team's delivery for SIBM Noida and whether the expected SMS and WhatsApp messages were sent. Your request for campaign spend, reach, impressions, clicks, conversions, screenshots and delivery logs is noted, alongside your dissatisfaction with this year's results.";
+    assert.ok(acknowledgement.length > 400 && acknowledgement.length < 900);
+    let draft = { message: `${acknowledgement} Would you like to add more, or move to the overall rating?`, acknowledgement };
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(draft) }) });
+    try {
+      const response = await conductTurn({ project: { services: [] }, messages: [] });
+      assert.equal(response.text, draft.message);
+      assert.equal(response.acknowledgement, acknowledgement);
+      const normal = normaliseReplyInterpretation({ intent: "feedback", acknowledgement }, { services: [] });
+      assert.equal(normal.acknowledgement, acknowledgement);
+      const tooLong = acknowledgement.repeat(3);
+      assert.equal(normaliseReplyInterpretation({ intent: "feedback", acknowledgement: tooLong }, { services: [] }).acknowledgement, "");
+      draft = { message: tooLong, acknowledgement: tooLong };
+      assert.equal((await conductTurn({ project: { services: [] } })).error, "rejected_too_long");
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+    }
+  });
 
   await scenario("Rephrase falls back to the state machine's own wording", async () => {
     const out = await rephraseQuestion({ project: null, poc: null, text: "hi", turn, messages: [] });
