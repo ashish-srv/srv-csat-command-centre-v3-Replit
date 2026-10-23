@@ -6501,6 +6501,99 @@ async function scenario(name, fn) {
     }
   });
 
+  for (const sessionType of ["project_end", "pulse", "quick_checkin"]) {
+    await scenario(`${sessionType}: Ashish/Alka/Deepak consecutive campaign feedback varies acknowledgement openings without changing progression`, async () => {
+      const { recentAssistantOpenings, repeatsAcknowledgementOpening } = require("../src/lib/acknowledgement-style");
+      const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+      const priorSession = store._session, priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      let read = {}, writer = {}, writerTimeout = false;
+      const prompts = [];
+      global.fetch = async (_url, options) => {
+        const input = JSON.parse(options?.body || "{}").input || "";
+        prompts.push(input);
+        const payload = input.includes("Task: interpret ONE client reply") ? read
+          : input.includes("Task: verify ONLY the client's survey-control instruction") ? { decision: read.completionScope || "none", evidence: read.completionEvidence || null }
+          : /predict how satisfied/i.test(input) ? { overall: { score: 5, confidence: 0.9, reasoning: "Fixture", signals: [] }, services: [], observations: [] }
+          : writerTimeout ? null : writer;
+        if (payload === null) throw new Error("simulated writer timeout");
+        return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(payload) }) };
+      };
+      store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+        status: "started", completionStatus: "no_response", sessionType, conversationState: {
+          state: sessionType === "quick_checkin" ? "quick_checkin_detail" : "waiting_for_open_feedback", sessionType,
+          pendingQuestionType: sessionType === "project_end" ? "project_end_review" : "service",
+          projectEndReviewAsked: sessionType === "project_end", quickCheckinOutcome: "needs_improvement"
+        } };
+      const samples = [
+        ["There is very less reach for the campaigns for admission process", "Admission Campaign Reach",
+          "We hear your concern regarding the low reach on campaigns for the admission process.",
+          "Your concern about low campaign reach for admissions is noted."],
+        ["I was reviewing the posts on Instagram since July even before we engaged with SRV and many posts have same reach as was in the month of July", "Instagram Reach",
+          "We hear your concern regarding Instagram post reach remaining at July levels.",
+          "The comparison with July helps explain your concern that Instagram post reach has not improved."],
+        ["SRV’s digital marketing performance for admissions has been below expectations. - The current strategy has not delivered the desired results in terms of enquiries and conversions. - We need complete transparency and detailed reporting of all campaigns, including amount spent, reach, impressions, clicks, and conversions. - Screenshots and supporting data for every campaign and activity must be shared to verify the work being executed. - We also require detailed reports of all SMS and WhatsApp campaigns, including the number of messages sent and delivered. - Overall, we are dissatisfied with SRV’s performance this year and expect greater accountability, transparency, and a clear action plan to improve admission results.", "Admissions Performance and Reporting",
+          "We hear your concern about admissions results, enquiries and conversions, and your request for campaign metrics, spend, screenshots and SMS/WhatsApp delivery reports.",
+          "Your dissatisfaction with admissions results and enquiries is noted, along with the request for transparent campaign metrics, spend, screenshots, and SMS and WhatsApp delivery reports."],
+        ["1. SRVs strategy is clearly not working. 2. ⁠The narrative that MBA education is down is wrong. 3. ⁠AICTE’s CMAT itself got over 50,000 forms..so why is SNAP going down. 4. ⁠NCR has several MBA programs where there is hardly any decline. 5. ⁠Clearly, the SRV team assigned to SIBM, Noida is not able to deliver. 6. ⁠We were told that a significant number of SMS and WhatsApp messages will be sent..it appears that the same has not been done.. 7. ⁠I am not happy with SRVs performance this year.", "Strategy and Messaging Delivery",
+          "We hear your concern about the admissions strategy and whether the promised SMS and WhatsApp messages were sent.",
+          "You also question the explanation about MBA demand, citing CMAT and NCR programs, and raise concerns about SIBM Noida delivery and whether the expected SMS and WhatsApp messages were sent."]
+      ];
+      let index = 0, deadline;
+      const send = async (text, extraction, responseWriter, timeout = false) => {
+        read = { intent: "feedback", sentiment: "negative", rating: null, observations: [], appreciations: [], serviceFeedback: [], concerns: [], ...extraction };
+        writer = responseWriter || { message: "Thank you for sharing that." };
+        writerTimeout = timeout;
+        const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text, providerMessageId: `wamid.continuity-${sessionType}-${index++}` });
+        assert.equal(response.statusCode, 201, response.body);
+        return JSON.parse(response.body);
+      };
+      try {
+        for (const [sampleIndex, [text, topic, acknowledgement, alternativeAcknowledgement]] of samples.entries()) {
+          const previousOpenings = recentAssistantOpenings(calls.messages);
+          const result = await send(text, {
+            isObservation: true, explainsProblem: true, serviceScope: "overall_feedback", acknowledgement, alternativeAcknowledgement,
+            observations: [{ topic, detail: text, sentiment: "negative", needsFollowUp: false }]
+          }, sampleIndex === 1 ? { message: acknowledgement, acknowledgement, alternativeAcknowledgement }
+            : { message: "On a scale of 0 to 10, how would you rate SRV Media?", askedForOverallRating: true }, sampleIndex === 3);
+          assert.equal(repeatsAcknowledgementOpening(result.whatsappReplyText, previousOpenings), false, result.whatsappReplyText);
+          assert.ok(result.whatsappReplyText.startsWith(sampleIndex === 0 ? acknowledgement : alternativeAcknowledgement), result.whatsappReplyText);
+          assert.doesNotMatch(result.whatsappReplyText, /Senior Involvement|anything else about Account Management|have notified|has been verified/i);
+          if (sessionType === "quick_checkin") {
+            assert.equal(result.state, "quick_checkin_window");
+            assert.doesNotMatch(result.whatsappReplyText, /out of 10|recommend|overall rating/i);
+            deadline ||= result.session.conversationState.quickCheckinWindowExpiresAt;
+            assert.equal(result.session.conversationState.quickCheckinWindowExpiresAt, deadline);
+          } else {
+            assert.equal(result.session.conversationState.overallRating, null);
+            assert.equal(result.session.conversationState.idleRatingPromptEligible, true);
+            assert.equal((result.whatsappReplyText.match(/\?/g) || []).length, sampleIndex === 0 ? 1 : 0);
+          }
+        }
+        assert.ok(prompts.some((prompt) => /<recent_assistant_openings>\n\["we hear your concern"/.test(prompt)));
+        if (sessionType !== "quick_checkin") {
+          let result = await send("thats it", { intent: "negative", completionScope: "feedback", completionEvidence: "thats it" });
+          assert.match(result.whatsappReplyText, /overall.*out of 10/i);
+          result = await send("5", { intent: "rating", rating: 5 });
+          assert.equal(result.session.conversationState.overallRating, 5);
+          if (sessionType === "project_end") {
+            assert.match(result.whatsappReplyText, /recommend/i);
+            result = await send("9", { intent: "rating", rating: 9 });
+            assert.equal(result.session.conversationState.overallRating, 5);
+            assert.equal(result.session.conversationState.npsScore, 9);
+          }
+          if (result.state !== "closing_grace") result = await send("Nothing more", { intent: "negative", completionScope: "feedback", completionEvidence: "Nothing more" });
+          assert.equal(result.state, "closing_grace");
+        }
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+        calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+      }
+    });
+  }
+
   await scenario("Structured requests and mixed concerns retain their own meaning without generic fallback duplicates", async () => {
     const { conversationFlow: flow } = require("../src/server/api-handler");
     const requests = [

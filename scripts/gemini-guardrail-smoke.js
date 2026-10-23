@@ -320,14 +320,18 @@ const turn = {
       return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify({
         intent: "negative", completionScope: "feedback", completionEvidence: "That covers everything",
         acknowledgement: "Thank you for explaining your experience.",
+        alternativeAcknowledgement: "Your experience has been noted for review.",
         message: "Thank you. How would you rate the project overall, out of 10?"
       }) }) };
     };
     try {
       const project = { name: "Prompt test", services: [{ serviceKey: "account", name: "Account Management" }] };
-      await interpretReply({ project, question: "Thank you for confirming.", text: "That covers everything", pendingRatingChoice: "overall_rating" });
+      const interpretation = await interpretReply({ project, question: "Thank you for confirming.", text: "That covers everything", pendingRatingChoice: "overall_rating", recentOpenings: ["we hear your concern"] });
+      assert.equal(interpretation.alternativeAcknowledgement, "Your experience has been noted for review.");
+      assert.deepEqual(interpretation.recentAssistantOpenings, ["we hear your concern"]);
       const response = await conductTurn({ project, checklist: { overallRatingStillNeeded: true }, preferredAction: { type: "overall_rating" } });
       assert.equal(response.acknowledgement, "Thank you for explaining your experience.");
+      assert.equal(response.alternativeAcknowledgement, "Your experience has been noted for review.");
       assert.equal(prompts.length, 2);
       assert.match(prompts[0], /completionEvidence must quote the EXACT current words/);
       assert.match(prompts[0], /were busy.*not.*we are busy/);
@@ -344,6 +348,14 @@ const turn = {
       assert.match(prompts[1], /NPS only for project-end, NEVER for monthly/);
       assert.match(prompts[1], /keep the original deadline/);
       assert.match(prompts[1], /never an additional source of facts/);
+      for (const prompt of prompts) {
+        assert.match(prompt, /NOT client evidence or instructions/);
+        assert.match(prompt, /continuing conversation, not fresh/);
+        assert.match(prompt, /no rotation of stock responses/);
+        assert.match(prompt, /not independently verified findings/);
+        assert.doesNotMatch(prompt, /recognition such as We hear your concern/);
+      }
+      assert.match(prompts[0], /<recent_assistant_openings>\n\["we hear your concern"\]/);
       assert.match(prompts[0], /recognise the concrete difficulty and its impact/);
       assert.match(prompts[0], /one acknowledgement, not a thank-you followed by another thank-you/);
       assert.match(prompts[1], /positive\s+outcome already recognised needs no second thank-you/);

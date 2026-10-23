@@ -17,6 +17,7 @@
 // v1 — the Interactions API went GA in June 2026. Do NOT send an
 // api-revision header: it pins to the legacy schema, which was removed on
 // 8 June 2026 and makes every call fail.
+const { recentAssistantOpenings, ACKNOWLEDGEMENT_CONTINUITY } = require("./acknowledgement-style");
 const GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1/interactions";
 const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const TIMEOUT_MS = 12000;
@@ -950,6 +951,8 @@ function normaliseReplyInterpretation(parsed, project, sourceText = "") {
     intent: parsed.intent,
     acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement, { allowFeedbackRecording: true })
       ? parsed.acknowledgement.trim().slice(0, 600) : "",
+    alternativeAcknowledgement: typeof parsed.alternativeAcknowledgement === "string" && !containsClaim(parsed.alternativeAcknowledgement, { allowFeedbackRecording: true })
+      ? parsed.alternativeAcknowledgement.trim().slice(0, 600) : "",
     ratingChoice: ["proceed", "continue_feedback"].includes(parsed.ratingChoice) ? parsed.ratingChoice : "none",
     ratingChoiceEvidence: typeof parsed.ratingChoiceEvidence === "string" ? parsed.ratingChoiceEvidence.slice(0, 240) : null,
     completionScope: ["topic", "feedback", "conversation", "rating"].includes(parsed.completionScope) ? parsed.completionScope : "none",
@@ -1054,7 +1057,7 @@ async function verifySurveyControl(read, { question, text, pendingRatingChoice }
   return safe;
 }
 
-async function interpretReply({ project, question, text, longForm = false, pendingRatingChoice = null, verifySurveyControls = false }) {
+async function interpretReply({ project, question, text, longForm = false, pendingRatingChoice = null, verifySurveyControls = false, recentOpenings = [] }) {
   const fallback = {
     intent: null, acknowledgement: "", ratingChoice: "none", ratingChoiceEvidence: null,
     deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
@@ -1071,7 +1074,7 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "Task: interpret ONE client reply. Do not advance the survey or ask a question.",
     "Return strict JSON only, no markdown:",
     '{"intent": "...", "deferRequested": false, "completionScope": "none", "completionEvidence": null, "ratingChoice": "none", "ratingChoiceEvidence": null, "serviceScope": "none", "sentiment": "...", "rating": null,',
-    ' "acknowledgement": "...", "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
+    ' "acknowledgement": "...", "alternativeAcknowledgement": "", "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
     ' "serviceFeedback": [{"serviceHint": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false, "kind": "feedback"}],',
     ' "concerns": [{"title": "...", "summary": "...", "sentiment": "negative", "severity": "watch", "serviceHint": null, "needsFollowUp": false}],',
@@ -1220,14 +1223,15 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "a verified cause. General praise is not necessarily praise of a person/team.",
     "Be brief but specific: recognise the concrete difficulty and its impact,",
     "not merely a generic department label or 'thanks for the feedback'.",
-    "An acknowledgement need not begin with Thank you or an apology. Natural",
-    "recognition such as We hear your concern or We are glad to hear is valid.",
+    "An acknowledgement need not begin with thanks or an apology. Use natural",
+    "recognition of the current point, without prescribing a stock opening.",
     "Use one acknowledgement, not a thank-you followed by another thank-you.",
     "Do not address an abstract outcome/topic as a person or team. Preserve",
     "the client's nuance and uncertainty; never add a cause or promise a fix.",
     "No questions, ratings, closing-window text, invented actions or claims that",
     "someone was notified. Use an empty string for a bare score/control reply.",
     "This wording must never be used as evidence for facts, services or scores.",
+    ...ACKNOWLEDGEMENT_CONTINUITY,
     "",
     "concerns contains every DISTINCT actionable negative concern in this reply,",
     "whether it belongs to a service or is project-wide. Do not create concerns",
@@ -1259,6 +1263,7 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "  'not happy with PPC'                 -> false",
     "",
     fence("pending_rating_choice", ["overall_rating", "nps"].includes(pendingRatingChoice) ? pendingRatingChoice : "none"),
+    fence("recent_assistant_openings", JSON.stringify(recentOpenings.slice(-3))),
     fence("question_we_asked", question),
     "",
     fence("client_message", text)
@@ -1284,7 +1289,7 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     + ` observation=${normalized.isObservation}`
     + ` services=${JSON.stringify(normalized.serviceKeys)}`);
 
-  return normalized;
+  return { ...normalized, recentAssistantOpenings: recentOpenings.slice(-3) };
 }
 
 // ---------------------------------------------------------------------
@@ -1358,7 +1363,7 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "You are collecting service feedback for SRV Media over WhatsApp.",
     "",
     "Return strict JSON only, no markdown:",
-    '{"message": "...", "acknowledgement": "...", "captured": [{"serviceKey": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
+    '{"message": "...", "acknowledgement": "...", "alternativeAcknowledgement": "", "captured": [{"serviceKey": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false}],',
     ' "appreciations": [{"subject": "...", "detail": "...", "serviceKey": null}],',
     ' "overallRating": null, "corrects": false, "readyToClose": false, "deferRequested": false, "serviceScope": "none",',
@@ -1502,6 +1507,10 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     "- Acknowledge briefly but specifically, not with a generic thank-you.",
     "  Also return acknowledgement separately: one or two short sentences",
     "  addressed directly to the client, with no question, rating or next step.",
+    "  When present, this must be the exact opening acknowledgement of message,",
+    "  so its wording can be varied without replacing the next question.",
+    ...ACKNOWLEDGEMENT_CONTINUITY,
+    fence("recent_assistant_openings", JSON.stringify(recentAssistantOpenings(messages))),
     "  It is wording only, never an additional source of facts. Recognise the",
     "  actual concern, impact or appreciation in their latest message. Never",
     "  expose internal notes such as 'the client emphasizes', repeat their full",
@@ -1704,6 +1713,8 @@ async function conductTurn({ project, poc, checklist, preferredAction = null, me
     text: message,
     acknowledgement: typeof parsed.acknowledgement === "string" && !containsClaim(parsed.acknowledgement, { allowFeedbackRecording: true })
       ? parsed.acknowledgement.trim().slice(0, 600) : "",
+    alternativeAcknowledgement: typeof parsed.alternativeAcknowledgement === "string" && !containsClaim(parsed.alternativeAcknowledgement, { allowFeedbackRecording: true })
+      ? parsed.alternativeAcknowledgement.trim().slice(0, 600) : "",
     captured,
     observations,
     appreciations: appreciations.slice(0, 6),

@@ -9,6 +9,7 @@ const { sendIdleRatingPrompts, ownsPendingRatingReminder } = require("../lib/idl
 const { importAdminWorkbook } = require("../lib/admin-import");
 const { buildCsatImportWorkbook } = require("../lib/csat-workbook-template");
 const { recipientList, sendEmail, smtpConfigured } = require("../lib/email");
+const { recentAssistantOpenings, repeatsAcknowledgementOpening } = require("../lib/acknowledgement-style");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -1076,19 +1077,53 @@ function internalSummaryLanguage(message) {
   return /\b(?:the client|the customer|client (?:says|states|reports|emphasizes|emphasises|expects))\b|\bi have (?:recorded|noted)(?: your (?:additional )?(?:feedback|request))?\s*:/i.test(String(message || ""));
 }
 
-function clientFacingAcknowledgement(context, project, action) {
+function safeAcknowledgementCandidates(context, project, action) {
   const hasRecordedFacts = Boolean((context.captured || []).length || (context.observations || []).length || (context.appreciations || []).length || (context.concerns || []).length);
+  const safe = [];
   // The interpretation saw only this reply, while the writer also saw older
   // transcript context. Prefer its current-point wording when both are safe.
-  for (const candidate of [context.extractedAcknowledgement, context.acknowledgement]) {
+  for (const candidate of [context.extractedAcknowledgement, context.acknowledgement,
+    context.extractedAlternativeAcknowledgement, context.alternativeAcknowledgement]) {
     const message = String(candidate || "").trim();
     if (!message || message.length > 600 || /[?？]/.test(message) || internalSummaryLanguage(message) || containsClaim(message, { allowFeedbackRecording: hasRecordedFacts })) continue;
     if (/\b(?:out of 10|on a scale|(?:have|has|already)\s+(?:notified|alerted|emailed)|(?:directors|management|team)\s+(?:have|has)\s+been\s+(?:notified|alerted|informed))\b/i.test(message)) continue;
     if (/\b(?:i|we|our team|the team)\s+(?:(?:have|has|already)\s+)*(?:fixed|resolved|implemented|completed)\b/i.test(message)) continue;
     if (!latestConcernFacts(context).length && /\b(?:sorry|apolog\w*|disappoint\w*|regret)\b/i.test(message)) continue;
-    if (!responseIntroducesUnsupportedTopic(message, context.latestClientText, project, context, action)) return message;
+    if (!responseIntroducesUnsupportedTopic(message, context.latestClientText, project, context, action)) safe.push(message);
   }
-  return "";
+  return [...new Set(safe)];
+}
+
+function clientFacingAcknowledgement(context, project, action) {
+  const candidates = safeAcknowledgementCandidates(context, project, action);
+  const primary = candidates[0] || "";
+  const openings = context.recentAssistantOpenings || [];
+  if (!repeatsAcknowledgementOpening(primary, openings)) return primary;
+  const evidence = [context.latestClientText, ...(context.captured || []).map((item) => item.summary),
+    ...(context.observations || []).map((item) => item.detail), ...(context.appreciations || []).map((item) => item.detail),
+    ...(context.concerns || []).map((item) => item.summary)].filter(Boolean).join(" ");
+  const courtesyWords = new Set(["i", "you", "your", "us", "thank", "thanks", "feedback", "sharing", "shared", "hear", "concern", "concerns", "request", "noted", "recorded", "review", "team", "service", "project", "client", "management"]);
+  const pointWords = [...contentTokens(evidence)].filter((word) => !courtesyWords.has(word) && !/^\d+$/.test(word));
+  // Prefer a safe, specific alternate rendering, never a stock replacement or
+  // generic thanks that loses the point. If none is safe, retain the accurate
+  // wording rather than inventing a continuation or making another model call.
+  return candidates.find((candidate) => !repeatsAcknowledgementOpening(candidate, openings)
+    && pointWords.some((word) => contentTokens(candidate).has(word))) || primary;
+}
+
+function varyAcknowledgementOpening(message, context, project, action) {
+  if (!repeatsAcknowledgementOpening(message, context.recentAssistantOpenings || [])) return message;
+  const replacement = clientFacingAcknowledgement(context, project, action);
+  if (!replacement || repeatsAcknowledgementOpening(replacement, context.recentAssistantOpenings || [])) return message;
+  const opening = safeAcknowledgementCandidates(context, project, action)
+    .filter((candidate) => message === candidate || message.startsWith(`${candidate} `) || message.startsWith(`${candidate}\n`))
+    .sort((left, right) => right.length - left.length)[0];
+  if (!opening || opening === replacement) return message;
+  // Replace only an exact, question-free acknowledgement prefix. The already
+  // validated next question/closing text and all state markers stay untouched.
+  const praise = responseAcknowledgesAppreciation(opening, context)
+    && !responseAcknowledgesAppreciation(replacement, context) ? appreciationAcknowledgement(context, project) : "";
+  return [replacement, praise].filter(Boolean).join(" ") + message.slice(opening.length);
 }
 
 function fallbackForAction(action, conversationState, project, context = {}) {
@@ -2225,6 +2260,7 @@ function enrichConductedWithDeterministicFacts(
   conducted.latestClientText = String(text || "");
   // Wording only, never a source of facts or scores.
   conducted.extractedAcknowledgement = interpretation.acknowledgement || "";
+  conducted.extractedAlternativeAcknowledgement = interpretation.alternativeAcknowledgement || "";
   conducted.concerns = (interpretation.concerns || []).map((item) => groundModelFact("concern", item, text, project)).filter(Boolean);
   // The conductor writes the reply; it is not an evidence source. Discard all
   // facts it generated from transcript context and rebuild exclusively from
@@ -3782,6 +3818,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       question: lastQuestion ? lastQuestion.body : "",
       text,
       pendingRatingChoice: stateBefore.ratingFeedbackPause?.ratingType || null,
+      recentOpenings: recentAssistantOpenings(previousMessages),
       verifySurveyControls: true
     });
 
@@ -3882,6 +3919,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       preferredAction,
       messages: transcript
     });
+    conducted.recentAssistantOpenings = recentAssistantOpenings(previousMessages);
 
     if (conducted.text && interpretation?.deferRequested === true) {
       // Deferral is a fact about the client's latest message. The dedicated
@@ -4101,6 +4139,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
         }
         conducted.text = fallbackForAction(requiredAction, turn.conversationState, project, conducted);
         conducted.readyToClose = requiredAction.type === "close";
+      } else {
+        conducted.text = varyAcknowledgementOpening(conducted.text, conducted, project, requiredAction);
       }
       const recordedQuestion = recordRequiredQuestion(turn.conversationState, project, requiredAction);
       latestReplyFacts = conducted;
@@ -4194,6 +4234,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // is still outstanding, plainly.
       const fallbackConducted = {
         text: "",
+        recentAssistantOpenings: recentAssistantOpenings(previousMessages),
         captured: [],
         observations: [],
         appreciations: []
@@ -8194,6 +8235,7 @@ module.exports = {
     messageMatchesRequiredAction,
     internalSummaryLanguage,
     clientFacingAcknowledgement,
+    varyAcknowledgementOpening,
     fallbackForAction,
     closingGraceMessage,
     rememberAcknowledgedConcerns,
@@ -8609,13 +8651,18 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   let postCompletionHandoff = false;
   let postCompletionHandoffEvent = null;
 
-  const interpretDetail = async () => enrichQuickCheckinInterpretation(text, project, await interpretReply({
+  const interpretDetail = async () => {
+    const messages = typeof store.getMessagesForSession === "function"
+      ? conversationRelevantMessages(await store.getMessagesForSession(session.id)) : [];
+    return enrichQuickCheckinInterpretation(text, project, await interpretReply({
       project,
       question: `What needs improvement, what is going well, or what should management know about ${project.name}?`,
       text,
       longForm: true,
+      recentOpenings: recentAssistantOpenings(messages),
       verifySurveyControls: true
     }));
+  };
   const recordDetail = async (inputInterpretation) => {
     let interpretation = inputInterpretation;
     if (!interpretation.sentiment) {

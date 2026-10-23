@@ -23,6 +23,15 @@ The additional five-file pre-correction snapshot is in ../local-backups/before-r
 - No question progression, rating ownership, one-hour prompt eligibility or ten-minute deadline changes. No new schema, secrets, or workflow edits for this follow-up.
 - Backup: `../local-backups/before-acknowledgement-wording-23-oct-0bfaa5f`, plus the unchanged baseline commit `0bfaa5f`. Historical and API replays cover the repeated positive-outcome sentence, the fuller delivery/SPOC acknowledgement, mixed praise/concerns, varied outcome topics, and quick-check-in windows. These use controlled model responses, not live Gemini/WhatsApp sends.
 
+## Acknowledgement continuity — 23 October 2026
+
+- Removed the suggested stock opening from the extraction prompt. Both existing model calls now receive the same continuity guidance: treat successive feedback as a continuing conversation, avoid repeated introductory phrasing, and retain the client's uncertainty.
+- Style context contains only the first four words of the last three SRV replies. It is explicitly not client evidence. Quick check-ins fetch this small context from their existing session messages; no new schema or stored state field is required.
+- The existing calls may return an optional alternative acknowledgement of the same current points. No extra model request, retry or phrase-rotation list is introduced. Candidates pass the existing question, claim and unsupported-topic checks. When an opening repeats, a safe, specific alternate is preferred. If none is safe, retain accurate wording rather than inventing a replacement.
+- Accepted model replies can replace only an exact acknowledgement prefix; the remaining question and all progression markers stay untouched. Fallback replies and closing-window/quick-check-in acknowledgements use the same selection helper. Wording candidates are never merged into extracted facts or scores.
+- These safeguards reduce repetition; they do not guarantee every live model output will vary. The accuracy-first fallback can deliberately repeat when the model supplies no safe alternative. This patch does not change claim-safety policy, rating ownership, reminder eligibility or either response-window duration.
+- Backup: `../local-backups/before-acknowledgement-continuity-23-oct-9af5d26`. API replays cover the 23 October Ashish and earlier Alka/Deepak campaign messages across all three flows, including accepted/rejected writer actions and a simulated writer outage. Dedicated continuity checks cover unrelated topics, unsafe or generic alternatives, exact question preservation and score/deadline isolation. All model responses and outbound delivery in these tests are controlled fixtures, not live sends.
+
 ## One-time idle rating prompt
 
 - Applies to monthly (`pulse`) and project-end sessions only, after a newly processed meaningful overall review. No historical-session backfill and no trigger from only a greeting/start/acknowledgement.
