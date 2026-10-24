@@ -1,3 +1,5 @@
+const { brandEmail } = require('./email-theme');
+
 let transporter = null;
 let transporterKey = "";
 
@@ -48,7 +50,8 @@ async function sendEmail({ to, subject, text, html }) {
     });
     transporterKey = key;
   }
-  const info = await transporter.sendMail({ from: settings.from, to: recipients, subject, text, html });
+  const branded = brandEmail({ html, text });
+  const info = await transporter.sendMail({ from: settings.from, to: recipients, subject, ...branded });
   return { configured: true, sent: true, messageId: info.messageId || null, recipients };
 }
 

@@ -1,4 +1,5 @@
 const { normalizeClusterAccess } = require('./cluster-access');
+const { brandEmail, EMAIL_COLORS } = require('./email-theme');
 
 // These events remain local audit records. They must not dispatch per-message
 // emails or a second completion email in addition to the consolidated summary.
@@ -37,8 +38,13 @@ function emailReport(eventType, payload) {
   const text = [title, ...entries.map(([name, value]) => `${name}: ${value || 'Not set'}`),
     ...sections.map(([name, values]) => `\n${name}\n${values.join('\n')}`), '\nConversation Transcript',
     ...transcript.map(row => `${row.speaker} · ${row.time}\n${row.body}`)].join('\n');
-  const html = `<div style="font-family:Verdana,Arial,sans-serif;color:#172b43;font-size:14px;line-height:1.6;max-width:900px;margin:auto"><h1 style="font-size:22px;background:#e8f0ff;color:#153b71;padding:20px">${escape(title)}</h1><table style="width:100%;border-collapse:collapse">${entries.map(([name, value]) => `<tr><th style="text-align:left;padding:8px;border-bottom:1px solid #d8e1ef">${escape(name)}</th><td style="padding:8px;border-bottom:1px solid #d8e1ef">${escape(value || 'Not set')}</td></tr>`).join('')}</table>${sections.map(([name, values]) => `<h2 style="font-size:17px;background:#eef5f5;padding:10px;color:#164d4c">${escape(name)}</h2><ul>${values.map(value => `<li style="white-space:pre-wrap">${escape(value)}</li>`).join('')}</ul>`).join('')}<h2 style="font-size:17px;background:#eef5f5;padding:10px">Conversation Transcript</h2>${transcript.map(row => `<div style="margin:12px ${row.client ? '40px 12px 0' : '0 12px 40px'};padding:12px;border:1px solid #ccd8e8;border-radius:10px;background:${row.client ? '#f0f7ff' : '#f2faf4'}"><strong>${escape(row.speaker)}</strong><div style="font-size:12px;color:#43536b">${escape(row.time)}</div><div style="white-space:pre-wrap">${escape(row.body)}</div></div>`).join('')}</div>`;
-  return { subject: `${title} | ${payload.project?.name || 'Project'} | ${payload.poc?.name || session.pocName || 'Client POC'}`, html, text };
+  const c = EMAIL_COLORS;
+  const heading = name => `<h2 style="font-size:17px;line-height:1.5;background:${c.section};border-left:4px solid ${c.accent};padding:10px 12px;margin:24px 0 12px;color:${c.sectionInk}">${escape(name)}</h2>`;
+  const html = `<table style="width:100%;border-collapse:collapse;font-size:14px">${entries.map(([name, value]) => `<tr><th scope="row" style="text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid ${c.border};color:${c.heading}">${escape(name)}</th><td style="padding:10px 12px;border-bottom:1px solid ${c.border};color:${c.ink}">${escape(value || 'Not set')}</td></tr>`).join('')}</table>
+${sections.map(([name, values]) => `${heading(name)}<ul style="padding-left:24px;margin:12px 0">${values.map(value => `<li style="white-space:pre-wrap;margin:8px 0">${escape(value)}</li>`).join('')}</ul>`).join('')}
+${heading('Conversation Transcript')}
+${transcript.map(row => `<div style="margin:12px ${row.client ? '24px 12px 0' : '0 12px 24px'};padding:14px;border:1px solid ${c.border};border-left:3px solid ${row.client ? '#777078' : c.accent};border-radius:6px;background:${row.client ? c.clientBubble : c.teamBubble}"><strong style="color:${c.heading}">${escape(row.speaker)}</strong><div style="font-size:12px;color:${c.muted}">${escape(row.time)}</div><div style="white-space:pre-wrap;margin-top:6px">${escape(row.body)}</div></div>`).join('')}`;
+  return { subject: `${title} | ${payload.project?.name || 'Project'} | ${payload.poc?.name || session.pocName || 'Client POC'}`, ...brandEmail({ title, html, text }) };
 }
 
 async function prepareCsatEmail(store, eventType, payload) {

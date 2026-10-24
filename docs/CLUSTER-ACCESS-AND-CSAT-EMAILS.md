@@ -46,6 +46,17 @@ The workflows must use these recipients without appending old configured address
 
 ## Reports and UI
 
+Application-generated emails use the shared SRV-inspired red, charcoal, white
+and soft rose/grey theme in Verdana. Both HTML and plain text end with
+`Best Regards,` followed by `Ashish Kate`. This applies to feedback summaries,
+human handoffs and direct SMTP client/project setup and service-approval alerts.
+The v6 n8n workflows forward these app-generated bodies unchanged, so no new
+credential or v6 workflow re-import is needed for presentation-only updates.
+Separate legacy/optional workflows that compose their own mail bodies (such as
+6 or 7) are outside this app template; obtain their current deployed exports
+before replacing those independently managed templates. Historic emails and
+conversation transcripts are not rewritten.
+
 Dashboard → Consolidated Feedback and Chat Export supports cluster/client/project/type/date selection and HTML, Excel or print-to-PDF. Data is grouped by project, POC and session. Transcripts contain original message text, not interpretation/debug labels. Quick check-ins do not invent ratings. CSAT and NPS remain separate. Exports never include stored Zoho credentials.
 
 The sidebar distinguishes total open issues from the overdue subset; issue due dates are currently set at creation to 24 hours for high severity and 48 hours otherwise. Project service selectors exclude existing/draft duplicates. Explicit Add/Copy actions reveal newly inserted editor rows without changing scroll on typing or save.
