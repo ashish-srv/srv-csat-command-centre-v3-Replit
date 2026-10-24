@@ -1,0 +1,107 @@
+{
+  "name": "Birthday Workflow B v2 - Optional Secure Action Redirect",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "nodes": [
+    {
+      "id": "birthday-action-link",
+      "name": "Birthday Action Link",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        180,
+        260
+      ],
+      "parameters": {
+        "path": "birthday-action-v2",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        260
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "app",
+              "name": "CSAT_APP_URL",
+              "type": "string",
+              "value": "https://REPLACE_WITH_PUBLISHED_APP_URL"
+            },
+            {
+              "id": "secret",
+              "name": "N8N_WEBHOOK_SECRET",
+              "type": "string",
+              "value": "REUSE_EXISTING_REPLIT_N8N_WEBHOOK_SECRET"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "open-secure-birthday-page",
+      "name": "Open Secure Birthday Page",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        700,
+        260
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Open the Birthday Centre confirmation page.",
+        "options": {
+          "responseCode": 302,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Location",
+                "value": "={{ $('Config').first().json.CSAT_APP_URL + '/api/automation/birthdays/action?token=' + encodeURIComponent($('Birthday Action Link').first().json.query.token || '') }}"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Birthday Action Link": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Open Secure Birthday Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

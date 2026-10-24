@@ -1,0 +1,112 @@
+{
+  "name": "Birthday Workflow A v2 - Application Gift Reminders and Email Wishes",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "nodes": [
+    {
+      "id": "birthday-schedule",
+      "name": "Birthday Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        180,
+        260
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/15 * * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        260
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "app",
+              "name": "CSAT_APP_URL",
+              "type": "string",
+              "value": "https://REPLACE_WITH_PUBLISHED_APP_URL"
+            },
+            {
+              "id": "secret",
+              "name": "N8N_WEBHOOK_SECRET",
+              "type": "string",
+              "value": "REUSE_EXISTING_REPLIT_N8N_WEBHOOK_SECRET"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "run-birthday-tasks",
+      "name": "Run Birthday Tasks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.CSAT_APP_URL + '/api/automation/birthdays/run' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-csat-webhook-secret",
+              "value": "={{ $('Config').first().json.N8N_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {} }}",
+        "options": {
+          "timeout": 240000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Birthday Schedule": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Run Birthday Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const sm = require("../src/lib/whatsapp-state-machine");
 const flow = require("../src/server/api-handler").conversationFlow;
 const { normaliseReplyInterpretation } = require("../src/lib/gemini");
+const { idleRatingEligibility, IDLE_RATING_MS } = require("../src/lib/idle-rating-prompt");
 
 // Historical WhatsApp regressions: use controlled latest-reply extractions,
 // never live Gemini/Meta/n8n or a production database. Assertions concern saved
@@ -127,6 +128,106 @@ scenario("Arun: detailed review, third-party busy complaint, further concerns, t
   chat.turn("5");
   assert.equal(chat.state.overallRating, 5);
   assert.equal(chat.state.state, sm.STATES.WAITING_FOR_NPS);
+});
+
+scenario("guided monthly neutral answers have one invitation, not a separate interrogation", () => {
+  for (const text of ["avg", "satisfactory", "It has been neither good nor bad"]) {
+    for (const needsFollowUp of [false, true]) {
+      const chat = review("pulse");
+      chat.turn("ok", read({ intent: "affirmative", sentiment: "neutral" }));
+      const reply = chat.turn(text, read({ sentiment: "neutral", serviceScope: "none",
+        captured: [fact("account", text, "neutral", needsFollowUp)] }));
+      assert.equal(reply.action.type, "service_followup", text);
+      assert.equal(chat.state.mentionedServices.account.issueReasonAskCount || 0, 0);
+      const next = chat.turn("no");
+      assert.equal(next.action.type, "service");
+      assert.notEqual(next.action.serviceKey, "account");
+      assert.equal(chat.state.mentionedServices.account.serviceFollowUpAnswered, true);
+      assert.equal(chat.state.overallRating, null);
+    }
+  }
+});
+
+scenario("declining clarification advances once, with semantic replies and legacy stored states", () => {
+  for (const explicitPending of [true, false]) {
+    for (const [text, extraction] of [
+      ["no", null], ["nothing else", null], ["next", null],
+      ["I would rather leave that point there", read({ intent: "negative", completionScope: "topic", completionEvidence: "leave that point there" })],
+      ["There is no further context I can provide", read({ intent: "feedback", completionScope: "topic", completionEvidence: "no further context I can provide" })]
+    ]) {
+      const chat = review("pulse");
+      Object.assign(chat.state, { state: sm.STATES.WAITING_FOR_ISSUE_REASON, pendingServiceKey: "account",
+        ...(explicitPending ? { pendingQuestionType: "issue_reason" } : {}),
+        mentionedServices: { account: { serviceKey: "account", serviceName: "Account Management", sentiment: "negative",
+          status: "needs_reason", reasonText: "Below expectations", issueReasonAskCount: 1 } } });
+      const next = chat.turn(text, extraction);
+      assert.equal(next.action.type, "service", text);
+      assert.notEqual(next.action.serviceKey, "account");
+      assert.equal(chat.state.mentionedServices.account.serviceFollowUpAnswered, true);
+      assert.equal(chat.state.mentionedServices.account.reasonText, "Below expectations");
+      assert.equal(chat.state.overallRating, null);
+    }
+  }
+});
+
+scenario("declining the initial service question advances without a fabricated complaint or follow-up", () => {
+  for (const [text, interpretation] of [["no", null], ["skip this", null],
+    ["I would prefer to pass on this subject", read({ intent: "negative", completionScope: "topic", completionEvidence: "prefer to pass on this subject" })]]) {
+    const chat = review("pulse");
+    chat.turn("ok", read({ intent: "affirmative", sentiment: "neutral" }));
+    const next = chat.turn(text, interpretation);
+    assert.equal(next.action.type, "service");
+    assert.notEqual(next.action.serviceKey, "account");
+    assert.equal(chat.state.mentionedServices.account.status, "declined");
+    assert.equal(chat.state.mentionedServices.account.sentiment, "neutral");
+    assert.equal(chat.state.mentionedServices.account.reasonText, null);
+    assert.equal(chat.state.overallRating, null);
+  }
+});
+
+scenario("first guided praise always includes the next step regardless of extraction representation", () => {
+  for (const type of ["pulse", "project_end"]) {
+    for (const representation of ["service", "appreciation", "both"]) {
+      for (const service of project.services) {
+        const chat = review(type);
+        Object.assign(chat.state, { state: sm.STATES.WAITING_FOR_SERVICE_FEEDBACK, pendingQuestionType: "service",
+          pendingServiceKey: service.serviceKey, serviceScopeStatus: "service_by_service", mentionedServices: {} });
+        const text = `${service.name} has been excellent`;
+        const reply = chat.turn(text, read({ sentiment: "positive", serviceScope: "none",
+          captured: representation === "appreciation" ? [] : [fact(service.serviceKey, text, "positive")],
+          appreciations: representation === "service" ? [] : [{ serviceKey: service.serviceKey, subject: service.name, detail: text }]
+        }));
+        assert.equal(reply.action.type, "service_followup", `${type}/${representation}/${service.name}`);
+        assert.equal(reply.action.serviceKey, service.serviceKey);
+        assert.match(reply.message, /\?/);
+        assert.equal(chat.state.feedbackContinuationPending, false);
+        assert.equal(Boolean(chat.state.idleRatingPromptEligible), false);
+        const next = chat.turn("no");
+        assert.equal(next.action.type, "service");
+        assert.notEqual(next.action.serviceKey, service.serviceKey);
+        assert.equal(chat.state.mentionedServices[service.serviceKey].serviceFollowUpAskCount, 1);
+      }
+    }
+  }
+});
+
+scenario("a service-only listening pause cannot trigger a rating reminder and skip the remaining services", () => {
+  const chat = review("pulse");
+  const text = "There is a duplicate tax line in the latest invoice";
+  chat.turn(text, read({ serviceScope: "none", observations: [{ topic: "Billing", detail: text, sentiment: "negative", needsFollowUp: false }] }));
+  assert.equal(chat.state.feedbackContinuationPending, true);
+  const at = Date.parse("2026-10-25T08:00:00Z");
+  const transcript = [
+    { id: "client", side: "client", body: text, createdAt: new Date(at).toISOString() },
+    { id: "srv", side: "srv", body: chat.turns.at(-1).message, createdAt: new Date(at).toISOString(), metadata: { pendingQuestionType: chat.state.pendingQuestionType } }
+  ];
+  const saved = JSON.stringify(chat.state);
+  for (const hours of [1, 2, 6]) {
+    const result = idleRatingEligibility({ sessionType: "pulse", status: "partial", completionStatus: "partial", conversationState: chat.state }, transcript, at + hours * IDLE_RATING_MS);
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, "no_overall_feedback_wait");
+    assert.equal(JSON.stringify(chat.state), saved);
+  }
 });
 
 scenario("30-day: additional service detail is retained and the optional question is not repeated", () => {

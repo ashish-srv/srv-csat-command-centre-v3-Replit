@@ -6,6 +6,7 @@ import ProjectWorkspace from "./components/ProjectWorkspace.jsx";
 import ProjectPerformance from "./components/ProjectPerformance.jsx";
 import Directory from "./components/Directory.jsx";
 import Manage from "./components/Manage.jsx";
+import BirthdayCentre from "./components/BirthdayCentre.jsx";
 import { BrandLogo } from "./components/Ui.jsx";
 import { formatDateTime } from "./format";
 import { canOpenManage, hasPermission } from "./permissions";
@@ -16,6 +17,7 @@ function getRoute() {
   if (path === "/project-performance" || path === "/performance") return "performance";
   if (path === "/directory") return "directory";
   if (path === "/manage") return "manage";
+  if (path === "/birthdays") return "birthdays";
   return "dashboard";
 }
 
@@ -185,7 +187,8 @@ export default function App({ onLogout, currentUser = null }) {
     project: hasPermission(currentUser, "project_workspace"),
     directory: hasPermission(currentUser, "directory"),
     performance: hasPermission(currentUser, "project_performance"),
-    manage: canOpenManage(currentUser)
+    manage: canOpenManage(currentUser),
+    birthdays: currentUser?.role !== "project_user" && hasPermission(currentUser, "birthday_centre")
   }), [currentUser]);
   const firstAllowedRoute = Object.keys(routeAccess).find((key) => routeAccess[key]) || "performance";
   const activeRoute = routeAccess[route] ? route : firstAllowedRoute;
@@ -295,6 +298,7 @@ export default function App({ onLogout, currentUser = null }) {
           >
             Manage
           </button> : null}
+          {routeAccess.birthdays ? <button type="button" className={`tab ${activeRoute === "birthdays" ? "active" : ""}`} onClick={() => navigate("/birthdays")}>Birthday Centre</button> : null}
           <span className="tabbar-spacer" aria-hidden="true" />
           <button type="button" className="tab logout-tab" onClick={onLogout}>
             <LogOut size={16} aria-hidden="true" />
@@ -315,6 +319,8 @@ export default function App({ onLogout, currentUser = null }) {
             <p>{error.message}</p>
             <button type="button" className="button primary" onClick={loadDashboard}><span>Try again</span></button>
           </div>
+        ) : activeRoute === "birthdays" ? (
+          <WorkspaceErrorBoundary key="birthdays"><BirthdayCentre currentUser={currentUser} /></WorkspaceErrorBoundary>
         ) : activeRoute === "directory" ? (
           <Directory onOpenProject={openProject} />
         ) : activeRoute === "manage" ? (

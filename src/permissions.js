@@ -12,7 +12,11 @@ export const APP_PERMISSION_LABELS = {
   manage_project_users: "Project User management",
   add_projects: "Add projects from Project Performance",
   edit_project_performance: "Edit Project Performance",
-  manage_project_services: "Add/remove catalogue services under a project"
+  manage_project_services: "Add/remove catalogue services under a project",
+  birthday_centre: "View Birthday Centre",
+  birthday_manage: "Manage birthday contacts, gifts and change approvals",
+  birthday_reminders: "Send birthday gift reminders",
+  birthday_cleanup: "Delete birthday history (Manage password required)"
 };
 
 export const ADMIN_PERMISSION_KEYS = Object.keys(APP_PERMISSION_LABELS);
@@ -28,7 +32,7 @@ export function defaultPermissions(role) {
     return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, true]));
   }
   if (role === "admin") {
-    return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, true]));
+    return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_")]));
   }
   return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [
     key,

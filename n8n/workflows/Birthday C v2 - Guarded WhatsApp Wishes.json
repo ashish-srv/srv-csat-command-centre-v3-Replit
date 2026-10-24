@@ -1,0 +1,242 @@
+{
+  "name": "Birthday Workflow C v2 - Guarded WhatsApp Birthday Sender",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "nodes": [
+    {
+      "id": "birthday-schedule",
+      "name": "Birthday Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        180,
+        260
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/5 * * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        260
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "app",
+              "name": "CSAT_APP_URL",
+              "type": "string",
+              "value": "https://REPLACE_WITH_PUBLISHED_APP_URL"
+            },
+            {
+              "id": "secret",
+              "name": "N8N_WEBHOOK_SECRET",
+              "type": "string",
+              "value": "REUSE_EXISTING_REPLIT_N8N_WEBHOOK_SECRET"
+            },
+            {
+              "id": "wa",
+              "name": "WHATSAPP_SEND_URL",
+              "type": "string",
+              "value": "COPY_THE_SEND_URL_FROM_YOUR_EXISTING_CSAT_WORKFLOW"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "claim-eligible-birthday-wishes",
+      "name": "Claim Eligible Birthday Wishes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.CSAT_APP_URL + '/api/automation/birthdays/claim-whatsapp' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-csat-webhook-secret",
+              "value": "={{ $('Config').first().json.N8N_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {} }}",
+        "options": {
+          "timeout": 240000
+        }
+      }
+    },
+    {
+      "id": "split-birthday-jobs",
+      "name": "Split Birthday Jobs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        900,
+        260
+      ],
+      "parameters": {
+        "fieldToSplitOut": "jobs",
+        "options": {}
+      }
+    },
+    {
+      "id": "send-birthday-whatsapp",
+      "name": "Send Birthday WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_SEND_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: 'whatsapp', to: $json.to, type: 'template', template: { name: $json.template, language: { code: $json.language }, components: [{ type: 'body', parameters: [{ type: 'text', text: $json.name }] }] } } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "capture-send-result",
+      "name": "Capture Send Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        260
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job = $('Split Birthday Jobs').item.json;\nconst providerMessageId = $json.messages?.[0]?.id;\nreturn { json: { jobId: job.jobId, status: providerMessageId ? 'accepted' : 'unknown', providerMessageId: providerMessageId || '', reason: providerMessageId ? 'Accepted by WhatsApp; delivery not yet confirmed.' : String($json.error?.message || $json.message || 'No provider confirmation. Check the sender before retrying.').slice(0,1000) } }; "
+      }
+    },
+    {
+      "id": "record-birthday-send-result",
+      "name": "Record Birthday Send Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.CSAT_APP_URL + '/api/automation/birthdays/jobs/' + $json.jobId + '/result' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-csat-webhook-secret",
+              "value": "={{ $('Config').first().json.N8N_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { status: $json.status, providerMessageId: $json.providerMessageId, reason: $json.reason } }}",
+        "options": {
+          "timeout": 240000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Birthday Schedule": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Claim Eligible Birthday Wishes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Eligible Birthday Wishes": {
+      "main": [
+        [
+          {
+            "node": "Split Birthday Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Birthday Jobs": {
+      "main": [
+        [
+          {
+            "node": "Send Birthday WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Birthday WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Capture Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Send Result": {
+      "main": [
+        [
+          {
+            "node": "Record Birthday Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

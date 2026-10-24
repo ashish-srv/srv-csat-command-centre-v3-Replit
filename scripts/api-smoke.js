@@ -1666,6 +1666,86 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("monthly guided replies keep moving through all services with imperfect or unavailable response generation", async () => {
+    const priorKey = process.env.GEMINI_API_KEY;
+    const priorFetch = global.fetch;
+    const priorSession = store._session;
+    const priorMessages = [...calls.messages];
+    const priorServices = project.services;
+    const { idleRatingEligibility, IDLE_RATING_MS } = require("../src/lib/idle-rating-prompt");
+    process.env.GEMINI_API_KEY = "test-key";
+    const names = ["Account Management", "Creatives", "Landing Page", "SEO"];
+    project.services = names.map((name, index) => ({ id: `svc_guided_${index}`, projectId: project.id, serviceKey: `guided_${index}`, name }));
+    let clientText = "", currentIndex = 0, responseMode = "", providerSequence = 0;
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options.body).input;
+      let result;
+      if (input.includes("Task: interpret ONE client reply")) {
+        const name = names[currentIndex];
+        result = { intent: "feedback", serviceScope: "none", sentiment: currentIndex === 0 ? "neutral" : "positive",
+          explainsProblem: false, serviceHint: name,
+          serviceFeedback: [{ serviceHint: name, summary: clientText, sentiment: currentIndex === 0 ? "neutral" : "positive", needsFollowUp: currentIndex === 0 }],
+          appreciations: currentIndex === 0 ? [] : [{ subject: name, detail: clientText, serviceHint: name }], observations: [], concerns: [] };
+      } else if (input.includes("Task: review latest-message scope")) {
+        result = {};
+      } else {
+        if (responseMode === "timeout") throw new Error("fixture: response generation timeout");
+        const actionText = input.split("Required next action based on the facts already captured:\n")[1]?.split("\n")[0];
+        const action = JSON.parse(actionText || "{}");
+        // Structured markers falsely claim a question was asked. Only actual
+        // client-facing text can prove the next step was sent.
+        result = { message: currentIndex === 0 || currentIndex >= names.length ? "Thank you for sharing that." : `Glad to hear that ${names[currentIndex]} is going well.`,
+          askedServiceFollowUpKey: action.type === "service_followup" ? action.serviceKey : null,
+          askedServiceKey: action.type === "service" ? action.serviceKey : null,
+          askedForOverallRating: action.type === "overall_rating", askedForRatingTransition: action.type === "rating_feedback" };
+      }
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+    };
+    try {
+      for (responseMode of ["acknowledgement_only", "timeout"]) {
+        calls.messages.length = 0;
+        store._session = { id: "sess_1", cycleId: "cyc_1", projectId: "prj_1", clientPocId: "poc_1", status: "partial",
+          sessionType: "pulse", completionStatus: "partial", conversationState: { state: "waiting_for_service_feedback",
+            pendingQuestionType: "service", pendingServiceKey: "guided_0", mentionedServices: {} } };
+        for (currentIndex = 0; currentIndex < names.length; currentIndex += 1) {
+          clientText = currentIndex === 0 ? "avg" : "good";
+          const response = await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` });
+          const payload = JSON.parse(response.body);
+          assert.strictEqual(response.statusCode, 201, JSON.stringify(payload));
+          const state = store._session.conversationState;
+          assert.match(payload.whatsappReplyText, /\?/, `${responseMode}/${names[currentIndex]}: ${payload.whatsappReplyText}`);
+          assert.ok(["service_followup", ...(currentIndex === 3 ? ["rating_feedback"] : [])].includes(state.pendingQuestionType), JSON.stringify(state));
+          assert.strictEqual(state.feedbackContinuationPending, false);
+          if (currentIndex < 3) {
+            assert.strictEqual(idleRatingEligibility(store._session, calls.messages, Date.now() + IDLE_RATING_MS).eligible, false);
+          }
+          clientText = "no";
+          const nextResponse = await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` });
+          const next = JSON.parse(nextResponse.body);
+          assert.strictEqual(nextResponse.statusCode, 201);
+          assert.match(next.whatsappReplyText, /\?/);
+          assert.strictEqual(store._session.conversationState.pendingQuestionType, currentIndex < 3 ? "service" : "overall_rating", next.whatsappReplyText);
+          if (currentIndex < 3) assert.strictEqual(store._session.conversationState.pendingServiceKey, `guided_${currentIndex + 1}`);
+          assert.strictEqual(store._session.conversationState.mentionedServices[`guided_${currentIndex}`].serviceFollowUpAskCount <= 1, true);
+        }
+        clientText = "6";
+        let final = JSON.parse((await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` })).body);
+        assert.strictEqual(store._session.conversationState.overallRating, 6);
+        assert.strictEqual(store._session.conversationState.npsScore, null);
+        if (store._session.conversationState.pendingQuestionType === "final_sweep") {
+          assert.match(final.whatsappReplyText, /\?/);
+          clientText = "no";
+          final = JSON.parse((await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` })).body);
+        }
+        assert.strictEqual(store._session.conversationState.state, "closing_grace", final.whatsappReplyText);
+      }
+    } finally {
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      global.fetch = priorFetch; store._session = priorSession; project.services = priorServices;
+      calls.messages.length = 0; calls.messages.push(...priorMessages);
+    }
+  });
+
   await scenario("a deferred client gets an acknowledgement without another service question", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorMessages = [...calls.messages];

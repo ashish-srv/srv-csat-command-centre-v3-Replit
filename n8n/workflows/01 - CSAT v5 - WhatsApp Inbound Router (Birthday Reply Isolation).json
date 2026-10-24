@@ -1,0 +1,370 @@
+{
+  "name": "1. CSAT v3 - WhatsApp Inbound Message Router (Birthday Reply Isolation)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "38340f01-4985-4dd8-b325-f38723261f3f",
+      "name": "WhatsApp Provider Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        2304,
+        0
+      ],
+      "webhookId": "5f7e7f04-435e-4cc5-a969-727c2497c932"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "39b0e170-805b-4c04-b3b9-d8a1e7999626",
+              "name": "CSAT_APP_URL",
+              "value": "https://csat-command-centre.replit.app",
+              "type": "string"
+            },
+            {
+              "id": "cc80b874-def1-4f14-b048-99e539de5c2a",
+              "name": "WHATSAPP_GRAPH_URL",
+              "value": "https://graph.facebook.com/v23.0/1143136358892896/messages",
+              "type": "string"
+            },
+            {
+              "id": "1eac7b4f-4737-4cf8-b28e-311b22499405",
+              "name": "CSAT_HANDOFF_EMAIL",
+              "value": "ashish.kate@srvmedia.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "6992ae12-4cf0-4999-b559-9997151c6fe3",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2592,
+        0
+      ],
+      "notes": "Edit the three values here. They are not secrets. The webhook secret and Meta token live in credentials."
+    },
+    {
+      "parameters": {
+        "path": "csat-whatsapp-inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "854c4578-58a6-409e-a7da-a4adc9dcc4c4",
+      "name": "WhatsApp Verify Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        2304,
+        352
+      ],
+      "webhookId": "7e80e5e2-4aaf-49a7-9dce-af9a5d1eb4f9"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query[\"hub.challenge\"] }}",
+        "options": {}
+      },
+      "id": "3f0f414a-f922-4f0c-808d-918b48f7efb6",
+      "name": "Respond With Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2592,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "badfb620-92b0-4462-8e0d-8f5f6ede68cc",
+              "leftValue": "={{ $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body || $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.interactive?.button_reply?.title || $json.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.button?.text || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "56bacada-e3e2-45ff-b9a8-b7b1f5c44730",
+      "name": "Is Client Text Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2864,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, ignored: true, reason: \"status_update_or_non_text\" } }}",
+        "options": {}
+      },
+      "id": "aa1e8e0e-ee14-4248-943c-9ee33ff8238d",
+      "name": "Respond Ignored",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3152,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.CSAT_APP_URL }}/api/whatsapp/inbound",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { from: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].from, fromName: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.contacts?.[0]?.profile?.name, providerMessageId: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].id, text: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].text?.body || $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].interactive?.button_reply?.title || $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].button?.text || \"\", buttonPayload: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].interactive?.button_reply?.id || $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].button?.payload || null, replyToMessageId: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].context?.id || null, providerTimestamp: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].timestamp || null } }}",
+        "options": {}
+      },
+      "id": "30d1c964-4daa-4724-bb60-5956b4db22a2",
+      "name": "Call CSAT Engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        3152,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0ca2118b-0522-465c-8401-3c1faeb0d73c",
+              "leftValue": "={{ $json.sendToWhatsapp }}",
+              "rightValue": "={{ true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ee2f256d-0ee8-45cf-98e4-d7d7c087c7e1",
+      "name": "Should Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3424,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, sent: false, reason: \"duplicate_or_no_reply\" } }}",
+        "options": {}
+      },
+      "id": "880f4f0b-e8d7-4fb5-b566-1102edf9bc2a",
+      "name": "Respond Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3712,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { messaging_product: \"whatsapp\", to: $('WhatsApp Provider Webhook').item.json.body.entry[0].changes[0].value.messages[0].from, type: \"text\", text: { body: $json.whatsappReplyText } } }}",
+        "options": {}
+      },
+      "id": "c8dea222-5db7-4528-9e64-5107db0ad90d",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        3712,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, sent: true } }}",
+        "options": {}
+      },
+      "id": "ec33b2ed-874e-4e80-849a-5273c1592dc1",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3984,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "WhatsApp Provider Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Is Client Text Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Verify Webhook": {
+      "main": [
+        [
+          {
+            "node": "Respond With Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Client Text Message?": {
+      "main": [
+        [
+          {
+            "node": "Call CSAT Engine",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Ignored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call CSAT Engine": {
+      "main": [
+        [
+          {
+            "node": "Should Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Reply?": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp Reply": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}

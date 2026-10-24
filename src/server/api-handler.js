@@ -12,6 +12,8 @@ const { recipientList, sendEmail, smtpConfigured } = require("../lib/email");
 const { recentAssistantOpenings } = require("../lib/acknowledgement-style");
 const { normalizeClusterAccess, clusterVisible, authorizeClusterRequest, scopedBrowserStore } = require("../lib/cluster-access");
 const { prepareCsatEmail } = require("../lib/csat-email-policy");
+const { handleBirthdayRequest } = require("../lib/birthday-service");
+const { captureBirthdayInbound } = require("../lib/birthday-inbound");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -724,12 +726,25 @@ function settleActionableFinalSweepFacts(conversationState, stateBefore, conduct
   const hasNewFacts = (conducted.captured || []).length > 0 || (conducted.observations || []).length > 0
     || (conducted.appreciations || []).length > 0;
   const declinedTopic = ["topic", "rating"].includes(completionScope)
-    || (completionScope === "none" && interpretation?.intent === "negative" && !hasNewFacts);
+    || (completionScope === "none" && !hasNewFacts
+      && (interpretation?.intent === "negative" || isMoveOnReply(text) || detectors.isNegativeSkip(text)));
   if (declinedTopic && pendingType === "overall_rating") conversationState.overallRatingDeclined = true;
   if (declinedTopic && pendingType === "nps") conversationState.npsDeclined = true;
-  if (declinedTopic && ["issue_reason", "service_followup"].includes(pendingType)) {
-    const service = conversationState.mentionedServices?.[stateBefore.pendingServiceKey];
+  if (declinedTopic && ["service", "issue_reason", "service_followup"].includes(pendingType)) {
+    let service = conversationState.mentionedServices?.[stateBefore.pendingServiceKey];
     if (service) {
+      // A semantic refusal can pass through the older rule parser as prose.
+      // It is survey control, not another incident or a change of sentiment.
+      const previous = stateBefore.mentionedServices?.[stateBefore.pendingServiceKey];
+      if (!hasNewFacts && previous) {
+        service = JSON.parse(JSON.stringify(previous));
+        conversationState.mentionedServices[stateBefore.pendingServiceKey] = service;
+      } else if (!hasNewFacts && pendingType === "service") {
+        // A decline of the first invitation supplies no service opinion.
+        // Drop any provisional "could not specify" complaint from the rules.
+        Object.assign(service, { reasonText: null, reasonTags: [], points: [],
+          sentiment: "neutral", sentiments: [], detailAnswered: false, noteNeedsAck: false });
+      }
       service.status = service.reasonText ? "captured" : "declined";
       service.serviceFollowUpAnswered = true;
       service.detailDeclined = true;
@@ -740,6 +755,25 @@ function settleActionableFinalSweepFacts(conversationState, stateBefore, conduct
     || Boolean(conversationState.generalFeedbackText && conversationState.serviceScopeStatus !== "service_by_service")
     || [STATES.WAITING_FOR_OVERALL_RATING, STATES.WAITING_FOR_NPS, STATES.CLOSING_GRACE].includes(stateBefore.state)
     || (conversationState.sessionType === "project_end" && conversationState.serviceScopeStatus !== "service_by_service");
+  // Praise may also create an appreciation record, which normally completes
+  // that service immediately. When it answers the service we just asked about,
+  // keep the same one optional follow-up as for a neutral/negative answer.
+  // Never reopen a covered topic, an overall review or the correction window.
+  if (!directToRating && !stateBefore.closingGraceExpiresAt && pendingType === "service"
+    && !conversationState.feedbackQuestionsComplete && conversationState.serviceScopeStatus !== "skipped") {
+    const key = stateBefore.pendingServiceKey;
+    const previous = stateBefore.mentionedServices?.[key];
+    const answer = (conducted.captured || []).find((item) => item.serviceKey === key);
+    const service = conversationState.mentionedServices?.[key];
+    if (service && answer && !answer.declined && service.status === "captured"
+      && !declinedTopic && !["feedback", "conversation"].includes(completionScope)
+      && !previous?.serviceFollowUpAnswered && !previous?.serviceFollowUpAsked
+      && !Number(previous?.serviceFollowUpAskCount || 0)
+      && !["captured", "rated", "declined"].includes(previous?.status)) {
+      service.status = "needs_service_followup";
+      service.serviceFollowUpAnswered = false;
+    }
+  }
   const suppliedKeys = (conducted.captured || []).map((item) => item.serviceKey);
   const changedTopic = (conducted.observations || []).length > 0
     || (suppliedKeys.length > 0 && !suppliedKeys.includes(stateBefore.pendingServiceKey));
@@ -883,7 +917,7 @@ function updateRatingFeedbackPause(state, before, facts = {}, text = "", interpr
     && buildChecklist(state, project).servicesNotYetDiscussedWithKeys?.length > 0;
   const firstOverallReview = !before.overallRatingAsked && !before.askedForOverallRating && feedbackContinuation
     && !scopedMonthlyPoint
-    && (state.projectEndReviewCaptured
+    && ((state.projectEndReviewCaptured && state.serviceScopeStatus !== "service_by_service")
       || ((state.generalFeedbackText || state.generalConcernText) && state.serviceScopeStatus !== "service_by_service")
       || (project && buildChecklist(state, project).overallRatingStillNeeded));
   // Explicitly arm only a real, newly processed review; never backfill old
@@ -1433,6 +1467,8 @@ function setStateForRequiredAction(conversationState, action, recordedQuestion) 
 
 function pendingQuestionTypeFor(conversationState) {
   if (conversationState.pendingQuestionType) return conversationState.pendingQuestionType;
+  if (conversationState.state === STATES.WAITING_FOR_ISSUE_REASON) return "issue_reason";
+  if (conversationState.state === STATES.WAITING_FOR_SERVICE_FEEDBACK) return "service";
   if (conversationState.state === STATES.WAITING_FOR_SERVICE_SCOPE) return "service_scope";
   if (conversationState.state === STATES.WAITING_FOR_OVERALL_RATING) return "overall_rating";
   if (conversationState.state === STATES.WAITING_FOR_NPS) return "nps";
@@ -1477,6 +1513,7 @@ function applyTurnServiceScope(conversationState, project, text, interpretation,
   // monthly service questionnaire. An explicit request to go service by
   // service remains respected.
   if (projectEnd && suppliedProjectFeedback
+    && stateBefore.serviceScopeStatus !== "service_by_service"
     && decision !== SERVICE_SCOPE_DECISIONS.CONTINUE_SERVICE_BY_SERVICE) {
     decision = SERVICE_SCOPE_DECISIONS.OVERALL_FEEDBACK;
   }
@@ -1747,9 +1784,16 @@ function applyPendingIssueInterpretation(conversationState, stateBefore, interpr
   return true;
 }
 
+function actionRequiresQuestion(action) {
+  // The rating choice has its own wording check and can be a declarative
+  // invitation. Listening and closure intentionally need no new question.
+  return !["close", "feedback_continuation", "rating_feedback"].includes(action.type);
+}
+
 function messageMatchesRequiredAction(action, message) {
   const text = String(message || "").trim();
   if (!text) return false;
+  if (actionRequiresQuestion(action) && !/[?？]/.test(text)) return false;
   if (action.type === "feedback_continuation") return !/[?？]/.test(text) && !/\b(?:out of 10|on a scale)\b/i.test(text);
   const lowerText = text.toLowerCase();
   const serviceNamed = !action.serviceKey || [action.name, action.serviceKey]
@@ -2079,7 +2123,8 @@ function factFreeControlReply(text, interpretation = null) {
     return overlap.shared >= 2 || overlap.ratio >= 0.5 || phraseAppearsInReply(source, evidence);
   });
   const substantiveMissingFact = /\b(?:no|without|missing|lack(?:ing)?|not receiving|not getting)\b[^.!?]{0,35}\b(?:reports?|updates?|responses?|results?|support|ownership|communication|information|data|meetings?)\b/i.test(source);
-  const semanticMoveOn = interpretation?.intent === "negative"
+  const semanticMoveOn = (interpretation?.intent === "negative"
+      || detectors.completionScopeFor(source, interpretation) !== "none")
     && !hasGroundedStructuredFact
     && !substantiveMissingFact
     && !isExplicitActionRequest(source);
@@ -2726,11 +2771,12 @@ const GOOGLE_OAUTH_STATE_TTL_SECONDS = 10 * 60;
 const APP_PERMISSION_KEYS = [
   "dashboard", "project_workspace", "directory", "project_performance", "manage_records",
   "manage_pocs", "manage_internal_pocs", "manage_catalogues", "messaging_controls", "bulk_sends",
-  "manage_project_users", "add_projects", "edit_project_performance", "manage_project_services"
+  "manage_project_users", "add_projects", "edit_project_performance", "manage_project_services",
+  "birthday_centre", "birthday_manage", "birthday_reminders", "birthday_cleanup"
 ];
 
 const ROLE_PERMISSION_DEFAULTS = {
-  admin: Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, true])),
+  admin: Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_")])),
   project_user: {
     dashboard: false,
     project_workspace: false,
@@ -4179,9 +4225,10 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // omitted or mis-set. Validate the client-facing words as well. The hard
       // checklist still blocks genuinely wrong transitions (for example,
       // asking about PPC instead of offering the requested continue/skip choice).
-      const actionRejected = ["rating_feedback", "overall_rating", "nps"].includes(requiredAction.type)
+      const missingQuestion = actionRequiresQuestion(requiredAction) && !/[?？]/.test(conducted.text);
+      const actionRejected = missingQuestion || (["rating_feedback", "overall_rating", "nps"].includes(requiredAction.type)
         ? !messageMatchesRequiredAction(requiredAction, conducted.text)
-        : !actionMatches(requiredAction, actualAction) && !messageMatchesRequiredAction(requiredAction, conducted.text);
+        : !actionMatches(requiredAction, actualAction) && !messageMatchesRequiredAction(requiredAction, conducted.text));
       const requiredService = requiredAction.serviceKey
         ? turn.conversationState.mentionedServices?.[requiredAction.serviceKey]
         : null;
@@ -5277,7 +5324,7 @@ async function handleApiRequest(request) {
     if (appAccess.role === "project_user" && !projectUserRouteAllowed(appAccess, method, pathname)) {
       return error(403, "Your role can only access Project Performance");
     }
-    if (appAccess.role === "admin") {
+    if (appAccess.role === "admin" && !/^\/api\/birthdays(?:\/|$)/.test(pathname)) {
       const requiredPermission = adminRoutePermission(method, pathname);
       const dashboardForWorkspace = pathname === "/api/dashboard" && hasAppPermission(appAccess, "project_workspace");
       const directoryForManage = (pathname === "/api/admin/directory" || /^\/api\/admin\/clients\/[^/]+$/.test(pathname)) && [
@@ -5293,6 +5340,12 @@ async function handleApiRequest(request) {
         return error(403, "Cluster access denied", scopeError.message);
       }
     }
+  }
+
+  // Birthday routes own their permissions/cluster checks. They never touch the
+  // CSAT state machine, inbound routing, feedback records or scheduler.
+  if (/^\/api\/(?:automation\/)?birthdays(?:\/|$)/.test(pathname)) {
+    return handleBirthdayRequest({ store, access: appAccess, request, pathname, method, body, searchParams, baseUrl });
   }
 
   // ---- Retired v1 routes: fail with direction, not a bare 404.
@@ -6388,6 +6441,15 @@ async function handleApiRequest(request) {
     const routing = typeof store.getWhatsappRoutingContext === "function"
       ? await store.getWhatsappRoutingContext(body.from)
       : null;
+
+    // Transport-only birthday isolation. The survey state machine and its
+    // interpretation/progression remain unchanged for every non-birthday turn.
+    try {
+      const birthdayReply = await captureBirthdayInbound({ store, body, routing });
+      if (birthdayReply) return json(200, birthdayReply);
+    } catch (routingError) {
+      return error(routingError.status || 503, "Birthday reply could not be safely recorded", "No automated response was sent. Retry this provider delivery after checking database availability.");
+    }
 
     let poc = null;
     let session = null;

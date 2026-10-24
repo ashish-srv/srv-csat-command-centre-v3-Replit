@@ -59,6 +59,16 @@ Pre-feature snapshot: `../local-backups/before-one-time-idle-rating-22-oct`. `np
 
 ## Deployment
 
+### 25 October guided service progression
+
+- A neutral service answer is valid feedback, even if the reader requests more detail. Only an unexplained negative point enters complaint clarification. The optional service follow-up is offered once.
+- A decline of the initial service invitation, clarification or optional follow-up completes that topic. Semantic completion with current-message evidence works independently of sentiment. A fact-free refusal cannot be appended to the concern text or manufacture a Management Feedback observation; genuine feedback accompanying completion remains recorded.
+- Praise answering the currently requested service receives the same optional follow-up even when also captured as appreciation. It cannot silently enter the listening-only continuation state. Covered services and closing-window praise remain complete.
+- A response-writing marker cannot claim a required question was asked when the outgoing text contains only an acknowledgement. The existing safe next-question fallback repairs that case. Detailed acknowledgements and intentional listening pauses remain supported.
+- An explicit choice to discuss services one by one remains in effect on subsequent project-end answers. The usual whole-project review, CSAT/NPS ownership, closing window and disabled broad fact merge are preserved.
+- The one-hour prompt is unchanged: it requires an armed overall-review wait, not a service-only listening pause. A short service answer, clarification, postponed reply or unasked remaining service does not by itself qualify. Timers require the existing scheduler; this fix does not create a new timer or skip services on inactivity.
+- Verification includes guided four-service API conversations with false question markers and unavailable response generation, varied neutral/praise/decline inputs, legacy state fields, explicit service-by-service project-end scope, historical conversations and timer exclusions. All model/delivery tests use fixtures. No migration, secret or workflow update is required for **this conversation correction**; the separate Birthday Centre changes retain their own deployment requirements. Git baseline for the conversation files: `19bf0e0`.
+
 ### 23 October request-routing and acknowledgement follow-up
 
 - A grounded client request is not discarded by a contradictory off-topic label. A bounded, latest-message-only scope/wording review can recover an explicit request using exact client evidence; it cannot import writer facts, set scores, or choose survey progression. The broader conversation-fact merge remains disabled.

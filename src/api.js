@@ -19,7 +19,8 @@ async function parseResponse(response) {
     if (response.status === 403 && [
       "Application access has not been assigned",
       "Your role can only access Project Performance",
-      "This feature is turned off for your Admin account"
+      "This feature is turned off for your Admin account",
+      "Birthday Centre access denied."
     ].includes(payload.error)) {
       window.dispatchEvent(new CustomEvent("csat:access-changed"));
     }

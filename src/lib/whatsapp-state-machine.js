@@ -1395,8 +1395,9 @@ function applyCaptured(conversationState, project, captured = [], overallRating 
     // A complaint with no reason behind it is useless to the owner who would
     // have to act on it. The model says when that is the case; the checklist
     // then keeps the service open so the conversation comes back to it.
-    service.detailAnswered = !item.needsFollowUp;
-    if (item.needsFollowUp && Number(service.issueReasonAskCount || 0) < 1) {
+    const needsReason = item.needsFollowUp === true && item.sentiment === "negative";
+    service.detailAnswered = !needsReason;
+    if (needsReason && Number(service.issueReasonAskCount || 0) < 1) {
       service.status = "needs_reason";
     } else if (
       (conversationState.sessionType === "project_end"
