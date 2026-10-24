@@ -6,6 +6,7 @@ import { downloadPocControlWorkbook } from "../lib/poc-control-workbook.mjs";
 import { parseCsatWorkbook } from "../lib/workbook-import";
 import { SearchableSelect, FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, ErrorBlock, LoadingBlock, Panel } from "./Ui.jsx";
+import UserClusterAccess from "./UserClusterAccess.jsx";
 import {
   APP_PERMISSION_LABELS, defaultPermissions, hasPermission, permissionsForRole
 } from "../permissions";
@@ -60,6 +61,8 @@ function createAppUserDraft() {
     role: "project_user",
     internalPocId: "",
     createInternalPoc: false,
+    clusterAccess: [],
+    externalLoginAllowed: false,
     active: true,
     permissions: defaultPermissions("project_user")
   };
@@ -986,7 +989,7 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
                     });
                   }}>
                     <option value="">Select from Standard Service Catalogue</option>
-                    {serviceCatalog.filter((item) => item.active || item.id === row.serviceCatalogId).map((item) => (
+                    {serviceCatalog.filter((item) => (item.active || item.id === row.serviceCatalogId) && !rows.some((other, otherIndex) => otherIndex !== index && (other.serviceCatalogId === item.id || other.serviceKey === item.serviceKey))).map((item) => (
                       <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
                     ))}
                   </SearchableSelect>
@@ -994,7 +997,7 @@ function ServiceBatchForm({ value, projects, services, serviceCatalog, people, o
                 <Field label="Generated service key" hint="automatic and not editable">
                   <input value={generatedKey} readOnly placeholder="generated_automatically" />
                 </Field>
-                <Field label="Owner (internal POC)" hint="alerts go to this person's reporting manager">
+                <Field label="Owner (internal POC)" hint="CSAT summary emails follow the Admin cluster email switches">
                   <SearchableSelect value={row.internalPocId || ""} onChange={(event) => updateRow(index, { internalPocId: event.target.value })}>
                     <option value="">Not set</option>
                     {people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
@@ -1345,7 +1348,7 @@ function ProjectSetupForm({ value, clients, levels, people, serviceCatalog, copy
                   updateService(index, { serviceCatalogId: event.target.value, name: selected?.name || "" });
                 }}>
                   <option value="">Select from Standard Service Catalogue</option>
-                  {serviceCatalog.filter((item) => item.active || item.id === service.serviceCatalogId).map((item) => (
+                  {serviceCatalog.filter((item) => (item.active || item.id === service.serviceCatalogId) && !services.some((other, otherIndex) => otherIndex !== index && other.serviceCatalogId === item.id)).map((item) => (
                     <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " — archived"}</option>
                   ))}
                 </SearchableSelect>
@@ -1382,7 +1385,7 @@ export default function Manage({ onReload, currentUser = null }) {
   const canManageRecords = hasPermission(currentUser, "manage_records");
   const canManagePocs = hasPermission(currentUser, "manage_pocs");
   const canManageInternalPocs = hasPermission(currentUser, "manage_internal_pocs");
-  const canManageCatalogues = hasPermission(currentUser, "manage_catalogues");
+  const canManageCatalogues = currentUser?.role === "super_admin";
   const canManageAutomation = hasPermission(currentUser, "messaging_controls");
   const canBulkSend = hasPermission(currentUser, "bulk_sends");
   const canManageUsers = hasPermission(currentUser, "manage_project_users");
@@ -1694,7 +1697,9 @@ export default function Manage({ onReload, currentUser = null }) {
           internalPocId: row.role === "project_user" ? row.internalPocId : null,
           createInternalPoc: row.role === "project_user" && row.createInternalPoc,
           active: row.active,
-          permissions: row.permissions
+          permissions: row.permissions,
+          clusterAccess: row.clusterAccess || [],
+          ...(isSuperAdmin ? { externalLoginAllowed: row.externalLoginAllowed === true } : {})
         }, "POST");
         added += 1;
         addedRoles.add(result.user.role);
@@ -1709,6 +1714,8 @@ export default function Manage({ onReload, currentUser = null }) {
             name: user.name,
             role: user.role,
             permissions: user.permissions,
+            clusterAccess: user.clusterAccess || [],
+            ...(isSuperAdmin ? { externalLoginAllowed: user.externalLoginAllowed === true } : {}),
             internalPocId: user.role === "project_user" ? user.internalPocId || null : null,
             active: user.active
           }, "PATCH");
@@ -1765,6 +1772,8 @@ export default function Manage({ onReload, currentUser = null }) {
           name: user.name,
           role: user.role,
           permissions: user.permissions,
+          clusterAccess: user.clusterAccess || [],
+          ...(isSuperAdmin ? { externalLoginAllowed: user.externalLoginAllowed === true } : {}),
           internalPocId: user.role === "project_user" ? user.internalPocId || null : null,
           active: user.active
         }, "PATCH");
@@ -3079,7 +3088,7 @@ export default function Manage({ onReload, currentUser = null }) {
       </FilterBar>
       <p className="manage-scope-note">
         The Cluster and Client selections scope every project-linked section below except Project Data Cleanup, which has independent filters.
-        Application Users, Excel onboarding, organization standards, standard services and performance standards remain agency-wide master data.
+        Admins are additionally restricted to their assigned clusters. Shared standards and workbook onboarding are maintained by Super Admins.
       </p>
 
       <nav className="manage-section-nav" aria-label="Manage sections">
@@ -3087,7 +3096,7 @@ export default function Manage({ onReload, currentUser = null }) {
         {canManageAutomation ? <button type="button" onClick={() => document.getElementById("manage-automatic-feedback")?.scrollIntoView({ behavior: "smooth" })}>Feedback Delivery</button> : null}
         {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-workbook")?.scrollIntoView({ behavior: "smooth" })}>Excel Onboarding</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-workbook")?.scrollIntoView({ behavior: "smooth" })}>Excel Onboarding</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-clients")?.scrollIntoView({ behavior: "smooth" })}>Clients &amp; Clusters</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-project-status")?.scrollIntoView({ behavior: "smooth" })}>Project Status</button> : null}
@@ -3095,7 +3104,7 @@ export default function Manage({ onReload, currentUser = null }) {
         {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
         {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Services &amp; Owners</button> : null}
         {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Service Catalogue</button> : null}
-        {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
         {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
         {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
         {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
@@ -3120,10 +3129,11 @@ export default function Manage({ onReload, currentUser = null }) {
                     <SearchableSelect value={row.role} onChange={(event) => { const role = event.target.value; updateNewAppUser(row.draftId, { role, internalPocId: role === "project_user" ? row.internalPocId : "", createInternalPoc: role === "project_user" ? row.createInternalPoc : false, permissions: defaultPermissions(role) }); }} aria-label="Application role">
                       <option value="project_user">Project User</option>{isSuperAdmin ? <option value="admin">Admin</option> : null}{isSuperAdmin ? <option value="super_admin">Super Admin</option> : null}
                     </SearchableSelect>
-                    {row.role === "project_user" ? <SingleSelect compact label="Internal POC" value={row.createInternalPoc ? "__new__" : row.internalPocId} placeholder="Select Internal POC" options={[{ value: "__new__", label: "Create new Internal POC" }, ...internalPocOptionsForDraft(row)]} onChange={(selected) => { const createInternalPoc = selected === "__new__"; const internalPocId = createInternalPoc ? "" : selected; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { createInternalPoc, internalPocId, name: person?.name || "", email: person?.email || "" }); }} /> : <span className="bulk-row-placeholder">Access across projects</span>}
+                    {row.role === "project_user" ? <SingleSelect compact label="Internal POC" value={row.createInternalPoc ? "__new__" : row.internalPocId} placeholder="Select Internal POC" options={[...(isSuperAdmin ? [{ value: "__new__", label: "Create new Internal POC" }] : []), ...internalPocOptionsForDraft(row)]} onChange={(selected) => { const createInternalPoc = selected === "__new__"; const internalPocId = createInternalPoc ? "" : selected; const person = people.find((item) => item.id === internalPocId); updateNewAppUser(row.draftId, { createInternalPoc, internalPocId, name: person?.name || "", email: person?.email || "" }); }} /> : <span className="bulk-row-placeholder">{row.role === "super_admin" ? "All-cluster access" : "Assigned-cluster access"}</span>}
                     {row.role === "project_user" && !row.createInternalPoc ? <span className={`app-user-linked-identity ${row.internalPocId && !row.email ? "missing-email" : ""}`}><strong>{row.name || "Select a person"}</strong><small>{row.email || (row.internalPocId ? "Email missing in Internal POCs" : "Name and email will load automatically")}</small></span> : <span className="app-user-manual-identity"><input value={row.name} onChange={(event) => updateNewAppUser(row.draftId, { name: event.target.value })} placeholder={row.createInternalPoc ? "New Internal POC name" : "Name"} aria-label="User name" /><input type="email" value={row.email} onChange={(event) => updateNewAppUser(row.draftId, { email: event.target.value })} placeholder="name@srvmedia.com" aria-label="Google Workspace email" /></span>}
                     <SearchableSelect value={row.active ? "active" : "inactive"} onChange={(event) => updateNewAppUser(row.draftId, { active: event.target.value === "active" })} aria-label="User status"><option value="active">Active</option><option value="inactive">Inactive</option></SearchableSelect>
                     <button type="button" className="icon-button danger" disabled={newAppUsers.length === 1} onClick={() => setNewAppUsers((current) => current.filter((item) => item.draftId !== row.draftId))} aria-label="Remove pending user"><Trash2 size={15} /></button>
+                    <UserClusterAccess user={row} clusters={clusters} isSuperAdmin={isSuperAdmin} onChange={patch => updateNewAppUser(row.draftId, patch)} />
                   </div>
                 ))}
               </div>
@@ -3170,6 +3180,7 @@ export default function Manage({ onReload, currentUser = null }) {
                                 : <span>Assign this Internal POC as Project Director, AVP, AD, TL or AM under Manage → Project Teams.</span>}
                             </div>
                           ) : null}
+                          <UserClusterAccess user={user} clusters={clusters} isSuperAdmin={isSuperAdmin} onChange={patch => setAppUsers(current => current.map(item => item.id === user.id ? { ...item, ...patch } : item))} />
                           <div className="button-row">
                             <Button variant="danger" icon={Trash2} onClick={() => deleteAppUser(user)} disabled={saving || user.role === "super_admin" || currentUser?.appUserId === user.id}>Delete user</Button>
                             {user.role === "super_admin" ? <small className="form-note">Super Admin accounts are protected from deletion.</small> : null}
@@ -3518,7 +3529,7 @@ export default function Manage({ onReload, currentUser = null }) {
         </p>
       </Panel>
 
-      <Panel
+      {isSuperAdmin ? <Panel
         id="manage-workbook"
         title="Bulk Excel Onboarding and Updates"
         badge="Multiple clients in one upload"
@@ -3561,7 +3572,7 @@ export default function Manage({ onReload, currentUser = null }) {
             </ul>
           </div>
         ) : null}
-      </Panel>
+      </Panel> : null}
 
       <Panel
         id="manage-clients"
@@ -3570,7 +3581,7 @@ export default function Manage({ onReload, currentUser = null }) {
         className="span-12"
         action={
           <div className="button-row">
-            <Button icon={Plus} onClick={() => { closeForms(); setClusterForm({ ...EMPTY_CLUSTER }); }}>Add cluster</Button>
+            {isSuperAdmin ? <Button icon={Plus} onClick={() => { closeForms(); setClusterForm({ ...EMPTY_CLUSTER }); }}>Add Cluster</Button> : null}
             <Button icon={Plus} onClick={() => { closeForms(); setClientForm({ ...EMPTY_CLIENT, clusterId: clusterFilterId }); }}>Add client</Button>
             <Button
               icon={Pencil}
@@ -3669,6 +3680,7 @@ export default function Manage({ onReload, currentUser = null }) {
                 <button
                   type="button"
                   className="cluster-chip"
+                  disabled={!isSuperAdmin}
                   onClick={() => { closeForms(); setClusterForm({ id: cluster.id, name: cluster.name }); }}
                 >
                   {cluster.name}
@@ -3679,7 +3691,7 @@ export default function Manage({ onReload, currentUser = null }) {
                   className="cluster-chip-delete"
                   aria-label={`Delete ${cluster.name}`}
                   title={`Delete ${cluster.name}`}
-                  disabled={Boolean(cleaning)}
+                  disabled={!isSuperAdmin || Boolean(cleaning)}
                   onClick={() => openClusterDeleteConfirmation(cluster)}
                 >
                   <Trash2 size={12} aria-hidden="true" />
@@ -4113,7 +4125,7 @@ export default function Manage({ onReload, currentUser = null }) {
         </div>
       </Panel>
 
-      {canManageInternalPocs ? <Panel
+      {isSuperAdmin ? <Panel
         id="manage-organization-standards"
         title="Organization Standards"
         badge={`${clusters.length} clusters · ${departments.length} departments · ${subDepartments.length} sub-departments`}

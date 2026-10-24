@@ -1,0 +1,235 @@
+{
+  "name": "3. CSAT v6 - Super Admin Human Handoff",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-human-handoff",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "622ef9d3-a436-45b8-84f4-a97e02e098d0",
+      "name": "Human Handoff Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "7fae65e6-eab9-4ae7-81d7-b4ac917c55f4",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "id": "51b1d9c2-38d5-407b-8720-f592a9366851",
+      "name": "Validate Application Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function buildPolicyEmail(body, kind, now = Date.now()) {\n  const blocked = reason => ({ allowed: false, reason, to: '', recipients: [] });\n  if (kind === 'manager') return blocked('included_in_completed_poc_summary');\n  if (!body || typeof body !== 'object' || Array.isArray(body)) return blocked('invalid_payload');\n  if (kind === 'handoff' && !['handoff', 'post_completion_message'].includes(body.eventType)) {\n    return blocked('not_an_explicit_human_handoff');\n  }\n  if (kind === 'summary' && (body.eventType !== 'cycle_completed'\n    || !['feedback_poc', 'quick_checkin_poc'].includes(body.summaryType))) return blocked('per_poc_summary_only');\n  if (body.emailPolicyVersion !== 1 || body.recipientPolicy !== 'cluster_admins_v1') return blocked('application_policy_required');\n  const addresses = values => {\n    if (!Array.isArray(values) || !values.length) return null;\n    const valid = values.every(value => typeof value === 'string'\n      && /^[^\\s@,;<>]+@[^\\s@,;<>]+\\.[^\\s@,;<>]+$/.test(value.trim()));\n    return valid ? [...new Set(values.map(value => value.trim().toLowerCase()))] : null;\n  };\n  const recipients = addresses(body.recipients);\n  const mandatory = addresses(body.mandatoryRecipients);\n  const emailTo = addresses(body.email?.to);\n  const same = (a, b) => a.length === b.length && a.every(value => b.includes(value));\n  if (!recipients || !mandatory || !emailTo) return blocked('valid_recipients_and_super_admin_required');\n  if (!mandatory.every(value => recipients.includes(value))) return blocked('mandatory_super_admin_missing');\n  if (!same(recipients, emailTo)) return blocked('recipient_lists_disagree');\n  if (kind === 'handoff' && !same(recipients, mandatory)) return blocked('handoff_super_admins_only');\n  const email = body.email;\n  if (typeof email.subject !== 'string' || !email.subject.trim() || /[\\r\\n]/.test(email.subject)\n    || typeof email.html !== 'string' || !email.html.trim()\n    || typeof email.text !== 'string' || !email.text.trim()) return blocked('application_email_template_required');\n  if (kind === 'summary') {\n    if (!body.project?.id || !body.poc?.id || !Array.isArray(body.sessions) || body.sessions.length !== 1\n      || !body.sessions[0]?.id) return blocked('single_poc_session_required');\n    const session = body.sessions[0];\n    if ((session.projectId && session.projectId !== body.project.id)\n      || (session.clientPocId && session.clientPocId !== body.poc.id)) return blocked('session_scope_mismatch');\n    const state = session.conversationState || {};\n    for (const value of [state.closingGraceExpiresAt, state.quickCheckinWindowExpiresAt].filter(Boolean)) {\n      const deadline = Date.parse(value);\n      if (!Number.isFinite(deadline)) return blocked('invalid_response_window');\n      if (deadline > now) return blocked('response_window_still_open');\n    }\n    if (!Array.isArray(body.messages)) return blocked('transcript_array_required');\n    if (body.messages.some(message => !message || (message.sessionId && message.sessionId !== session.id))) {\n      return blocked('transcript_scope_mismatch');\n    }\n  }\n  // Never re-derive recipients from service owners, managers, or a Config node.\n  // Timing, cluster authorization and durable send-once claims belong to the app.\n  return { allowed: true, to: recipients.join(','), recipients, subject: email.subject,\n    html: email.html, text: email.text, summaryType: body.summaryType || null };\n}\nreturn [{ json: buildPolicyEmail($input.first().json.body, 'handoff') }];"
+      },
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "id": "cedb4af3-1f95-4881-bb2f-d56aa1c74aa1",
+      "name": "Allowed Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e5e7f566-a63e-4034-a54c-27b5997cc1b0",
+              "leftValue": "={{ $json.allowed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "position": [
+        520,
+        0
+      ]
+    },
+    {
+      "id": "091a2700-b14a-49db-afcc-5db3fbc81841",
+      "name": "Send Super Admin Handoff",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "parameters": {
+        "fromEmail": "directoroffice@srvmedia.com",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "both",
+        "text": "={{ $json.text }}",
+        "html": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "position": [
+        800,
+        -100
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "NDpf2LfKVWN5zViN",
+          "name": "SMTP (Ashish)"
+        }
+      },
+      "retryOnFail": false,
+      "onError": "stopWorkflow",
+      "notes": "No automatic SMTP retry: an ambiguous timeout may already have delivered. Check the provider before retrying. Do not add CC, BCC, service owners or fixed fallback recipients."
+    },
+    {
+      "id": "5b1892d5-f004-42f2-9a3f-58570227fb3e",
+      "name": "Verify SMTP Acceptance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function smtpAcceptance(result, expected) {\n  const normalize = list => Array.isArray(list) ? list.map(item => String(typeof item === 'string' ? item : item?.address || '').trim().toLowerCase()) : [];\n  const accepted = normalize(result?.accepted);\n  const rejected = normalize(result?.rejected);\n  const recipients = normalize(expected?.recipients);\n  const sent = !result?.error && recipients.length > 0 && rejected.length === 0\n    && recipients.every(email => accepted.includes(email));\n  return { ok: sent, sent, reason: sent ? 'smtp_accepted' : 'smtp_acceptance_not_confirmed_for_all_recipients',\n    inboxDeliveryVerified: false, acceptedCount: accepted.length, rejectedCount: rejected.length,\n    messageId: result?.messageId || null };\n}\nreturn [{ json: smtpAcceptance($input.first().json, $('Validate Application Email').first().json) }];"
+      },
+      "position": [
+        1060,
+        -100
+      ]
+    },
+    {
+      "id": "9cef85a0-550a-4101-8384-9c4f55c112a2",
+      "name": "Respond SMTP Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "position": [
+        1320,
+        -100
+      ]
+    },
+    {
+      "id": "4ea847d5-fd01-4a62-aab8-ed724b589388",
+      "name": "Respond Not Sent",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, sent: false, reason: $json.reason } }}",
+        "options": {}
+      },
+      "position": [
+        800,
+        140
+      ]
+    },
+    {
+      "id": "7dd82ce4-bbaa-41fa-8587-250e1da2f7c9",
+      "name": "Setup and Policy",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "parameters": {
+        "width": 960,
+        "height": 240,
+        "content": "## Cluster email policy — application update required\nSelect Header Auth: x-csat-webhook-secret = Replit production N8N_WEBHOOK_SECRET. Confirm the preserved SMTP credential.\nOnly explicit handoff / post-completion handoff events; Super Admins only.\nUse the application template and exact recipient lists. No old Config address, manager/owner additions, automatic SMTP retries or stale execution replays.\nSuccess means all recipients were accepted by SMTP, NOT verified inbox delivery. Import inactive; replace the old workflow on the same webhook path when the application is ready."
+      },
+      "position": [
+        0,
+        -330
+      ]
+    }
+  ],
+  "connections": {
+    "Human Handoff Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Application Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Application Email": {
+      "main": [
+        [
+          {
+            "node": "Allowed Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Allowed Email?": {
+      "main": [
+        [
+          {
+            "node": "Send Super Admin Handoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Not Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Super Admin Handoff": {
+      "main": [
+        [
+          {
+            "node": "Verify SMTP Acceptance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify SMTP Acceptance": {
+      "main": [
+        [
+          {
+            "node": "Respond SMTP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

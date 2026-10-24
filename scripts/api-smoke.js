@@ -2,6 +2,7 @@ const assert = require("assert");
 const path = require("path");
 const Module = require("module");
 const { SupabaseStore, sessionIsTerminal } = require("../src/lib/supabase-store");
+process.env.GOOGLE_ALLOWED_DOMAINS = 'srvmedia.com';
 
 // ---- Stub store implementing the v2 SupabaseStore surface -------------
 const project = {
@@ -6189,6 +6190,74 @@ async function scenario(name, fn) {
     }
   });
 
+  for (const [sessionType, ratingType] of [["pulse", "overall_rating"], ["project_end", "overall_rating"], ["project_end", "nps"]]) {
+    for (const [text, intent, decision, evidence, additional] of [
+      ["its enough I think", "feedback", "feedback", "its enough I think"],
+      ["this feedback is enough I think", "unclear", "feedback", "this feedback is enough I think"],
+      ["I believe that covers everything I wanted to share", "feedback", "feedback", "covers everything I wanted to share"],
+      ["Bas meri taraf se itna hi feedback hai", "feedback", "feedback", "Bas meri taraf se itna hi feedback hai"],
+      ["The reports arrived late. I have nothing further to add", "feedback", "feedback", "I have nothing further to add", true],
+      ["I would rather not answer any more questions", "feedback", "conversation", "not answer any more questions"]
+    ]) await scenario(`${sessionType} ${ratingType}: independently recognise missed completion '${text}'`, async () => {
+      const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+      const priorSession = store._session, priorMessages = [...calls.messages];
+      process.env.GEMINI_API_KEY = "test-key";
+      calls.messages.length = 0;
+      let verificationCalls = 0;
+      global.fetch = async (_url, options) => {
+        const input = JSON.parse(options?.body || "{}").input || "";
+        let payload;
+        if (input.includes("Task: verify ONLY the client's survey-control instruction")) {
+          verificationCalls++;
+          payload = { decision, evidence, overallRating: 10,
+            captured: [{ serviceKey: "ppc", summary: "Invented campaign concern" }] };
+        } else if (input.includes("Task: interpret ONE client reply")) payload = {
+          intent, completionScope: "none", ratingChoice: "none", rating: null,
+          acknowledgement: additional ? "We hear your concern about the late reports." : "Thank you for confirming.",
+          serviceFeedback: additional ? [{ serviceHint: "PPC / Media", summary: "The reports arrived late", sentiment: "negative", needsFollowUp: false }] : []
+        };
+        else if (input.includes("Task: review latest-message scope")) payload = {};
+        else payload = { message: "Thank you for confirming.", acknowledgement: "Thank you for confirming." };
+        return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(payload) }) };
+      };
+      store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+        status: "partial", completionStatus: "partial", sessionType, conversationState: {
+          state: ratingType === "nps" ? "waiting_for_nps" : "waiting_for_overall_rating", sessionType,
+          pendingQuestionType: "rating_feedback", ratingFeedbackPause: { ratingType, choiceAsked: true, overallReview: true },
+          lastQuestionAsked: "We have noted your request for an office visit.",
+          generalFeedbackText: "The partnership has been good", serviceScopeStatus: "awaiting_choice",
+          projectEndReviewCaptured: sessionType === "project_end", overallRatingAsked: ratingType === "nps",
+          overallRating: ratingType === "nps" ? 8 : null, npsScore: null,
+          mentionedServices: Object.fromEntries(project.services.map((service) => [service.serviceKey, { ...service,
+            status: "captured", sentiment: "neutral", serviceFollowUpAnswered: true }]))
+        } };
+      try {
+        const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text,
+          providerMessageId: `wamid.missed-completion-${sessionType}-${ratingType}-${text}` });
+        const result = JSON.parse(response.body);
+        assert.equal(response.statusCode, 201, response.body);
+        assert.equal(verificationCalls, 1);
+        assert.equal(result.nextMessage.metadata.interpretation.controlVerification, "verified");
+        assert.equal(result.session.conversationState.ratingFeedbackPause, null);
+        assert.equal(result.session.conversationState.overallRating, ratingType === "nps" ? 8 : null);
+        assert.equal(result.session.conversationState.npsScore, null);
+        if (decision === "conversation") {
+          assert.equal(result.state, "closing_grace");
+          assert.doesNotMatch(result.whatsappReplyText, /\?/);
+        } else {
+          assert.equal(result.session.conversationState.pendingQuestionType, ratingType, result.whatsappReplyText);
+          assert.match(result.whatsappReplyText, ratingType === "nps" ? /recommend.*out of 10/i : /overall.*out of 10/i);
+        }
+        if (additional) assert.match(result.session.conversationState.mentionedServices.ppc.reasonText, /reports arrived late/i);
+        assert.doesNotMatch(JSON.stringify(result.session.conversationState), /Invented campaign concern/);
+      } finally {
+        global.fetch = priorFetch;
+        if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+        calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+      }
+    });
+  }
+
   await scenario("An uncertain rating-choice verification reoffers the choice instead of an acknowledgement-only dead end", async () => {
     const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
     const priorSession = store._session, priorMessages = [...calls.messages];
@@ -6485,7 +6554,7 @@ async function scenario(name, fn) {
       assert.equal(entries.filter((item) => item.kind !== "appreciation").length, 1, JSON.stringify(entries));
       assert.equal(entries[0].sentiment, "neutral");
       assert.equal(entries[0].kind, "request");
-      assert.ok(result.nextMessage.metadata.clientRequestHandoff);
+      assert.equal(result.nextMessage.metadata.clientRequestHandoff, null);
       assert.ok(calls.automation.some((event) => event.eventType === "client_question" && event.payload.clientText === visit));
 
       const clarification = "No just a field visit like an industry visit early next year";
@@ -6711,6 +6780,70 @@ async function scenario(name, fn) {
     });
   }
 
+  for (const sessionType of ["pulse", "project_end", "quick_checkin"]) {
+    for (const delivery of ["missing", "timeout", "rejected", "accepted"]) {
+      await scenario(`${sessionType} ${delivery} ordinary request is saved without immediate handoff`, async () => {
+        const priorKey = process.env.GEMINI_API_KEY, priorHook = process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+        const priorFetch = global.fetch, priorSession = store._session, priorMessages = [...calls.messages];
+        const priorAutomations = [...calls.automation], priorClaims = new Map(calls.automationClaims);
+        // Each isolated session restarts fixture message IDs. Keep its audit
+        // ledger isolated too, or an earlier fixture is treated as this send.
+        calls.automation.length = 0;
+        calls.automationClaims.clear();
+        process.env.GEMINI_API_KEY = "test-key";
+        if (delivery === "missing") delete process.env.N8N_HUMAN_HANDOFF_WEBHOOK;
+        else process.env.N8N_HUMAN_HANDOFF_WEBHOOK = "https://fixture.invalid/notification-test";
+        calls.messages.length = 0;
+        const text = "Could your team arrange a workshop for our faculty?";
+        const acknowledgement = "We have noted your request for a faculty workshop.";
+        global.fetch = async (url, options) => {
+          if (String(url).includes("fixture.invalid/notification-test")) {
+            assert.fail('Ordinary requests must not call the handoff webhook');
+          }
+          const input = JSON.parse(options?.body || "{}").input || "";
+          const payload = input.includes("Task: verify ONLY the client's survey-control instruction") ? { decision: "none", evidence: null }
+            : input.includes("Task: review latest-message scope") ? {}
+            : input.includes("Task: interpret ONE client reply") ? { intent: "feedback", sentiment: "neutral", acknowledgement,
+              observations: [{ topic: "Faculty Workshop", detail: text, kind: "request", sentiment: "neutral", needsFollowUp: false }] }
+            : { message: acknowledgement, acknowledgement };
+          return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(payload) }) };
+        };
+        store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+          status: "partial", completionStatus: "partial", sessionType, conversationState: sessionType === "quick_checkin"
+            ? { state: "quick_checkin_detail", sessionType, quickCheckinOutcome: "needs_improvement" }
+            : { state: "waiting_for_overall_rating", sessionType, pendingQuestionType: "rating_feedback",
+              ratingFeedbackPause: { ratingType: "overall_rating", choiceAsked: true, overallReview: true },
+              lastQuestionAsked: "We hear your concerns about delivery.", overallRating: null,
+              generalFeedbackText: "Delivery needs improvement", projectEndReviewCaptured: sessionType === "project_end", mentionedServices: {} }
+        };
+        try {
+          const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp, text,
+            providerMessageId: `wamid.internal-delivery-${sessionType}-${delivery}` });
+          const result = JSON.parse(response.body);
+          assert.equal(response.statusCode, 201, response.body);
+          assert.ok(result.whatsappReplyText.includes(acknowledgement), result.whatsappReplyText);
+          assert.doesNotMatch(result.whatsappReplyText, /automatic notification|contact your SRV representative|could not confirm|handoff|email|notified/i);
+          const status = result.nextMessage.metadata.clientRequestHandoff;
+          assert.equal(status, null);
+          assert.ok(calls.automation.some((event) => event.eventType === 'client_question' && event.status === 'recorded' && event.payload.clientText === text), 'saved-only routing is audited');
+          if (sessionType !== "quick_checkin") {
+            assert.equal(result.session.conversationState.pendingQuestionType, "rating_feedback");
+            assert.equal(result.session.conversationState.overallRating, null);
+            assert.doesNotMatch(result.whatsappReplyText, /shall we move|out of 10|anything else/);
+          } else assert.equal(result.state, "quick_checkin_window");
+        } finally {
+          global.fetch = priorFetch;
+          if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+          if (priorHook === undefined) delete process.env.N8N_HUMAN_HANDOFF_WEBHOOK; else process.env.N8N_HUMAN_HANDOFF_WEBHOOK = priorHook;
+          calls.messages.length = 0; calls.messages.push(...priorMessages); store._session = priorSession;
+          calls.automation.length = 0; calls.automation.push(...priorAutomations);
+          calls.automationClaims.clear();
+          for (const [key, value] of priorClaims) calls.automationClaims.set(key, value);
+        }
+      });
+    }
+  }
+
   await scenario("Quick-check-in visit and collaboration requests stay neutral before and during the window", async () => {
     const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
     const priorSession = store._session, priorMessages = [...calls.messages];
@@ -6746,7 +6879,7 @@ async function scenario(name, fn) {
           assert.equal(stored.observations[0].kind, "request");
           assert.equal(stored.observations[0].sentiment, "neutral");
           assert.equal((stored.concerns || []).length, 0);
-          assert.ok(result.nextMessage.metadata.clientRequestHandoff);
+          assert.equal(result.nextMessage.metadata.clientRequestHandoff, null);
         }
       }
     } finally {

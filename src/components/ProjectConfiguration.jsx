@@ -450,7 +450,7 @@ export default function ProjectConfiguration({ workspace, currentUser, onRefresh
                             <Field label={`Service ${index + 1}`}>
                               <SearchableSelect value={service.serviceCatalogId} onChange={(event) => { const selected = activeCatalog.find((item) => item.id === event.target.value); updateService(index, { serviceCatalogId: selected?.id || "", serviceKey: selected?.serviceKey || "", name: selected?.name || "" }); }}>
                                 <option value="">Select standard service</option>
-                                {(directory.serviceCatalog || []).filter((item) => item.active !== false || item.id === service.serviceCatalogId).map((item) => <option key={item.id} value={item.id}>{item.name}{item.active === false ? " — archived" : ""}</option>)}
+                                {(directory.serviceCatalog || []).filter((item) => (item.active !== false || item.id === service.serviceCatalogId) && !serviceRows.some((other, otherIndex) => otherIndex !== index && (other.serviceCatalogId === item.id || other.serviceKey === item.serviceKey))).map((item) => <option key={item.id} value={item.id}>{item.name}{item.active === false ? " — archived" : ""}</option>)}
                               </SearchableSelect>
                             </Field>
                             <Field label="Internal owner"><SearchableSelect value={service.internalPocId} onChange={(event) => updateService(index, { internalPocId: event.target.value })}><option value="">Not set</option>{people.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active === false ? " — inactive" : ""}</option>)}</SearchableSelect></Field>

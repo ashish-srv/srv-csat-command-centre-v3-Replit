@@ -16,7 +16,7 @@ const JSON_COLUMNS = {
   automation_events: new Set(["payload"]),
   feedback_sessions: new Set(["conversation_state", "predicted_signals"]),
   messages: new Set(["metadata"]),
-  app_users: new Set(["permissions"]),
+  app_users: new Set(["permissions", "cluster_access"]),
   project_performance_audit: new Set(["changes", "snapshot"])
 };
 

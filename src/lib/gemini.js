@@ -1033,7 +1033,12 @@ async function verifySurveyControl(read, { question, text, pendingRatingChoice }
     || ["skip_remaining_services", "continue_service_by_service"].includes(read.serviceScope)
     || ["proceed", "continue_feedback"].includes(read.ratingChoice)
     || read.intent === "negative";
-  if (!hasControl) return read;
+  // While the client is sharing before a score, the first reader can miss a
+  // completion instruction entirely. Check the pending choice independently;
+  // do not require that same reader to have already recognised the instruction.
+  // This verifier can confirm controls only, never contribute feedback facts.
+  const pendingChoice = ["overall_rating", "nps"].includes(pendingRatingChoice);
+  if (!hasControl && !pendingChoice) return read;
   const input = [
     "Task: verify ONLY the client's survey-control instruction. Return strict JSON:",
     '{"decision":"none","evidence":null}',
@@ -1060,7 +1065,13 @@ async function verifySurveyControl(read, { question, text, pendingRatingChoice }
     fence("question_we_asked", question), fence("client_message", text)
   ].join("\n");
   const result = await callGemini(input, THINKING_MINIMAL, SURVEY_CONTROL_CALL);
-  const safe = sanitiseSurveyControl(read, result.ok ? parseJson(result.text) : null, text, pendingRatingChoice);
+  const verification = result.ok ? parseJson(result.text) : null;
+  // A confirmed absence of controls is ordinary continued feedback. Preserve
+  // its wording/facts and do not reoffer the rating choice after every point.
+  if (!hasControl && verification?.decision === "none") {
+    return { ...read, controlVerification: "verified_none" };
+  }
+  const safe = sanitiseSurveyControl(read, verification, text, pendingRatingChoice);
   if (!result.ok) safe.controlVerificationError = result.error;
   return safe;
 }

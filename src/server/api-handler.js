@@ -10,6 +10,8 @@ const { importAdminWorkbook } = require("../lib/admin-import");
 const { buildCsatImportWorkbook } = require("../lib/csat-workbook-template");
 const { recipientList, sendEmail, smtpConfigured } = require("../lib/email");
 const { recentAssistantOpenings } = require("../lib/acknowledgement-style");
+const { normalizeClusterAccess, clusterVisible, authorizeClusterRequest, scopedBrowserStore } = require("../lib/cluster-access");
+const { prepareCsatEmail } = require("../lib/csat-email-policy");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -2879,6 +2881,8 @@ async function resolveAppAccess(store, headers) {
   if (user.provider !== "google" || !user.email || typeof store.getAppUserByEmail !== "function") return null;
   const appUser = await store.getAppUserByEmail(user.email);
   if (!appUser || !appUser.active) return null;
+  if (!googleAllowedDomains().includes(String(user.hostedDomain || '').toLowerCase())
+    && !(appUser.role === 'project_user' && appUser.externalLoginAllowed === true)) return null;
   return {
     ...user,
     appUserId: appUser.id,
@@ -2886,11 +2890,13 @@ async function resolveAppAccess(store, headers) {
     role: appUser.role,
     permissions: normalizedPermissions(appUser.role, appUser.permissions),
     internalPocId: appUser.internalPocId || null,
+    clusterAccess: normalizeClusterAccess(appUser.clusterAccess, appUser.role),
     active: true
   };
 }
 
 function projectVisibleToAppAccess(project, appAccess) {
+  if (appAccess?.role === "admin") return clusterVisible(project?.clusterId, appAccess);
   if (appAccess?.role !== "project_user") return true;
   if (!appAccess.internalPocId) return false;
   return ["projectDirectorId", "amId", "tlId", "adId", "avpId"]
@@ -2943,7 +2949,7 @@ function projectPerformanceInputWithTeam(project, team, updatedBy) {
 }
 
 async function projectIdVisibleToAppAccess(store, projectId, appAccess) {
-  if (appAccess?.role !== "project_user") return true;
+  if (appAccess?.role === "super_admin") return true;
   const performanceData = await store.getProjectPerformanceData();
   const project = performanceData.projects.find((item) => item.id === projectId);
   return Boolean(project && projectVisibleToAppAccess(project, appAccess));
@@ -2968,7 +2974,7 @@ function adminRoutePermission(method, pathname) {
   if (["POST", "DELETE"].includes(method) && /^\/api\/project-performance\/projects\/[^/]+\/services(?:\/[^/]+)?$/.test(pathname)) return "manage_project_services";
   if (method === "PUT" && /^\/api\/project-performance\/[^/]+$/.test(pathname)) return "edit_project_performance";
   if (pathname === "/api/project-performance" || /^\/api\/project-performance\//.test(pathname)) return "project_performance";
-  if (pathname === "/api/projects" || /^\/api\/(?:projects|sessions|issues)\//.test(pathname)) return "project_workspace";
+  if (pathname === "/api/projects" || /^\/api\/(?:projects|sessions|issues|cycles)\//.test(pathname)) return "project_workspace";
   if (pathname === "/api/admin/messaging") return "messaging_controls";
   if (/^\/api\/admin\/project-automation\//.test(pathname)) return "messaging_controls";
   if (/^\/api\/admin\/bulk-feedback\//.test(pathname)) return "bulk_sends";
@@ -3272,6 +3278,18 @@ function shouldUseFinalRatingReminder(session) {
 }
 
 async function notifyAutomation(store, eventType, payload, dedupeKey = null, options = {}) {
+  let prepared;
+  try { prepared = await prepareCsatEmail(store, eventType, payload); }
+  catch (routingError) { prepared = { blocked: true, reason: routingError.message }; }
+  if (prepared.suppressed || prepared.blocked) {
+    const event = { eventType, payload, dedupeKey, status: prepared.suppressed ? "recorded" : "failed", delivered: false,
+      webhookUrlConfigured: false, error: prepared.blocked ? prepared.reason : null, policyReason: prepared.reason };
+    if (typeof store.recordAutomationEvent === "function") {
+      try { await store.recordAutomationEvent(event); } catch { /* Conversation must remain available. */ }
+    }
+    return event;
+  }
+  payload = prepared.payload;
   if (dedupeKey && pendingAutomationKeys.has(dedupeKey)) {
     return { eventType, status: "pending", delivered: false, dedupeKey };
   }
@@ -3340,6 +3358,7 @@ async function notifyClientRequest(store, { project, poc, session, text, message
       state: session.conversationState?.state,
       resumeUrl: buildResumeUrl(baseUrl, project, session)
     }, dedupeKey, { timeoutMs: 4000 });
+    if (event.status === "recorded") return null;
     return { status: event.status, accepted: event.status === "sent"
       || (event.status === "duplicate" && event.delivered === true), dedupeKey };
   } catch (error) {
@@ -4710,9 +4729,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     ? await notifyClientRequest(store, { project, poc, session: updatedSession,
       text, messageId: clientMessage.id, baseUrl, facts: latestReplyFacts || interpretation,
       offTopic: Boolean(control.collectOffTopic) }) : null;
-  if (clientRequestHandoff && !clientRequestHandoff.accepted) {
-    replyText = `Your message is saved, but I could not confirm the automatic notification to the team. Please contact your SRV representative directly if it needs attention.\n\n${replyText}`;
-  }
+  // Delivery diagnostics belong in the operator metadata, not in the client's
+  // feedback acknowledgement. An unconfirmed response is not proof of failure.
   let postCompletionHandoffEvent = null;
   if (control.notify === "post_completion_message" && !control.forceManagerAlert) {
     try {
@@ -4870,7 +4888,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 
   // Guardrail events that a human must actually read.
   if (control.notify && control.notify !== "post_completion_message" && !control.forceManagerAlert) {
-    notifyAutomationAsync(store, control.notify, {
+    // Await a genuine handoff: Replit has no waitUntil lifetime guarantee.
+    await notifyAutomation(store, control.notify, {
       project,
       poc,
       session: updatedSession,
@@ -4879,7 +4898,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       state: turn.conversationState.state,
       pendingQuestions,
       resumeUrl
-    }, `${control.notify}:message:${clientMessage.id}`, waitUntil);
+    }, `${control.notify}:message:${clientMessage.id}`);
   }
 
   const turnMs = Date.now() - turnStartedAt;
@@ -5190,7 +5209,10 @@ async function handleApiRequest(request) {
         return errorRedirect("google_identity_unverified");
       }
       if (!hostedDomain || !settings.allowedDomains.includes(hostedDomain)) {
-        return errorRedirect("google_domain_not_allowed");
+        const approved = await createStore().getAppUserByEmail(email);
+        if (!approved?.active || approved.role !== "project_user" || approved.externalLoginAllowed !== true) {
+          return errorRedirect("google_domain_not_allowed");
+        }
       }
       const user = {
         provider: "google",
@@ -5248,6 +5270,7 @@ async function handleApiRequest(request) {
   }
 
   let appAccess = null;
+  let clusterContext = null;
   if (!isMachineApiPath(pathname)) {
     appAccess = await resolveAppAccess(store, request.headers);
     if (!appAccess) return error(403, "Application access has not been assigned", "Ask a Super Admin to add your Google email under Manage → Application Users.");
@@ -5262,6 +5285,12 @@ async function handleApiRequest(request) {
       ].some((permission) => hasAppPermission(appAccess, permission));
       if (requiredPermission && !hasAppPermission(appAccess, requiredPermission) && !directoryForManage && !dashboardForWorkspace) {
         return error(403, "This feature is turned off for your Admin account");
+      }
+      try {
+        clusterContext = await authorizeClusterRequest(store, appAccess, method, pathname, body);
+        store = scopedBrowserStore(store, appAccess, clusterContext);
+      } catch (scopeError) {
+        return error(403, "Cluster access denied", scopeError.message);
       }
     }
   }
@@ -6978,7 +7007,7 @@ async function handleApiRequest(request) {
         .some((permission) => hasAppPermission(appAccess, permission));
     if (userManagementOnly) {
       return json(200, {
-        clusters: [], clients: [], projects: [], clientPocs: [], projectServices: [], pocLevels: [], departments: [], subDepartments: [], serviceCatalog: [],
+        clusters: directory.clusters || [], clients: [], projects: [], clientPocs: [], projectServices: [], pocLevels: [], departments: [], subDepartments: [], serviceCatalog: [],
         internalPocs: (directory.internalPocs || []).map((person) => ({
           id: person.id,
           name: person.name,
@@ -7063,7 +7092,7 @@ async function handleApiRequest(request) {
   if (method === "GET" && pathname === "/api/admin/app-users") {
     const users = await store.listAppUsers();
     return json(200, {
-      users: (appAccess.role === "super_admin" ? users : users.filter((user) => user.role === "project_user"))
+      users: (appAccess.role === "super_admin" ? users : users.filter(clusterContext.manageable))
         .map((user) => ({ ...user, permissions: normalizedPermissions(user.role, user.permissions) })),
       roles: appAccess.role === "super_admin" ? ["super_admin", "admin", "project_user"] : ["project_user"]
     });
@@ -7088,7 +7117,11 @@ async function handleApiRequest(request) {
     }
     const allowedDomains = googleAllowedDomains();
     const domain = email.split("@")[1];
-    if (allowedDomains.length && !allowedDomains.includes(domain)) return error(400, "Email must use an approved Google Workspace domain");
+    const externalLoginAllowed = role === "project_user" && body.externalLoginAllowed === true && appAccess.role === "super_admin";
+    if (allowedDomains.length && !allowedDomains.includes(domain) && !externalLoginAllowed) return error(400, "A Super Admin must explicitly approve this external Google email for Project User access");
+    const clusterAccess = normalizeClusterAccess(body.clusterAccess, role);
+    const clusterDirectory = await store.getDirectory();
+    if (clusterAccess.some(row => !clusterDirectory.clusters.some(cluster => cluster.id === row.clusterId))) return error(400, "Select valid clusters");
     if (await store.getAppUserByEmail(email)) return error(409, "That application user already exists");
     let createdInternalPoc = null;
     try {
@@ -7114,6 +7147,8 @@ async function handleApiRequest(request) {
         role,
         permissions: normalizedPermissions(role, body.permissions),
         internalPocId,
+        clusterAccess,
+        externalLoginAllowed,
         active: body.active !== false,
         actor: appAccess.email || "Password Super Admin"
       });
@@ -7150,6 +7185,9 @@ async function handleApiRequest(request) {
       return error(409, "That Internal POC is already linked to another Application User");
     }
     const removesActiveSuperAdmin = existing.role === "super_admin" && existing.active && (role !== "super_admin" || !active);
+    const updatedClusters = normalizeClusterAccess(body.clusterAccess === undefined ? existing.clusterAccess : body.clusterAccess, role);
+    const knownClusters = (await store.getDirectory()).clusters || [];
+    if (updatedClusters.some(row => !knownClusters.some(cluster => cluster.id === row.clusterId))) return error(400, "Select valid clusters");
     if (removesActiveSuperAdmin && await store.activeSuperAdminCount() <= 1) {
       return error(409, "Keep at least one active Super Admin");
     }
@@ -7158,6 +7196,8 @@ async function handleApiRequest(request) {
       role,
       permissions: normalizedPermissions(role, body.permissions === undefined ? existing.permissions : body.permissions),
       internalPocId,
+      clusterAccess: updatedClusters,
+      externalLoginAllowed: role === "project_user" && (body.externalLoginAllowed === undefined ? existing.externalLoginAllowed : body.externalLoginAllowed === true),
       active,
       actor: appAccess.email || "Password Super Admin"
     });
@@ -8886,9 +8926,8 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
   const clientRequestHandoff = !postCompletionHandoff
     ? await notifyClientRequest(store, { project, poc, session: result.session,
       text, messageId: clientMessage.id, baseUrl, facts: recordedInterpretation }) : null;
-  if (clientRequestHandoff && !clientRequestHandoff.accepted) {
-    replyText = `Your message is saved, but I could not confirm the automatic notification to the team. Please contact your SRV representative directly if it needs attention.\n\n${replyText}`;
-  }
+  // Keep handoff status in metadata without inserting technical delivery
+  // warnings into the client's quick-check-in acknowledgement.
 
   if (postCompletionHandoff) {
     try {

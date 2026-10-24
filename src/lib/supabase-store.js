@@ -1825,6 +1825,11 @@ class SupabaseStore {
     return rows.length > 0;
   }
 
+  async getCycle(cycleId) {
+    const rows = await this.request("feedback_cycles", { query: `id=eq.${encodeURIComponent(cycleId)}&select=*&limit=1` });
+    return rows.length ? toCycle(rows[0]) : null;
+  }
+
   async getIssue(issueId) {
     const rows = await this.request("issues", {
       query: `id=eq.${encodeURIComponent(issueId)}&select=*&limit=1`
@@ -4007,6 +4012,8 @@ class SupabaseStore {
       name: row.name || "",
       role: row.role,
       permissions: row.permissions && typeof row.permissions === "object" ? row.permissions : {},
+      clusterAccess: Array.isArray(row.cluster_access) ? row.cluster_access : [],
+      externalLoginAllowed: row.external_login_allowed === true,
       internalPocId: row.internal_poc_id || null,
       active: row.active !== false,
       createdBy: row.created_by || null,
@@ -4031,6 +4038,8 @@ class SupabaseStore {
         role: input.role,
         permissions: input.permissions && typeof input.permissions === "object" ? input.permissions : {},
         internal_poc_id: input.internalPocId || null,
+        cluster_access: input.clusterAccess || [],
+        external_login_allowed: input.externalLoginAllowed === true,
         active: input.active !== false,
         created_by: input.actor || null,
         updated_by: input.actor || null
@@ -4045,6 +4054,8 @@ class SupabaseStore {
     if (input.name !== undefined) body.name = String(input.name || "").trim() || null;
     if (input.role !== undefined) body.role = input.role;
     if (input.permissions !== undefined) body.permissions = input.permissions && typeof input.permissions === "object" ? input.permissions : {};
+    if (input.clusterAccess !== undefined) body.cluster_access = input.clusterAccess;
+    if (input.externalLoginAllowed !== undefined) body.external_login_allowed = input.externalLoginAllowed === true;
     if (input.internalPocId !== undefined) body.internal_poc_id = input.internalPocId || null;
     if (input.active !== undefined) body.active = Boolean(input.active);
     const rows = await this.request("app_users", {

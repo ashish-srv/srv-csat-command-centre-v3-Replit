@@ -37,9 +37,22 @@ export function TonePill({ tone, reason }) {
   );
 }
 
-export function Button({ children, icon: Icon, variant = "secondary", className = "", ...props }) {
+export function Button({ children, icon: Icon, variant = "secondary", className = "", onClick, ...props }) {
+  function click(event) {
+    // Reveal rows only after an explicit Add/Copy click, not on typing or save.
+    const button = event.currentTarget;
+    const root = button.closest('.edit-form, .project-configuration-section-body, .bulk-editor-block, section');
+    const selector = '.batch-editor-row, .app-user-draft-row, .performance-kpi-row, [data-draft-row]';
+    const reveal = /^(?:add|copy)\b/i.test(button.textContent.trim()) && root;
+    const before = reveal ? new Set(root.querySelectorAll(selector)) : null;
+    onClick?.(event);
+    if (reveal) window.requestAnimationFrame(() => {
+      const added = [...root.querySelectorAll(selector)].filter(row => !before.has(row));
+      added[0]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }
   return (
-    <button className={`button ${variant} ${className}`.trim()} type="button" {...props}>
+    <button className={`button ${variant} ${className}`.trim()} type="button" {...props} onClick={click}>
       {Icon ? <Icon size={16} strokeWidth={2.4} aria-hidden="true" /> : null}
       <span>{children}</span>
     </button>

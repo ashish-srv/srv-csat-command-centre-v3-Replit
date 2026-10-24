@@ -1,5 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronLeft, ChevronRight, Clock, History, LogOut, TrendingDown } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Clock, History, ListChecks, LogOut, TrendingDown } from "lucide-react";
 import { apiGet } from "./api";
 import Dashboard from "./components/Dashboard.jsx";
 import ProjectWorkspace from "./components/ProjectWorkspace.jsx";
@@ -96,7 +96,8 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject, onOpenDa
         <button type="button" className="rail-toggle" onClick={onToggle} aria-label="Expand attention rail">
           <ChevronRight size={15} aria-hidden="true" />
         </button>
-        <button type="button" className="rail-icon weak" title={`${overdue.length} issues overdue`} aria-label="Go to Open Issues" onClick={() => onOpenDashboard("dashboard-open-issues")}><AlertTriangle size={16} aria-hidden="true" /></button>
+        <button type="button" className="rail-icon watch" title={`${dashboard?.openIssues?.length || 0} total open issues`} aria-label="Go to Open Issues" onClick={() => onOpenDashboard("dashboard-open-issues")}><ListChecks size={16} aria-hidden="true" /></button>
+        <button type="button" className="rail-icon weak" title={`${overdue.length} issues overdue`} aria-label="Go to Past SLA Issues" onClick={() => onOpenDashboard("dashboard-overdue-issues")}><AlertTriangle size={16} aria-hidden="true" /></button>
         <button type="button" className="rail-icon watch" title={`${awaiting.length} cycles awaiting reply`} aria-label="Go to Open Cycles" onClick={() => onOpenDashboard("dashboard-open-cycles")}><Clock size={16} aria-hidden="true" /></button>
         <button type="button" className="rail-icon weak" title={`${highRisk.length} projects at high risk`} aria-label="View high-risk projects" disabled={!highRisk.length} onClick={openHighRisk}><TrendingDown size={16} aria-hidden="true" /></button>
         <span className="rail-icon" title={`${latestActivity.length} recent client replies`}><History size={16} aria-hidden="true" /></span>
@@ -120,9 +121,12 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject, onOpenDa
       </div>
 
       <p className="rail-label">Needs attention</p>
-      <button type="button" className="rail-stat weak" aria-label="Go to Open Issues" onClick={() => onOpenDashboard("dashboard-open-issues")}>
+      <button type="button" className="rail-stat watch" aria-label="Go to Open Issues" onClick={() => onOpenDashboard("dashboard-open-issues")}>
+        <strong>{dashboard?.openIssues?.length || 0}</strong><span>Total Open Issues</span>
+      </button>
+      <button type="button" className="rail-stat weak" aria-label="Go to Past SLA Issues" onClick={() => onOpenDashboard("dashboard-overdue-issues")}>
         <strong>{overdue.length}</strong>
-        <span>{overdue.length === 1 ? "issue past SLA" : "issues past SLA"}</span>
+        <span title="A subset of open issues whose due date has passed">{overdue.length === 1 ? "issue past SLA" : "issues past SLA"}</span>
       </button>
       <button type="button" className="rail-stat watch" aria-label="Go to Open Cycles" onClick={() => onOpenDashboard("dashboard-open-cycles")}>
         <strong>{awaiting.length}</strong>

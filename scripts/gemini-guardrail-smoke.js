@@ -287,6 +287,75 @@ const turn = {
     }
   });
 
+  await scenario("Pending-choice check preserves continued feedback and does not merge verifier facts", async () => {
+    const priorFetch = global.fetch, priorKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "test-key";
+    try {
+      for (const text of ["We have enough leads, but the quality is poor", "That is not enough; the reports are also late", "Thank you for your support over the years"]) {
+        let controlCalls = 0;
+        global.fetch = async (_url, options) => {
+          const input = JSON.parse(options.body).input;
+          let result;
+          if (input.includes("Task: verify ONLY the client's survey-control instruction")) {
+            controlCalls++;
+            result = { decision: "none", evidence: null, rating: 10,
+              captured: [{ serviceKey: "senior", summary: "Invented leadership failure" }] };
+          } else result = { intent: "feedback", acknowledgement: "Thank you for explaining your experience.",
+            serviceScope: "overall_feedback", observations: [{ topic: "Client Feedback", detail: text }] };
+          return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+        };
+        for (const pendingRatingChoice of ["overall_rating", "nps", null]) {
+          controlCalls = 0;
+          const read = await interpretReply({ project: { services: [] }, question: "Thank you for explaining your experience.",
+            text, verifySurveyControls: true, pendingRatingChoice });
+          assert.equal(controlCalls, pendingRatingChoice ? 1 : 0);
+          assert.equal(read.controlVerification, pendingRatingChoice ? "verified_none" : undefined);
+          assert.equal(read.completionScope, "none");
+          assert.equal(read.ratingChoice, "none");
+          assert.equal(read.rating, null);
+          assert.equal(read.acknowledgement, "Thank you for explaining your experience.");
+          assert.equal(read.observations[0].detail, text);
+          assert.doesNotMatch(JSON.stringify(read), /Invented leadership failure/);
+        }
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+    }
+  });
+
+  await scenario("Independent pending-choice verification fails closed on timeout, malformed output and stale evidence", async () => {
+    const priorFetch = global.fetch, priorKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "test-key";
+    const text = "I believe I have shared enough for this review";
+    try {
+      for (const intent of ["feedback", "unclear"]) for (const mode of ["timeout", "malformed", "stale"]) {
+        global.fetch = async (_url, options) => {
+          const input = JSON.parse(options.body).input;
+          let result = {};
+          if (input.includes("Task: verify ONLY the client's survey-control instruction")) {
+            if (mode === "timeout") throw new Error("simulated control timeout");
+            result = mode === "malformed" ? null : { decision: "conversation", evidence: "Words from an earlier client message", rating: 10 };
+          } else if (input.includes("Task: interpret ONE client reply")) result = {
+            intent, acknowledgement: "Thank you for sharing your experience.", completionScope: "none", ratingChoice: "none"
+          };
+          return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+        };
+        const read = await interpretReply({ project: { services: [] }, question: "Thank you for explaining.",
+          text, verifySurveyControls: true, pendingRatingChoice: "overall_rating" });
+        assert.equal(read.controlVerification, "unverified");
+        assert.equal(read.completionScope, "none");
+        assert.equal(read.ratingChoice, "none");
+        assert.equal(read.rating, null);
+        assert.equal(read.acknowledgement, "Thank you for sharing your experience.");
+        if (mode === "timeout") assert.ok(read.controlVerificationError);
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+    }
+  });
+
   await scenario("A start acknowledgement cannot validate an unrelated service-scope decision", async () => {
     const priorFetch = global.fetch, priorKey = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = "test-key";

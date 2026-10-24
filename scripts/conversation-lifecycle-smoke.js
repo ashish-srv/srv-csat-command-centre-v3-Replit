@@ -6,6 +6,7 @@ const { SupabaseStore, sessionIsTerminal } = require("../src/lib/supabase-store"
 const { PostgresStore } = require("../src/lib/postgres-store");
 const { applyServiceScopeDecision } = require("../src/lib/whatsapp-state-machine");
 const { conductTurn, interpretReply } = require("../src/lib/gemini");
+const { prepareCsatEmail } = require("../src/lib/csat-email-policy");
 
 // Exercise real private orchestration without adding public API endpoints.
 const filename = require.resolve("../src/server/api-handler");
@@ -60,6 +61,11 @@ function providerFixture() {
     npsScore: row.nps_score, conversationState: copy(row.conversation_state) });
   provider.recomputeCycle = async (...args) => { rollups.push(args); };
   provider.getMessagingStatus = async () => ({ enabled: false });
+  provider.listAppUsers = async () => [
+    { email: 'super@example.test', role: 'super_admin', active: true },
+    { email: 'cluster-admin@example.test', role: 'admin', active: true, clusterAccess: [{ clusterId: 'cluster-a', emailEnabled: true }] }
+  ];
+  provider.getProjectById = async () => ({ id: row.project_id, key: 'test', name: 'Test', clusterId: 'cluster-a' });
   let messages = [{ side: "client", body: "Original feedback" }];
   provider.getSessionDetail = async () => ({ session: await provider.getSession(),
     poc: { id: row.client_poc_id, name: "POC A" }, messages: copy(messages) });
@@ -155,6 +161,8 @@ async function run() {
       assert.equal(sent[0].issues.length, 1);
       assert.equal(sent[0].messages[1].body, "Please add course-wise reporting too.");
       assert.ok(!sent[0].recipients.includes("other-owner@example.test"));
+      assert.deepEqual(sent[0].recipients, ['super@example.test', 'cluster-admin@example.test']);
+      assert.match(sent[0].email.text, /Please add course-wise reporting too/);
       await flow.finalizeFeedbackWindowsAndNotify(f.provider, new Date().toISOString(), "https://example.test");
       assert.equal(sent.length, 1);
     });
@@ -185,7 +193,7 @@ async function run() {
     await scenario("HTTP 200 with sent:false is recorded as a failed workflow delivery", async () => {
       const f = providerFixture();
       global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ ok: true, sent: false, reason: "no_recipients" }) });
-      const result = await flow.notifyAutomation(f.provider, "cycle_completed", {}, "no-recipients");
+      const result = await flow.notifyAutomation(f.provider, "cycle_completed", { summaryType: 'feedback_poc', project: await f.provider.getProjectById() }, "no-recipients");
       assert.equal(result.status, "failed"); assert.equal(result.error, "no_recipients");
     });
     await scenario("Quick check-in does not treat an ungrounded negative intent as completion", () => {
@@ -193,29 +201,36 @@ async function run() {
       assert.equal(flow.quickCheckinDetailDecision("Nothing further from my side", { intent: "negative", completionScope: "feedback" }), "covered");
       assert.equal(flow.quickCheckinDetailDecision("I can respond tomorrow", { intent: "defer", deferRequested: true }), "defer");
     });
-    await scenario("Workflow 10 displays this POC's scores and transcript without claiming the whole cycle completed", () => {
-      const workflow = JSON.parse(fs.readFileSync(path.join(__dirname, "../n8n/workflows/10 - CSAT v5 - Cycle and Quick Check-in Summary.json"), "utf8"));
+    await scenario("Workflow 10 displays this POC's scores and transcript without claiming the whole cycle completed", async () => {
+      const workflow = JSON.parse(fs.readFileSync(path.join(__dirname, "../n8n/workflows/10 - CSAT v6 - Cluster POC Feedback Summary.json"), "utf8"));
       const code = workflow.nodes.find((node) => node.type === "n8n-nodes-base.code").parameters.jsCode;
-      const body = { summaryType: "feedback_poc", project: { name: "Example", clientName: "Client" },
+      const body = { summaryType: "feedback_poc", project: { id: "project-a", clusterId: "cluster-a", name: "Example", clientName: "Client" },
+        poc: { id: "poc-a", name: "POC A" },
         cycle: { cycleType: "project_end", csatScore: 5 }, csatScore: 9, npsScore: 10,
-        sessions: [{ pocName: "POC A", completionStatus: "completed" }],
+        sessions: [{ id: "session-a", pocName: "POC A", completionStatus: "completed" }],
         messages: [{ side: "client", body: "Additional feedback in the closing window." }] };
-      const execute = new Function("$input", "$", code);
-      const result = execute({ first: () => ({ json: { body } }) }, () => ({ first: () => ({ json: { CSAT_HANDOFF_EMAIL: "director@example.test" } }) }))[0].json;
+      const execute = async () => {
+        const prepared = await prepareCsatEmail(providerFixture().provider, "cycle_completed", body);
+        return new Function("$input", code)({ first: () => ({ json: { body: { eventType: "cycle_completed", ...prepared.payload } } }) })[0].json;
+      };
+      const result = await execute();
+      assert.equal(result.allowed, true);
       assert.match(result.subject, /POC A/);
-      assert.match(result.text, /Overall CSAT: 9\/10/);
+      assert.match(result.text, /CSAT: 9\/10/);
       assert.match(result.text, /NPS:.*10\/10/);
       assert.match(result.text, /Additional feedback in the closing window/);
       assert.doesNotMatch(result.text, /feedback cycle complete|single summary for the completed feedback cycle/);
-      assert.equal(result.to, "director@example.test");
+      assert.equal(result.to, "super@example.test,cluster-admin@example.test");
       body.cycle.cycleType = "monthly";
-      const monthly = execute({ first: () => ({ json: { body } }) }, () => ({ first: () => ({ json: { CSAT_HANDOFF_EMAIL: "director@example.test" } }) }))[0].json;
-      assert.match(monthly.text, /Overall CSAT: 9\/10/);
-      assert.doesNotMatch(monthly.text, /NPS:/);
+      body.npsScore = null;
+      const monthly = await execute();
+      assert.match(monthly.text, /CSAT: 9\/10/);
+      assert.match(monthly.text, /NPS: Not provided/);
       body.summaryType = "quick_checkin_poc";
       body.cycle.cycleType = "quick_checkin";
-      const quick = execute({ first: () => ({ json: { body } }) }, () => ({ first: () => ({ json: { CSAT_HANDOFF_EMAIL: "director@example.test" } }) }))[0].json;
-      assert.doesNotMatch(quick.text, /Overall CSAT:|NPS:/);
+      const quick = await execute();
+      assert.match(quick.text, /CSAT: Not collected\nNPS: Not collected/);
+      assert.equal(quick.to, result.to);
     });
   } finally {
     global.fetch = originalFetch;

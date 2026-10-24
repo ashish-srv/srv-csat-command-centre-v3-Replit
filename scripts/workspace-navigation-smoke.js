@@ -328,7 +328,7 @@ async function main() {
         onOpenDashboard: (section) => opened.push(section)
       }, "/project?project=alpha", async () => dashboard, "AttentionRail");
       await h.settle();
-      for (const [label, section] of [["Go to Open Issues", "dashboard-open-issues"], ["Go to Open Cycles", "dashboard-open-cycles"]]) {
+      for (const [label, section] of [["Go to Open Issues", "dashboard-open-issues"], ["Go to Past SLA Issues", "dashboard-overdue-issues"], ["Go to Open Cycles", "dashboard-open-cycles"]]) {
         const button = h.find((node) => node.type === "button" && node.props["aria-label"] === label);
         assert.ok(button, label);
         button.props.onClick();

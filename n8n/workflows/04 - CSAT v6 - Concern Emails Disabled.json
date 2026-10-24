@@ -1,0 +1,77 @@
+{
+  "name": "4. CSAT v6 - Concern Emails Disabled",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-manager-alert",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "704de5bc-4afb-4517-b4f4-cb6e83852372",
+      "name": "Manager Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "ea99ab67-8f59-4400-a0eb-5295297553f6",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "id": "26d142ad-ed41-4cc3-a453-1fbf9088dc66",
+      "name": "Respond - Included in Completed Summary",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, sent: false, handled: true, reason: \"included_in_completed_poc_summary\" } }}",
+        "options": {}
+      },
+      "position": [
+        320,
+        0
+      ]
+    },
+    {
+      "id": "18b27135-9562-4b5d-a032-f8b0dd793ec8",
+      "name": "Email Policy",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "parameters": {
+        "width": 680,
+        "height": 190,
+        "content": "## No separate manager/owner email\nRoutine concerns are saved by the application and included in Workflow 10 after the POC response window closes. This compatibility endpoint intentionally has NO email sender. Keep the old manager-alert workflow inactive. Genuine human handoffs use Workflow 3."
+      },
+      "position": [
+        0,
+        -250
+      ]
+    }
+  ],
+  "connections": {
+    "Manager Alert Webhook": {
+      "main": [
+        [
+          {
+            "node": "Respond - Included in Completed Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

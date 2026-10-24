@@ -8,6 +8,7 @@ import {
 } from "../format";
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill } from "./Ui.jsx";
 import ReportDownloads from "./ReportDownloads.jsx";
+import ConsolidatedFeedbackExport from "./ConsolidatedFeedbackExport.jsx";
 import { hasPermission } from "../permissions";
 
 const RISK_OPTIONS = ["High", "Watch", "Low", "Not scored"];
@@ -183,18 +184,20 @@ export default function Dashboard({ dashboard, locationTick = 0, onReload, onOpe
   const [messagingError, setMessagingError] = useState("");
   const [messagingSaving, setMessagingSaving] = useState(false);
   const [reportError, setReportError] = useState("");
+  const [onlyOverdueIssues, setOnlyOverdueIssues] = useState(false);
   const attentionNavigationRef = useRef(null);
 
   useEffect(() => {
     if (!dashboard || attentionNavigationRef.current === locationTick) return;
     const section = new URLSearchParams(window.location.search).get("section");
-    if (!["dashboard-open-issues", "dashboard-open-cycles"].includes(section)) return;
+    if (!["dashboard-open-issues", "dashboard-open-cycles", "dashboard-overdue-issues"].includes(section)) return;
+    setOnlyOverdueIssues(section === "dashboard-overdue-issues");
     // Rail totals cover every project. A stale client/date selection must not
     // hide the items the user just asked to see.
     setClusters([]); setClients([]); setProjectNames([]); setRisks([]); setStatuses([]);
     setRange({ from: "", to: "", basis: "started" });
     const timer = window.setTimeout(() => {
-      document.getElementById(section)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      document.getElementById(section === "dashboard-overdue-issues" ? "dashboard-open-issues" : section)?.scrollIntoView({ behavior: "smooth", block: "start" });
       attentionNavigationRef.current = locationTick;
     }, 0);
     return () => window.clearTimeout(timer);
@@ -204,7 +207,7 @@ export default function Dashboard({ dashboard, locationTick = 0, onReload, onOpe
   const allCycles = dashboard?.cycles || EMPTY_LIST;
   const allResponseSessions = dashboard?.responseTracker || dashboard?.responseQueue || EMPTY_LIST;
   const messagingEnabled = dashboard?.messaging?.enabled !== false;
-  const canControlMessaging = hasPermission(currentUser, "messaging_controls");
+  const canControlMessaging = currentUser?.role === "super_admin" && hasPermission(currentUser, "messaging_controls");
 
   async function changeMessagingStatus() {
     setMessagingSaving(true);
@@ -716,6 +719,7 @@ export default function Dashboard({ dashboard, locationTick = 0, onReload, onOpe
       </div>
 
       {reportError ? <div className="report-export-error" role="alert">{reportError}</div> : null}
+      <ConsolidatedFeedbackExport projects={allProjects} />
 
       <nav className="dashboard-section-nav" aria-label="Dashboard sections">
         <button type="button" onClick={() => showSection("dashboard-projects")}>Projects</button>
@@ -1048,18 +1052,20 @@ export default function Dashboard({ dashboard, locationTick = 0, onReload, onOpe
           className="span-6 dashboard-anchor-section"
         >
           <div className="focus-list">
-            {openIssues.map((issue) => (
+            <label><input type="checkbox" checked={onlyOverdueIssues} onChange={event => setOnlyOverdueIssues(event.target.checked)} /> Past SLA Only</label>
+            <p className="form-note">Past SLA is a subset of open issues. Due dates are set when issues are created: 24 hours for high severity, 48 hours otherwise.</p>
+            {openIssues.filter(issue => !onlyOverdueIssues || (issue.dueAt && Date.parse(issue.dueAt) < Date.now())).map((issue) => (
               <button key={issue.id} type="button" className={`focus-row ${riskClass(issue.severity)}`} onClick={() => issue.projectKey && onOpenProject(issue.projectKey, { section: "issues", issueId: issue.id })}>
                 <strong>{issue.projectName || "Project"}</strong>
                 <span>{issue.serviceName || "Service"}</span>
                 <p>{issue.title}</p>
-                <em>{issue.raisedBy ? `Raised by ${issue.raisedBy} · ` : ""}{formatDate(issue.createdAt)}</em>
+                <em>{issue.raisedBy ? `Raised by ${issue.raisedBy} · ` : ""}{formatDate(issue.createdAt)} · Due: {formatDateTime(issue.dueAt)}</em>
               </button>
             ))}
-            {!openIssues.length ? (
+            {!openIssues.some(issue => !onlyOverdueIssues || (issue.dueAt && Date.parse(issue.dueAt) < Date.now())) ? (
               <EmptyState
-                title="Nothing open"
-                text={range.from || range.to
+                title={onlyOverdueIssues ? "No Past SLA Issues" : "Nothing open"}
+                text={onlyOverdueIssues ? "No matching open issue is past its due date." : range.from || range.to
                   ? "No issue was raised in this date range."
                   : "Issues need a reported problem with a reason."}
               />

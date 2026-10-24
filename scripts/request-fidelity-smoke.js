@@ -8,9 +8,9 @@ const filename = require.resolve("../src/server/api-handler");
 const harness = new Module(filename, module);
 harness.filename = filename;
 harness.paths = Module._nodeModulePaths(path.dirname(filename));
-harness._compile(fs.readFileSync(filename, "utf8") + "\nmodule.exports.audit = { notifyClientRequest, quickCheckinDetailDecision };", filename);
+harness._compile(fs.readFileSync(filename, "utf8") + "\nmodule.exports.audit = { notifyClientRequest, notifyAutomation, quickCheckinDetailDecision };", filename);
 const flow = harness.exports.conversationFlow;
-const { notifyClientRequest, quickCheckinDetailDecision } = harness.exports.audit;
+const { notifyClientRequest, notifyAutomation, quickCheckinDetailDecision } = harness.exports.audit;
 const project = { id: "p1", key: "test", services: [{ serviceKey: "account", name: "Account Management" }] };
 const results = [];
 async function scenario(name, run) {
@@ -120,10 +120,11 @@ async function run() {
       assert.equal(calls, 2);
       assert.ok(read.observations.some((item) => item.detail === requests[0]));
     });
-    await scenario("Active and closing requests notify immediately once per inbound message, independent of summaries", async () => {
+    await scenario("Active and closing requests are saved without per-message emails in all three flows", async () => {
       process.env.N8N_HUMAN_HANDOFF_WEBHOOK = "https://fixture.invalid/handoff";
-      const events = new Map(), payloads = [];
+      const events = new Map(), payloads = [], audits = [];
       const store = {
+        recordAutomationEvent: async event => audits.push(event),
         claimAutomationEvent: async (eventType, payload, key) => {
           if (events.has(key)) return null;
           const row = { id: key, status: "pending", eventType, payload }; events.set(key, row); return row;
@@ -140,15 +141,15 @@ async function run() {
             facts: { observations: [{ kind: "request", detail: requests[0] }] } };
           const original = JSON.stringify(args);
           const first = await notifyClientRequest(store, args), repeated = await notifyClientRequest(store, args);
-          assert.equal(first.accepted, true); assert.equal(repeated.accepted, true);
-          assert.equal(repeated.status, "duplicate");
+          assert.equal(first, null); assert.equal(repeated, null);
           assert.equal(JSON.stringify(args), original);
         }
       }
-      assert.equal(payloads.length, 6);
-      assert.ok(payloads.every((item) => item.eventType === "client_question" && item.clientText === requests[0]));
+      assert.equal(payloads.length, 0);
+      assert.equal(audits.length, 12);
+      assert.ok(audits.every(item => item.eventType === "client_question" && item.status === "recorded" && item.payload.clientText === requests[0]));
     });
-    await scenario("Missing configuration and HTTP or workflow failures never claim notification acceptance", async () => {
+    await scenario("A genuine handoff with missing configuration or delivery failure never claims acceptance", async () => {
       const args = { project, poc: {}, session: { id: "s" }, text: requests[1], messageId: "m", baseUrl: "https://fixture.invalid", offTopic: true };
       for (const mode of ["missing", "http", "workflow", "timeout"]) {
         const audits = [];
@@ -158,8 +159,12 @@ async function run() {
           if (mode === "timeout") throw new Error("Timed out");
           return { ok: mode !== "http", status: mode === "http" ? 500 : 200, json: async () => ({ sent: false, reason: "No recipient" }) };
         };
-        const event = await notifyClientRequest({ recordAutomationEvent: async (row) => audits.push(row) }, args);
-        assert.equal(event.accepted, false);
+        const event = await notifyAutomation({
+          listAppUsers: async () => [{ email: "super@example.com", role: "super_admin", active: true }],
+          getProjectById: async () => project,
+          recordAutomationEvent: async row => audits.push(row)
+        }, "handoff", { ...args, clientText: args.text });
+        assert.notEqual(event.status, "sent");
         assert.equal(event.status, mode === "missing" ? "skipped" : "failed");
         assert.equal(audits.length, 1);
       }

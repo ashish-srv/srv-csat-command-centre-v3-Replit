@@ -1,0 +1,235 @@
+{
+  "name": "10. CSAT v6 - Cluster POC Feedback Summary",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-cycle-completed",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "41b2d5d8-02ad-4a1f-ab08-b318e4c3167c",
+      "name": "Cycle Completed Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "53898be5-7115-4f3b-aadf-15bda2341032",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "id": "58c621d1-4238-49b6-85a3-c93e840fd892",
+      "name": "Validate Application Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function buildPolicyEmail(body, kind, now = Date.now()) {\n  const blocked = reason => ({ allowed: false, reason, to: '', recipients: [] });\n  if (kind === 'manager') return blocked('included_in_completed_poc_summary');\n  if (!body || typeof body !== 'object' || Array.isArray(body)) return blocked('invalid_payload');\n  if (kind === 'handoff' && !['handoff', 'post_completion_message'].includes(body.eventType)) {\n    return blocked('not_an_explicit_human_handoff');\n  }\n  if (kind === 'summary' && (body.eventType !== 'cycle_completed'\n    || !['feedback_poc', 'quick_checkin_poc'].includes(body.summaryType))) return blocked('per_poc_summary_only');\n  if (body.emailPolicyVersion !== 1 || body.recipientPolicy !== 'cluster_admins_v1') return blocked('application_policy_required');\n  const addresses = values => {\n    if (!Array.isArray(values) || !values.length) return null;\n    const valid = values.every(value => typeof value === 'string'\n      && /^[^\\s@,;<>]+@[^\\s@,;<>]+\\.[^\\s@,;<>]+$/.test(value.trim()));\n    return valid ? [...new Set(values.map(value => value.trim().toLowerCase()))] : null;\n  };\n  const recipients = addresses(body.recipients);\n  const mandatory = addresses(body.mandatoryRecipients);\n  const emailTo = addresses(body.email?.to);\n  const same = (a, b) => a.length === b.length && a.every(value => b.includes(value));\n  if (!recipients || !mandatory || !emailTo) return blocked('valid_recipients_and_super_admin_required');\n  if (!mandatory.every(value => recipients.includes(value))) return blocked('mandatory_super_admin_missing');\n  if (!same(recipients, emailTo)) return blocked('recipient_lists_disagree');\n  if (kind === 'handoff' && !same(recipients, mandatory)) return blocked('handoff_super_admins_only');\n  const email = body.email;\n  if (typeof email.subject !== 'string' || !email.subject.trim() || /[\\r\\n]/.test(email.subject)\n    || typeof email.html !== 'string' || !email.html.trim()\n    || typeof email.text !== 'string' || !email.text.trim()) return blocked('application_email_template_required');\n  if (kind === 'summary') {\n    if (!body.project?.id || !body.poc?.id || !Array.isArray(body.sessions) || body.sessions.length !== 1\n      || !body.sessions[0]?.id) return blocked('single_poc_session_required');\n    const session = body.sessions[0];\n    if ((session.projectId && session.projectId !== body.project.id)\n      || (session.clientPocId && session.clientPocId !== body.poc.id)) return blocked('session_scope_mismatch');\n    const state = session.conversationState || {};\n    for (const value of [state.closingGraceExpiresAt, state.quickCheckinWindowExpiresAt].filter(Boolean)) {\n      const deadline = Date.parse(value);\n      if (!Number.isFinite(deadline)) return blocked('invalid_response_window');\n      if (deadline > now) return blocked('response_window_still_open');\n    }\n    if (!Array.isArray(body.messages)) return blocked('transcript_array_required');\n    if (body.messages.some(message => !message || (message.sessionId && message.sessionId !== session.id))) {\n      return blocked('transcript_scope_mismatch');\n    }\n  }\n  // Never re-derive recipients from service owners, managers, or a Config node.\n  // Timing, cluster authorization and durable send-once claims belong to the app.\n  return { allowed: true, to: recipients.join(','), recipients, subject: email.subject,\n    html: email.html, text: email.text, summaryType: body.summaryType || null };\n}\nreturn [{ json: buildPolicyEmail($input.first().json.body, 'summary') }];"
+      },
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "id": "cf4e2f70-b10c-4564-9d75-74833f5cce17",
+      "name": "Allowed Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e1d5b808-7d4b-41e5-9fe3-c977036136f1",
+              "leftValue": "={{ $json.allowed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "position": [
+        520,
+        0
+      ]
+    },
+    {
+      "id": "93d18d7f-c5b8-404b-a45e-ead70861eaa9",
+      "name": "Send POC Summary",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "parameters": {
+        "fromEmail": "internalcommunications@srvmedia.com",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "both",
+        "text": "={{ $json.text }}",
+        "html": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "position": [
+        800,
+        -100
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "NDpf2LfKVWN5zViN",
+          "name": "SMTP (Ashish)"
+        }
+      },
+      "retryOnFail": false,
+      "onError": "stopWorkflow",
+      "notes": "No automatic SMTP retry: an ambiguous timeout may already have delivered. Check the provider before retrying. Do not add CC, BCC, service owners or fixed fallback recipients."
+    },
+    {
+      "id": "f5e15d0c-0b60-4c74-8e9a-7f0c66bfce18",
+      "name": "Verify SMTP Acceptance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function smtpAcceptance(result, expected) {\n  const normalize = list => Array.isArray(list) ? list.map(item => String(typeof item === 'string' ? item : item?.address || '').trim().toLowerCase()) : [];\n  const accepted = normalize(result?.accepted);\n  const rejected = normalize(result?.rejected);\n  const recipients = normalize(expected?.recipients);\n  const sent = !result?.error && recipients.length > 0 && rejected.length === 0\n    && recipients.every(email => accepted.includes(email));\n  return { ok: sent, sent, reason: sent ? 'smtp_accepted' : 'smtp_acceptance_not_confirmed_for_all_recipients',\n    inboxDeliveryVerified: false, acceptedCount: accepted.length, rejectedCount: rejected.length,\n    messageId: result?.messageId || null };\n}\nreturn [{ json: smtpAcceptance($input.first().json, $('Validate Application Email').first().json) }];"
+      },
+      "position": [
+        1060,
+        -100
+      ]
+    },
+    {
+      "id": "41616800-8deb-4320-aad3-4c11d7fe282a",
+      "name": "Respond SMTP Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "position": [
+        1320,
+        -100
+      ]
+    },
+    {
+      "id": "a5c62386-81d7-4dff-836a-89182b5a98c0",
+      "name": "Respond Not Sent",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, sent: false, reason: $json.reason } }}",
+        "options": {}
+      },
+      "position": [
+        800,
+        140
+      ]
+    },
+    {
+      "id": "0219ae48-abf8-42f5-9e0a-df22e583356b",
+      "name": "Setup and Policy",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "parameters": {
+        "width": 960,
+        "height": 240,
+        "content": "## Cluster email policy — application update required\nSelect Header Auth: x-csat-webhook-secret = Replit production N8N_WEBHOOK_SECRET. Confirm the preserved SMTP credential.\nOne completed POC summary: Super Admins + opted-in cluster Admins. The application owns the 10-minute close and durable send-once claim.\nUse the application template and exact recipient lists. No old Config address, manager/owner additions, automatic SMTP retries or stale execution replays.\nSuccess means all recipients were accepted by SMTP, NOT verified inbox delivery. Import inactive; replace the old workflow on the same webhook path when the application is ready."
+      },
+      "position": [
+        0,
+        -330
+      ]
+    }
+  ],
+  "connections": {
+    "Cycle Completed Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Application Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Application Email": {
+      "main": [
+        [
+          {
+            "node": "Allowed Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Allowed Email?": {
+      "main": [
+        [
+          {
+            "node": "Send POC Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Not Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send POC Summary": {
+      "main": [
+        [
+          {
+            "node": "Verify SMTP Acceptance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify SMTP Acceptance": {
+      "main": [
+        [
+          {
+            "node": "Respond SMTP Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
