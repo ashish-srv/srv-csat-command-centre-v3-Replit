@@ -2,15 +2,15 @@ import { Children, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Calendar, Check, ChevronDown, Search, X } from "lucide-react";
 
-function useOutsideClose(onClose) {
+function useOutsideClose(onClose, menuRef) {
   const ref = useRef(null);
   useEffect(() => {
     function handler(event) {
-      if (ref.current && !ref.current.contains(event.target)) onClose();
+      if (ref.current && !ref.current.contains(event.target) && !menuRef?.current?.contains(event.target)) onClose();
     }
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [onClose]);
+  }, [onClose, menuRef]);
   return ref;
 }
 
@@ -26,13 +26,44 @@ function useOutsideClose(onClose) {
 export function MultiSelect({ label, options, selected, onChange, allLabel = "All", renderOption }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [position, setPosition] = useState(null);
+  const menuRef = useRef(null);
+  const searchRef = useRef(null);
 
   function closeMenu() {
     setOpen(false);
     setQuery("");
   }
 
-  const ref = useOutsideClose(closeMenu);
+  const ref = useOutsideClose(closeMenu, menuRef);
+  function positionMenu() {
+    const rect = ref.current?.querySelector('button')?.getBoundingClientRect();
+    if (!rect) return;
+    const height = window.innerHeight;
+    const width = Math.min(Math.max(rect.width, 300), window.innerWidth - 24);
+    const below = height - rect.bottom;
+    const above = below < 320 && rect.top > below;
+    setPosition({ position: 'fixed', top: above ? 'auto' : rect.bottom + 4,
+      bottom: above ? height - rect.top + 4 : 'auto',
+      left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)), width,
+      maxHeight: Math.min(420, Math.max(100, (above ? rect.top : below) - 16)), zIndex: 10000 });
+  }
+  useEffect(() => {
+    if (!open) return;
+    searchRef.current?.focus({ preventScroll: true });
+    const reposition = event => {
+      if (!event?.target?.nodeType || !menuRef.current?.contains(event.target)) positionMenu();
+    };
+    const escape = event => { if (event.key === 'Escape') closeMenu(); };
+    window.addEventListener('resize', reposition);
+    window.addEventListener('scroll', reposition, true);
+    document.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('resize', reposition);
+      window.removeEventListener('scroll', reposition, true);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [open]);
 
   function toggle(value) {
     onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
@@ -55,26 +86,28 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
       <button
         type="button"
         className={`filter-trigger ${selected.length ? "active" : ""}`}
-        onClick={() => setOpen((value) => {
+        onClick={() => { positionMenu(); setOpen((value) => {
           if (value) setQuery("");
           return !value;
-        })}
+        }); }}
         aria-expanded={open}
+        aria-label={label}
+        aria-haspopup="listbox"
         onKeyDown={(event) => { if ((event.key === "Backspace" || event.key === "Delete") && selected.length) { event.preventDefault(); onChange(selected.slice(0, -1)); } if (event.key === "Escape") closeMenu(); }}
       >
         <span>{summary}</span>
         <ChevronDown size={14} aria-hidden="true" />
       </button>
-      {open ? (
-        <div className="filter-menu">
+      {open ? createPortal((
+        <div ref={menuRef} className="filter-menu filter-menu-portal" style={position}>
           <label className="filter-search">
             <Search size={14} aria-hidden="true" />
             <input
+              ref={searchRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder={`Search ${String(label || "options").toLowerCase()}`}
               aria-label={`Search ${label}`}
-              autoFocus
               onKeyDown={(event) => { if (event.key === "Escape") closeMenu(); if (event.key === "Backspace" && !query && selected.length) { event.preventDefault(); onChange(selected.slice(0, -1)); } }}
             />
             {query ? (
@@ -83,7 +116,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
               </button>
             ) : null}
           </label>
-          <div className="filter-option-list" role="listbox" aria-label={label}>
+          <div className="filter-option-list" role="listbox" aria-multiselectable="true" aria-label={label}>
             {visibleOptions.map((option) => (
               <button
                 key={option}
@@ -111,12 +144,12 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
             <button type="button" className="filter-apply" onClick={closeMenu}>OK</button>
           </div>
         </div>
-      ) : null}
+      ), document.body) : null}
     </div>
   );
 }
 
-export function SingleSelect({ label, options, value, onChange, placeholder = "Select", allowClear = true, compact = false, disabled = false, portal = false }) {
+export function SingleSelect({ label, options, value, onChange, placeholder = "Select", allowClear = true, compact = false, disabled = false, portal = true }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState(null);

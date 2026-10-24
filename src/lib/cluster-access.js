@@ -21,7 +21,7 @@ function scopeDirectory(directory, access) {
   const clientIds = new Set(clients.map(row => row.id));
   const projects = (directory.projects || []).filter(row => clientIds.has(row.clientId));
   const projectIds = new Set(projects.map(row => row.id));
-  const internalPocs = (directory.internalPocs || []).filter(row => clusters.has(row.clusterId));
+  const internalPocs = (directory.internalPocs || []).filter(row => (row.clusterIds || [row.clusterId]).some(id => clusters.has(id)));
   const internalIds = new Set(internalPocs.map(row => row.id));
   return {
     ...directory,
@@ -122,6 +122,7 @@ async function authorizeClusterRequest(store, access, method, pathname, body = {
     for (const [key, item] of Object.entries(value)) {
       if (refs[key] && item) requireId(refs[key], item);
       else if (key === 'projectIds' && Array.isArray(item)) item.forEach(id => requireId('project', id));
+      else if (key === 'clusterIds' && Array.isArray(item)) item.forEach(id => requireId('cluster', id));
       else if (['clientPocIds', 'pocIds'].includes(key) && Array.isArray(item)) item.forEach(id => requireId('poc', id));
       else if (key === 'clientIds' && Array.isArray(item)) item.forEach(id => requireId('client', id));
       else if (typeof item === 'object') walk(item);
@@ -129,9 +130,14 @@ async function authorizeClusterRequest(store, access, method, pathname, body = {
   };
   walk(body);
   if (body.clusterId !== undefined && !allowed.cluster.has(body.clusterId)) deny();
+  if (body.clusterIds !== undefined && (!Array.isArray(body.clusterIds) || !body.clusterIds.length || body.clusterIds.some(id => !allowed.cluster.has(id)))) deny();
   const internalEdit = /^\/api\/admin\/internal-pocs\/([^/]+)$/.exec(pathname);
   if (internalEdit && method !== 'GET') {
     const id = decodeURIComponent(internalEdit[1]);
+    const person = (directory.internalPocs || []).find(row => row.id === id);
+    // Editing a shared person also affects their other clusters. Only an
+    // administrator with every assigned cluster (or Super Admin) may do so.
+    if ((person?.clusterIds || [person?.clusterId]).some(clusterId => !allowed.cluster.has(clusterId))) deny();
     const performance = await store.getProjectPerformanceData();
     if ((performance.projects || []).some(project => !allowed.project.has(project.id) && Object.values(project.team || {}).includes(id))) deny();
     if ((directory.projectServices || []).some(service => service.internalPocId === id && !allowed.project.has(service.projectId))) deny();
@@ -139,7 +145,10 @@ async function authorizeClusterRequest(store, access, method, pathname, body = {
   }
   if (pathname === '/api/admin/pocs/bulk-control') (body.updates || []).forEach(row => requireId('poc', row.id));
   if (method === 'POST' && pathname === '/api/admin/clients') requireId('cluster', body.clusterId);
-  if (method === 'POST' && pathname === '/api/admin/internal-pocs') requireId('cluster', body.clusterId);
+  if (method === 'POST' && pathname === '/api/admin/internal-pocs') {
+    if (body.clusterIds?.length) body.clusterIds.forEach(id => requireId('cluster', id));
+    else requireId('cluster', body.clusterId);
+  }
   return { directory, scoped };
 }
 

@@ -7437,6 +7437,15 @@ async function handleApiRequest(request) {
     return json(200, { levels: result.levels });
   }
 
+  if ((method === 'POST' && pathname === '/api/admin/internal-pocs') || (method === 'PATCH' && /^\/api\/admin\/internal-pocs\/[^/]+$/.test(pathname))) {
+    if (body.clusterIds !== undefined) {
+      if (!Array.isArray(body.clusterIds) || body.clusterIds.some(id => typeof id !== 'string')) return error(400, 'Select valid clusters');
+      const directory = await store.getDirectory();
+      if (body.clusterIds.some(id => !directory.clusters.some(cluster => cluster.id === id))) return error(400, 'Select valid clusters');
+      body.clusterIds = [...new Set(body.clusterIds)];
+      body.clusterId = body.clusterIds[0] || null;
+    }
+  }
   if (method === "POST" && pathname === "/api/admin/internal-pocs") {
     if (!String(body.name || "").trim()) return error(400, "Name is required");
     if (body.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {

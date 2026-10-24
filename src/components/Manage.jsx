@@ -7,12 +7,13 @@ import { parseCsatWorkbook } from "../lib/workbook-import";
 import { SearchableSelect, FilterBar, MultiSelect, SingleSelect } from "./Filters.jsx";
 import { Button, EmptyState, ErrorBlock, LoadingBlock, Panel } from "./Ui.jsx";
 import UserClusterAccess from "./UserClusterAccess.jsx";
+import { appUserFingerprint, internalPocFingerprint, standardFingerprint, pocControlFingerprint, navigateManageSection } from '../lib/manage-drafts';
 import {
   APP_PERMISSION_LABELS, defaultPermissions, hasPermission, permissionsForRole
 } from "../permissions";
 
 const EMPTY_INTERNAL = {
-  name: "", email: "", phone: "", clusterId: "",
+  name: "", email: "", phone: "", clusterId: "", clusterIds: [],
   departmentId: "", subDepartmentId: "", reportingManagerId: "", active: true
 };
 const EMPTY_SETUP_POC = {
@@ -73,7 +74,7 @@ function createStandardDraft() {
 }
 
 function createInternalPocDraft(clusterId = "") {
-  return { ...EMPTY_INTERNAL, clusterId, draftId: nextManageDraftId("internal-poc") };
+  return { ...EMPTY_INTERNAL, clusterId, clusterIds: clusterId ? [clusterId] : [], draftId: nextManageDraftId("internal-poc") };
 }
 
 function createOrganizationNameDraft(kind) {
@@ -269,15 +270,15 @@ function InternalPocForm({ value, clusters, departments, subDepartments, people,
         <Field label="Name">
           <input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} />
         </Field>
-        <Field label="Email" hint="manager alerts are sent here">
+        <Field label="Email" hint="CSAT email access is configured under Application Users">
           <input value={value.email || ""} onChange={(event) => onChange({ ...value, email: event.target.value })} />
         </Field>
         <Field label="Phone">
           <input value={value.phone || ""} onChange={(event) => onChange({ ...value, phone: event.target.value })} />
         </Field>
-        <SingleSelect label="Cluster" value={value.clusterId || ""} placeholder="Not set"
-          options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
-          onChange={(clusterId) => onChange({ ...value, clusterId })} />
+        <MultiSelect label="Assigned Clusters" selected={value.clusterIds || (value.clusterId ? [value.clusterId] : [])} allLabel="Not set"
+          options={clusters.map(cluster => cluster.id)} renderOption={id => clusters.find(cluster => cluster.id === id)?.name || id}
+          onChange={clusterIds => onChange({ ...value, clusterIds, clusterId: clusterIds[0] || '' })} />
         <SingleSelect label="Department" value={value.departmentId || ""} placeholder="Not set"
           options={departments.map((department) => ({ value: department.id, label: department.name }))}
           onChange={(departmentId) => onChange({ ...value, departmentId, subDepartmentId: "" })} />
@@ -462,6 +463,7 @@ function internalPocRowsForBatch(people) {
     email: person.email || "",
     phone: person.phone || "",
     clusterId: person.clusterId || "",
+    clusterIds: person.clusterIds || (person.clusterId ? [person.clusterId] : []),
     departmentId: person.departmentId || "",
     subDepartmentId: person.subDepartmentId || "",
     reportingManagerId: person.reportingManagerId || "",
@@ -496,9 +498,9 @@ function InternalPocBatchForm({ rows, clusters, departments, subDepartments, peo
                 <Field label="Phone">
                   <input value={row.phone} onChange={(event) => updateRow(index, { phone: event.target.value })} />
                 </Field>
-                <SingleSelect label="Cluster" value={row.clusterId} placeholder="Not set"
-                  options={clusters.map((cluster) => ({ value: cluster.id, label: cluster.name }))}
-                  onChange={(clusterId) => updateRow(index, { clusterId })} />
+                <MultiSelect label="Assigned Clusters" selected={row.clusterIds || (row.clusterId ? [row.clusterId] : [])} allLabel="Not set"
+                  options={clusters.map(cluster => cluster.id)} renderOption={id => clusters.find(cluster => cluster.id === id)?.name || id}
+                  onChange={clusterIds => updateRow(index, { clusterIds, clusterId: clusterIds[0] || '' })} />
                 <SingleSelect label="Department" value={row.departmentId} placeholder="Not set"
                   options={departments.map((department) => ({ value: department.id, label: department.name }))}
                   onChange={(departmentId) => updateRow(index, { departmentId, subDepartmentId: "" })} />
@@ -1447,6 +1449,8 @@ export default function Manage({ onReload, currentUser = null }) {
   const [cleanupPinError, setCleanupPinError] = useState("");
   const [cleaning, setCleaning] = useState("");
   const [appUsers, setAppUsers] = useState([]);
+  const savedAppUsers = useRef(new Map());
+  const savedStandards = useRef(new Map());
   const [appUserRoleOpenVersion, setAppUserRoleOpenVersion] = useState({});
   const [performanceStandards, setPerformanceStandards] = useState([]);
   const [serviceChangeRequests, setServiceChangeRequests] = useState([]);
@@ -1508,8 +1512,20 @@ export default function Manage({ onReload, currentUser = null }) {
       ]);
       setDirectory(data);
       const [userResult, standardResult, projectTeamResult, serviceChangeResult] = optionalResults;
-      if (userResult.status === "fulfilled") setAppUsers((userResult.value.users || []).filter(Boolean));
-      if (standardResult.status === "fulfilled") setPerformanceStandards((standardResult.value.values || []).filter(Boolean));
+      if (userResult.status === "fulfilled") {
+        const users = (userResult.value.users || []).filter(Boolean);
+        const previous = savedAppUsers.current;
+        setAppUsers(current => users.map(user => {
+          const draft = current.find(row => row.id === user.id);
+          return draft && previous.has(user.id) && appUserFingerprint(draft) !== previous.get(user.id) ? draft : user;
+        }));
+        savedAppUsers.current = new Map(users.map(user => [user.id, appUserFingerprint(user)]));
+      }
+      if (standardResult.status === "fulfilled") {
+        const values = (standardResult.value.values || []).filter(Boolean);
+        setPerformanceStandards(values);
+        savedStandards.current = new Map(values.map(item => [item.id, standardFingerprint(item)]));
+      }
       if (serviceChangeResult.status === "fulfilled") setServiceChangeRequests((serviceChangeResult.value.requests || []).filter(Boolean));
       if (projectTeamResult.status === "fulfilled") {
         setProjectTeamRows((projectTeamResult.value.projects || []).filter(Boolean).map((project) => ({
@@ -1644,7 +1660,7 @@ export default function Manage({ onReload, currentUser = null }) {
         return remaining.length ? remaining : [createAppUserDraft()];
       });
     }
-    if (!pending.length) {
+    if (!pending.length && !includeExistingChanges) {
       showToast(`${skippedExisting} selected user${skippedExisting === 1 ? " is" : "s are"} already saved and ${skippedExisting === 1 ? "was" : "were"} removed from the pending list.`);
       return;
     }
@@ -1702,6 +1718,7 @@ export default function Manage({ onReload, currentUser = null }) {
           ...(isSuperAdmin ? { externalLoginAllowed: row.externalLoginAllowed === true } : {})
         }, "POST");
         added += 1;
+        savedAppUsers.current.set(result.user.id, appUserFingerprint(result.user));
         addedRoles.add(result.user.role);
         addedEmails.push(String(result.user.email || row.email).trim().toLowerCase());
         setAppUsers((current) => [...current, result.user].sort((left, right) => left.email.localeCompare(right.email)));
@@ -1709,8 +1726,8 @@ export default function Manage({ onReload, currentUser = null }) {
       }
       setNewAppUsers((current) => current.length ? current : [createAppUserDraft()]);
       if (includeExistingChanges) {
-        for (const user of appUsers) {
-          await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {
+        for (const user of appUsers.filter(row => appUserFingerprint(row) !== savedAppUsers.current.get(row.id))) {
+          const result = await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {
             name: user.name,
             role: user.role,
             permissions: user.permissions,
@@ -1719,6 +1736,8 @@ export default function Manage({ onReload, currentUser = null }) {
             internalPocId: user.role === "project_user" ? user.internalPocId || null : null,
             active: user.active
           }, "PATCH");
+          savedAppUsers.current.set(user.id, appUserFingerprint(result.user));
+          setAppUsers(current => current.map(item => item.id === user.id ? result.user : item));
           updated += 1;
         }
       }
@@ -1730,6 +1749,7 @@ export default function Manage({ onReload, currentUser = null }) {
       const missingEmails = addedEmails.filter((email) => !returnedEmails.has(email));
       if (missingEmails.length) throw new Error(`Saved, but the user list did not return: ${missingEmails.join(", ")}`);
       setAppUsers(returnedUsers);
+      savedAppUsers.current = new Map(returnedUsers.map(user => [user.id, appUserFingerprint(user)]));
       setAppUserRoleOpenVersion((current) => {
         const next = { ...current };
         for (const role of addedRoles) next[role] = (next[role] || 0) + 1;
@@ -1751,6 +1771,8 @@ export default function Manage({ onReload, currentUser = null }) {
       await addAppUsers({ includeExistingChanges: true });
       return;
     }
+    const changedUsers = appUsers.filter(user => appUserFingerprint(user) !== savedAppUsers.current.get(user.id));
+    if (!changedUsers.length) { showToast('No application user changes to save.'); return; }
     const invalid = appUsers.find((user) => user.role === "project_user" && !user.internalPocId);
     if (invalid) {
       showToast(`Select an Internal POC for ${invalid.email}.`);
@@ -1767,7 +1789,7 @@ export default function Manage({ onReload, currentUser = null }) {
     setSaving(true);
     let savedCount = 0;
     try {
-      for (const user of appUsers) {
+      for (const user of changedUsers) {
         const result = await apiWrite(`/api/admin/app-users/${encodeURIComponent(user.id)}`, {
           name: user.name,
           role: user.role,
@@ -1778,6 +1800,7 @@ export default function Manage({ onReload, currentUser = null }) {
           active: user.active
         }, "PATCH");
         savedCount += 1;
+        savedAppUsers.current.set(user.id, appUserFingerprint(result.user));
         setAppUsers((current) => current.map((item) => item.id === user.id ? result.user : item));
       }
       showToast(`${savedCount} application user${savedCount === 1 ? "" : "s"} updated without leaving this section.`);
@@ -1836,17 +1859,20 @@ export default function Manage({ onReload, currentUser = null }) {
       showToast(`${duplicate} appears more than once in ${PERFORMANCE_STANDARD_LABELS[category]}.`);
       return;
     }
+    const changed = existing.filter(item => standardFingerprint(item) !== savedStandards.current.get(item.id));
+    if (!changed.length && !drafts.length) { showToast('No standard changes to save.'); return; }
     setSaving(true);
     let updatedCount = 0;
     let addedCount = 0;
     try {
-      for (const item of existing) {
+      for (const item of changed) {
         const result = await apiWrite(`/api/admin/performance-standards/${encodeURIComponent(item.id)}`, {
           value: item.value,
           sortOrder: item.sortOrder,
           active: item.active
         }, "PATCH");
         updatedCount += 1;
+        savedStandards.current.set(result.value.id, standardFingerprint(result.value));
         setPerformanceStandards((current) => current.map((value) => value.id === item.id ? result.value : value));
       }
       for (const [index, draft] of drafts.entries()) {
@@ -1857,6 +1883,7 @@ export default function Manage({ onReload, currentUser = null }) {
           sortOrder: existing.length + index
         }, "POST");
         addedCount += 1;
+        savedStandards.current.set(result.value.id, standardFingerprint(result.value));
         setPerformanceStandards((current) => [...current, result.value]);
         setStandardDrafts((current) => ({
           ...current,
@@ -2150,7 +2177,7 @@ export default function Manage({ onReload, currentUser = null }) {
       await loadAll(kind === "clients" && clientIds.includes(clientId) ? "" : clientId);
       onReload();
       showToast(kind === "clusters"
-        ? `${result.clustersDeleted} cluster${result.clustersDeleted === 1 ? "" : "s"} permanently deleted. Assigned clients and internal POCs were kept without a cluster.`
+        ? `${result.clustersDeleted} cluster${result.clustersDeleted === 1 ? "" : "s"} permanently deleted. Assigned clients and internal POCs were kept; only the deleted cluster assignments were removed.`
         : kind === "pocs"
           ? `${result.pocsDeleted} client POC${result.pocsDeleted === 1 ? "" : "s"} permanently deleted.`
           : kind === "projects"
@@ -2400,7 +2427,9 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function saveClientBatch() {
-    const rows = clientBatch || [];
+    const baseline = clientRowsForBatch(directory?.clients || []);
+    const rows = (clientBatch || []).filter(row => JSON.stringify(row) !== JSON.stringify(baseline.find(client => client.id === row.id)));
+    if (!rows.length) { showToast('No client changes to save.'); return; }
     if (rows.some((row) => !String(row.name || "").trim())) {
       showToast("Every client needs a name.");
       return;
@@ -2424,7 +2453,8 @@ export default function Manage({ onReload, currentUser = null }) {
   }
 
   async function saveInternalBatch() {
-    const rows = internalBatch || [];
+    const rows = (internalBatch || []).filter(row => !row.id || internalPocFingerprint(row) !== internalPocFingerprint((directory?.internalPocs || []).find(person => person.id === row.id) || {}));
+    if (!rows.length) { showToast('No Internal POC changes to save.'); return; }
     if (rows.some((row) => !String(row.name || "").trim())) {
       showToast("Every internal POC needs a name.");
       return;
@@ -2606,9 +2636,10 @@ export default function Manage({ onReload, currentUser = null }) {
 
   async function savePocControl() {
     const scopedProjectIds = new Set(pageScopedProjects().map((project) => project.id));
-    const scopedRows = pocControlRows.filter((row) => scopedProjectIds.has(row.projectId));
+    const scopedRows = pocControlRows.filter((row) => scopedProjectIds.has(row.projectId))
+      .filter(row => pocControlFingerprint(row) !== pocControlFingerprint((directory?.clientPocs || []).find(poc => poc.id === row.id) || {}));
     if (!scopedRows.length) {
-      showToast("No POC assignments match the top Cluster and Client filters.");
+      showToast("No POC changes to save within the top Cluster and Client filters.");
       return;
     }
     setSaving(true);
@@ -2972,7 +3003,7 @@ export default function Manage({ onReload, currentUser = null }) {
   // retains its original meaning.
   const peopleBeforeClusterFilter = clientId ? peopleOnThisClient : showAllInternal ? people : peopleOnThisClient;
   const visiblePeople = clusterFilterId
-    ? peopleBeforeClusterFilter.filter((person) => person.clusterId === clusterFilterId)
+    ? peopleBeforeClusterFilter.filter((person) => (person.clusterIds || [person.clusterId]).includes(clusterFilterId))
     : peopleBeforeClusterFilter;
 
   const departments = directory?.departments || [];
@@ -3092,24 +3123,24 @@ export default function Manage({ onReload, currentUser = null }) {
       </p>
 
       <nav className="manage-section-nav" aria-label="Manage sections">
-        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-control")?.scrollIntoView({ behavior: "smooth" })}>POC Control</button> : null}
-        {canManageAutomation ? <button type="button" onClick={() => document.getElementById("manage-automatic-feedback")?.scrollIntoView({ behavior: "smooth" })}>Feedback Delivery</button> : null}
-        {canBulkSend ? <button type="button" onClick={() => document.getElementById("manage-bulk-sends")?.scrollIntoView({ behavior: "smooth" })}>Bulk Sends</button> : null}
-        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-poc-influence")?.scrollIntoView({ behavior: "smooth" })}>POC Influence</button> : null}
-        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-workbook")?.scrollIntoView({ behavior: "smooth" })}>Excel Onboarding</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-clients")?.scrollIntoView({ behavior: "smooth" })}>Clients &amp; Clusters</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>Projects</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-project-status")?.scrollIntoView({ behavior: "smooth" })}>Project Status</button> : null}
-        {canManageProjectTeams ? <button type="button" onClick={() => document.getElementById("manage-project-teams")?.scrollIntoView({ behavior: "smooth" })}>Project Teams</button> : null}
-        {canManagePocs ? <button type="button" onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>Client POCs</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>Services &amp; Owners</button> : null}
-        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-service-catalog")?.scrollIntoView({ behavior: "smooth" })}>Standard Service Catalogue</button> : null}
-        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-organization-standards")?.scrollIntoView({ behavior: "smooth" })}>Organization Standards</button> : null}
-        {canManageInternalPocs ? <button type="button" onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>Internal POCs</button> : null}
-        {canManageUsers ? <button type="button" onClick={() => document.getElementById("manage-app-users")?.scrollIntoView({ behavior: "smooth" })}>Application Users</button> : null}
-        {canManageCatalogues ? <button type="button" onClick={() => document.getElementById("manage-performance-standards")?.scrollIntoView({ behavior: "smooth" })}>Performance Standards</button> : null}
-        {isSuperAdmin ? <button type="button" onClick={() => document.getElementById("manage-service-change-requests")?.scrollIntoView({ behavior: "smooth" })}>Service Requests ({scopedServiceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
-        {canManageRecords ? <button type="button" onClick={() => document.getElementById("manage-cleanup")?.scrollIntoView({ behavior: "smooth" })}>Data Cleanup</button> : null}
+        {canManagePocs ? <button type="button" onClick={() => navigateManageSection("manage-poc-control")}>POC Control</button> : null}
+        {canManageAutomation ? <button type="button" onClick={() => navigateManageSection("manage-automatic-feedback")}>Feedback Delivery</button> : null}
+        {canBulkSend ? <button type="button" onClick={() => navigateManageSection("manage-bulk-sends")}>Bulk Sends</button> : null}
+        {canManagePocs ? <button type="button" onClick={() => navigateManageSection("manage-poc-influence")}>POC Influence</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => navigateManageSection("manage-workbook")}>Excel Onboarding</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => navigateManageSection("manage-clients")}>Clients &amp; Clusters</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => navigateManageSection("manage-projects")}>Projects</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => navigateManageSection("manage-project-status")}>Project Status</button> : null}
+        {canManageProjectTeams ? <button type="button" onClick={() => navigateManageSection("manage-project-teams")}>Project Teams</button> : null}
+        {canManagePocs ? <button type="button" onClick={() => navigateManageSection("manage-client-pocs")}>Client POCs</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => navigateManageSection("manage-services")}>Services &amp; Owners</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => navigateManageSection("manage-service-catalog")}>Standard Service Catalogue</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => navigateManageSection("manage-organization-standards")}>Organization Standards</button> : null}
+        {canManageInternalPocs ? <button type="button" onClick={() => navigateManageSection("manage-internal-pocs")}>Internal POCs</button> : null}
+        {canManageUsers ? <button type="button" onClick={() => navigateManageSection("manage-app-users")}>Application Users</button> : null}
+        {canManageCatalogues ? <button type="button" onClick={() => navigateManageSection("manage-performance-standards")}>Performance Standards</button> : null}
+        {isSuperAdmin ? <button type="button" onClick={() => navigateManageSection("manage-service-change-requests")}>Service Requests ({scopedServiceChangeRequests.filter((request) => request.status === "pending").length})</button> : null}
+        {canManageRecords ? <button type="button" onClick={() => navigateManageSection("manage-cleanup")}>Data Cleanup</button> : null}
       </nav>
 
       {canManageUsers ? <section id="manage-app-users" className="admin-collapsible-panel manage-secondary-section">
@@ -3306,16 +3337,16 @@ export default function Manage({ onReload, currentUser = null }) {
           owner means an issue nobody hears about. */}
       {clientId && (canManageRecords || canManagePocs || canManageInternalPocs) ? (
         <nav className="setup-steps" aria-label="Manage section shortcuts">
-          {canManageRecords ? <button type="button" className={projects.length ? "done" : "todo"} onClick={() => document.getElementById("manage-projects")?.scrollIntoView({ behavior: "smooth" })}>
+          {canManageRecords ? <button type="button" className={projects.length ? "done" : "todo"} onClick={() => navigateManageSection("manage-projects")}>
             1. Projects{projects.length ? ` (${projects.length})` : ""}
           </button> : null}
-          {canManagePocs ? <button type="button" className={pocs.length ? "done" : "todo"} onClick={() => document.getElementById("manage-client-pocs")?.scrollIntoView({ behavior: "smooth" })}>
+          {canManagePocs ? <button type="button" className={pocs.length ? "done" : "todo"} onClick={() => navigateManageSection("manage-client-pocs")}>
             2. Client POCs{pocs.length ? ` (${pocs.length})` : ""}
           </button> : null}
-          {canManageRecords ? <button type="button" className={services.length ? "done" : "todo"} onClick={() => document.getElementById("manage-services")?.scrollIntoView({ behavior: "smooth" })}>
+          {canManageRecords ? <button type="button" className={services.length ? "done" : "todo"} onClick={() => navigateManageSection("manage-services")}>
             3. Services{services.length ? ` (${services.length})` : ""}
           </button> : null}
-          {canManageInternalPocs ? <button type="button" className={peopleOnThisClient.length ? "done" : "todo"} onClick={() => document.getElementById("manage-internal-pocs")?.scrollIntoView({ behavior: "smooth" })}>
+          {canManageInternalPocs ? <button type="button" className={peopleOnThisClient.length ? "done" : "todo"} onClick={() => navigateManageSection("manage-internal-pocs")}>
             4. Internal owners{peopleOnThisClient.length ? ` (${peopleOnThisClient.length})` : ""}
           </button> : null}
         </nav>
@@ -4150,6 +4181,7 @@ export default function Manage({ onReload, currentUser = null }) {
             <span><strong>Internal POCs</strong><small>{displayedPeople.length} displayed{showAllInternal ? ` · ${people.length} across the agency` : ` · ${peopleOnThisClient.length} on this client`}</small></span>
           </summary>
           <div className="admin-collapsible-body">
+          <p className="form-note">An Internal POC can belong to multiple clusters. Sign-in access and CSAT email switches are configured separately under Application Users.</p>
           <div className="button-row internal-poc-section-actions">
             <button type="button" className="row-link" onClick={() => setShowAllInternal((value) => !value)}>
               {showAllInternal ? "Show this client only" : "Show everyone"}
@@ -4210,7 +4242,7 @@ export default function Manage({ onReload, currentUser = null }) {
                   const subDepartment = subDepartments.find((item) => item.id === person.subDepartmentId);
                   const manager = peopleById.get(person.reportingManagerId);
                   return <div key={person.id} className="dtable-row">
-                    <strong>{person.name}</strong>
+                    <span className="internal-person-identity"><strong>{person.name}</strong><small>{(person.clusterIds || [person.clusterId]).filter(Boolean).map(id => clusters.find(cluster => cluster.id === id)?.name || id).join(' · ') || 'No Clusters Assigned'}</small></span>
                     <span className={person.email ? "" : "missing"}>{person.email || "not set"}</span>
                     <span>{subDepartment?.name || "--"}</span>
                     <span className={manager ? "" : "missing"}>{manager?.name || "not set"}</span>
@@ -4218,7 +4250,7 @@ export default function Manage({ onReload, currentUser = null }) {
                     <div className="row-actions">
                       <button type="button" className="icon-button" aria-label={`Edit ${person.name}`} onClick={() => {
                         closeForms();
-                        setInternalForm({ id: person.id, name: person.name, email: person.email || "", phone: person.phone || "", clusterId: person.clusterId || "", departmentId: person.departmentId || "", subDepartmentId: person.subDepartmentId || "", reportingManagerId: person.reportingManagerId || "", active: person.active });
+                        setInternalForm({ id: person.id, name: person.name, email: person.email || "", phone: person.phone || "", clusterId: person.clusterId || "", clusterIds: person.clusterIds || (person.clusterId ? [person.clusterId] : []), departmentId: person.departmentId || "", subDepartmentId: person.subDepartmentId || "", reportingManagerId: person.reportingManagerId || "", active: person.active });
                       }}><Pencil size={14} aria-hidden="true" /></button>
                       <button type="button" className="icon-button danger" aria-label={`Delete ${person.name}`} disabled={saving} onClick={() => deleteInternalPoc(person)}><Trash2 size={14} aria-hidden="true" /></button>
                     </div>

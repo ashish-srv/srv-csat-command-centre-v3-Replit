@@ -11,7 +11,7 @@
     "preview": "vite preview --host 0.0.0.0 --port 4173",
     "check": "eslint . && node --check server.js && node --check server.local.js && node --check src/server/api-handler.js && node --check src/lib/supabase-store.js && node --check src/lib/postgres-store.js && node --check src/lib/whatsapp-state-machine.js && node --check src/lib/gemini.js && node --check src/lib/n8n.js && node --check src/lib/store.js && node --check src/lib/csat-workbook-template.js && node --check src/lib/email.js && node --check scripts/migrate-postgres.js && node --check scripts/import-supabase-postgres.js",
     "test:state": "node scripts/state-machine-smoke.js",
-    "test:cluster-access": "node scripts/cluster-access-smoke.js && node scripts/cluster-http-smoke.js && node scripts/consolidated-export-smoke.js && npm run test:n8n-email",
+    "test:cluster-access": "node scripts/cluster-access-smoke.js && node scripts/cluster-http-smoke.js && node scripts/consolidated-export-smoke.js && node scripts/manage-clusters-smoke.js && npm run test:n8n-email",
     "test:n8n-email": "node scripts/n8n-email-workflows-smoke.js && node scripts/email-theme-smoke.js",
     "test:feedback-history": "node scripts/feedback-history-replay.js",
     "test:acknowledgements": "node scripts/acknowledgement-continuity-smoke.js",

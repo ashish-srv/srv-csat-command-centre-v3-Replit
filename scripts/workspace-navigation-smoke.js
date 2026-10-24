@@ -123,6 +123,7 @@ class ComponentHarness {
       require: (name) => name === "react" ? react
         : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" }
           : name === "react-dom" ? { createPortal: (node) => node }
+          : name.includes("manage-drafts") ? (() => { const m = { exports: {} }; vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, "../src/lib/manage-drafts.js"), "utf8"), { format: "cjs" }).code, { module: m, exports: m.exports, window: this.window, document }); return m.exports; })()
           : name.includes("performance-metrics") ? (() => { const m = { exports: {} }; vm.runInNewContext(transformSync(fs.readFileSync(path.join(__dirname, "../src/lib/performance-metrics.js"), "utf8"), { format: "cjs" }).code, { module: m, exports: m.exports }); return m.exports; })()
           : config.modules?.[name] || (/(?:^|\/)api$/.test(name) ? api
             : name.includes("permissions") || name.includes("format") || name.includes("Filters")
@@ -145,6 +146,8 @@ class ComponentHarness {
         if (!ref.current) ref.current = {
           scrollTop: 0, scrollHeight: 100,
           contains: () => false,
+          querySelector: () => ref.current,
+          focus: () => {},
           getBoundingClientRect: () => ({ top: 100, bottom: 140, left: 30, width: 300 }),
           scrollIntoView: () => this.scrolls.push(node.props.id || node.type)
         };

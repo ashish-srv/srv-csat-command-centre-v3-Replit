@@ -188,6 +188,7 @@ function toInternalPocRow(row) {
     email: row.email,
     phone: row.phone,
     clusterId: row.cluster_id,
+    clusterIds: row.cluster_ids || (row.cluster_id ? [row.cluster_id] : []),
     departmentId: row.department_id,
     subDepartmentId: row.sub_department_id,
     reportingManagerId: row.reporting_manager_id,
@@ -2503,6 +2504,7 @@ class SupabaseStore {
         email: row.email,
         phone: row.phone,
         clusterId: row.cluster_id,
+        clusterIds: row.cluster_ids || (row.cluster_id ? [row.cluster_id] : []),
         departmentId: row.department_id,
         subDepartmentId: row.sub_department_id,
         reportingManagerId: row.reporting_manager_id,
@@ -2637,7 +2639,8 @@ class SupabaseStore {
         name: input.name,
         email: input.email || null,
         phone: input.phone ? digits(input.phone) : null,
-        cluster_id: input.clusterId || null,
+        cluster_id: input.clusterIds ? input.clusterIds[0] || null : input.clusterId || null,
+        ...(input.clusterIds !== undefined ? { cluster_ids: [...new Set(input.clusterIds)] } : {}),
         department_id: input.departmentId || null,
         sub_department_id: input.subDepartmentId || null,
         reporting_manager_id: input.reportingManagerId || null,
@@ -2669,6 +2672,10 @@ class SupabaseStore {
     if (input.email !== undefined) body.email = input.email || null;
     if (input.phone !== undefined) body.phone = input.phone ? digits(input.phone) : null;
     if (input.clusterId !== undefined) body.cluster_id = input.clusterId || null;
+    if (input.clusterIds !== undefined) {
+      body.cluster_ids = [...new Set(input.clusterIds)];
+      body.cluster_id = body.cluster_ids[0] || null;
+    }
     if (input.departmentId !== undefined) body.department_id = input.departmentId || null;
     if (input.subDepartmentId !== undefined) body.sub_department_id = input.subDepartmentId || null;
     if (input.reportingManagerId !== undefined) body.reporting_manager_id = input.reportingManagerId || null;
