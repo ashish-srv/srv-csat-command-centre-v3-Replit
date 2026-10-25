@@ -85,6 +85,10 @@ async function main() {
   await S.runBirthdaySchedule(args);
   check(repo.queue.filter(j => j.kind === 'decision').length, 2);
   check(new Set(repo.queue.map(j => j.payload.to[0])).size, 2);
+  check((await store.listAppUsers()).some(u => ['one@example.com','two@example.com'].includes(u.email)), false);
+  check(repo.queue.map(j => j.payload.to[0]).sort(), ['one@example.com','two@example.com']);
+  // Internal gift owners receive signed links, even without app-user records.
+  check(repo.queue.every(j => j.payload.html.includes('/api/automation/birthdays/action')), true);
   check(repo.queue[0].payload.html.includes('&amp;gift=Cake'),true);
   const auditCount = repo.audit.length;
   await S.runBirthdaySchedule(args);

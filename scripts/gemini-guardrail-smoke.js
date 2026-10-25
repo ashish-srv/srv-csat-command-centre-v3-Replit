@@ -613,6 +613,19 @@ const turn = {
       "a mixed observation must not suppress the service feedback in the same message");
   });
 
+  await scenario("Stable service identity survives corrected display spelling without inventing a service", async () => {
+    const project = { services: [{ serviceKey: 'creative-123', name: 'Cretives' }] };
+    const parsed = { intent: 'feedback', sentiment: 'positive', serviceFeedback: [
+      { serviceKey: 'creative-123', serviceHint: 'Creatives', summary: 'The service has been good', sentiment: 'positive' },
+      { serviceKey: 'invented-service', serviceHint: 'Senior Involvement', summary: 'Unsupported concern', sentiment: 'negative' }
+    ] };
+    const read = normaliseReplyInterpretation(parsed, project, 'goood');
+    assert.deepStrictEqual(read.captured.map(item => item.serviceKey), ['creative-123']);
+    assert.deepStrictEqual(read.serviceKeys, ['creative-123']);
+    project.services[0].name = 'Creatives';
+    assert.deepStrictEqual(normaliseReplyInterpretation(parsed, project, 'goood').captured, read.captured);
+  });
+
   await scenario("A pure defer cannot become service feedback merely from a service hint", async () => {
     const interpreted = normaliseReplyInterpretation({
       intent: "defer",

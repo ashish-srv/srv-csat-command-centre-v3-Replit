@@ -363,7 +363,9 @@ function detectNumber(text) {
   // The old pattern capped at two digits and rejected a decimal point, so
   // "100" and "6.5" both looked like no number at all — the client was asked
   // the same question again with no explanation.
-  const match = value.match(/(^|[^\d.])(-?\d+(?:\.\d+)?)(?:\s*(?:\/|out of)\s*(\d+))?(?:[^\d]|$)/);
+  // Mobile words can contain digits ("gr8"). Only standalone numbers are
+  // candidate scores; never pull a digit out of a word in any language.
+  const match = value.match(/(^|[^\p{L}\p{N}_.])(-?\d+(?:\.\d+)?)(?:\s*(?:\/|out of)\s*(\d+))?(?=$|[^\p{L}\p{N}_])/u);
   if (match) {
     // "-3" must reach the out-of-range handler, not be read as a 3.
     const raw = match[1].trim() === "-" || /-\s*$/.test(match[1]) ? `-${match[2].replace("-", "")}` : match[2];
@@ -565,13 +567,15 @@ function isOutOfScope(text) {
 function isUnparseable(text) {
   const value = String(text || "").trim();
   if (!value) return true;
-  if (/^[\p{Extended_Pictographic}\s]+$/u.test(value)) return false; // emoji is a signal, not noise
+  if (/^[\p{Extended_Pictographic}\p{Emoji_Modifier}\u200d\ufe0f\s]+$/u.test(value)) return false; // emoji is a signal, not noise
   // Metric/service shorthand is normal client language: "PPC CPL CTR" is not
   // gibberish merely because the acronyms contain few vowels.
   if (/^(?:[A-Z0-9]{2,6}[\s/,&+.-]*){2,}$/u.test(value)) return false;
-  const letters = value.replace(/[^a-z]/gi, "");
+  // Do not reject short non-English answers before the semantic reader can
+  // interpret them. The vowel heuristic only makes sense for ASCII letters.
+  const letters = value.replace(/[^\p{L}\p{M}]/gu, "");
   if (value.length >= 6 && letters.length / value.length < 0.35) return true;
-  if (letters.length >= 8 && !/[aeiou]/i.test(letters)) return true;
+  if (/^[a-z]{8,}$/i.test(letters) && !/[aeiou]/i.test(letters)) return true;
   return false;
 }
 

@@ -1676,15 +1676,21 @@ async function scenario(name, fn) {
     process.env.GEMINI_API_KEY = "test-key";
     const names = ["Account Management", "Creatives", "Landing Page", "SEO"];
     project.services = names.map((name, index) => ({ id: `svc_guided_${index}`, projectId: project.id, serviceKey: `guided_${index}`, name }));
-    let clientText = "", currentIndex = 0, responseMode = "", providerSequence = 0;
+    let clientText = "", currentIndex = 0, responseMode = "", answerMode = "", providerSequence = 0;
     global.fetch = async (_url, options) => {
       const input = JSON.parse(options.body).input;
       let result;
       if (input.includes("Task: interpret ONE client reply")) {
         const name = names[currentIndex];
+        if (answerMode === "semantic" && clientText !== "no") {
+          assert.ok(input.includes('<pending_service>'), "reader receives current question identity");
+          assert.ok(input.includes(`\"serviceKey\":\"guided_${currentIndex}\"`));
+        }
         result = { intent: "feedback", serviceScope: "none", sentiment: currentIndex === 0 ? "neutral" : "positive",
           explainsProblem: false, serviceHint: name,
-          serviceFeedback: [{ serviceHint: name, summary: clientText, sentiment: currentIndex === 0 ? "neutral" : "positive", needsFollowUp: currentIndex === 0 }],
+          serviceFeedback: [{ serviceKey: `guided_${currentIndex}`, serviceHint: name,
+            summary: answerMode === "semantic" ? (currentIndex === 0 ? "The experience has been average" : "The work has been good") : clientText,
+            sentiment: currentIndex === 0 ? "neutral" : "positive", needsFollowUp: currentIndex === 0 }],
           appreciations: currentIndex === 0 ? [] : [{ subject: name, detail: clientText, serviceHint: name }], observations: [], concerns: [] };
       } else if (input.includes("Task: review latest-message scope")) {
         result = {};
@@ -1698,17 +1704,24 @@ async function scenario(name, fn) {
           askedServiceFollowUpKey: action.type === "service_followup" ? action.serviceKey : null,
           askedServiceKey: action.type === "service" ? action.serviceKey : null,
           askedForOverallRating: action.type === "overall_rating", askedForRatingTransition: action.type === "rating_feedback" };
+        if (action.type === "overall_rating") {
+          result.message = "That is everything covered. Overall, how would you rate the work SRV Media has done for you so far, out of 10?";
+        }
       }
       return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
     };
     try {
-      for (responseMode of ["acknowledgement_only", "timeout"]) {
+      for (const mode of [["acknowledgement_only", "literal"], ["timeout", "literal"], ["acknowledgement_only", "semantic"], ["timeout", "semantic"]]) {
+        [responseMode, answerMode] = mode;
+        // A stable identity still resolves if a service display name changes
+        // or the reader spells an older typo correctly.
+        project.services[1].name = answerMode === "semantic" ? "Cretives" : "Creatives";
         calls.messages.length = 0;
         store._session = { id: "sess_1", cycleId: "cyc_1", projectId: "prj_1", clientPocId: "poc_1", status: "partial",
           sessionType: "pulse", completionStatus: "partial", conversationState: { state: "waiting_for_service_feedback",
             pendingQuestionType: "service", pendingServiceKey: "guided_0", mentionedServices: {} } };
         for (currentIndex = 0; currentIndex < names.length; currentIndex += 1) {
-          clientText = currentIndex === 0 ? "avg" : "good";
+          clientText = answerMode === "semantic" ? ["meh", "goood", "kaafi achchha", "👍🏻"][currentIndex] : currentIndex === 0 ? "avg" : "good";
           const response = await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` });
           const payload = JSON.parse(response.body);
           assert.strictEqual(response.statusCode, 201, JSON.stringify(payload));
@@ -1716,6 +1729,9 @@ async function scenario(name, fn) {
           assert.match(payload.whatsappReplyText, /\?/, `${responseMode}/${names[currentIndex]}: ${payload.whatsappReplyText}`);
           assert.ok(["service_followup", ...(currentIndex === 3 ? ["rating_feedback"] : [])].includes(state.pendingQuestionType), JSON.stringify(state));
           assert.strictEqual(state.feedbackContinuationPending, false);
+          assert.strictEqual(state.overallRating, null);
+          assert.strictEqual(state.npsScore, null);
+          assert.equal(state.mentionedServices[`guided_${currentIndex}`].sentiment, currentIndex === 0 ? "neutral" : "positive");
           if (currentIndex < 3) {
             assert.strictEqual(idleRatingEligibility(store._session, calls.messages, Date.now() + IDLE_RATING_MS).eligible, false);
           }
@@ -1724,6 +1740,7 @@ async function scenario(name, fn) {
           const next = JSON.parse(nextResponse.body);
           assert.strictEqual(nextResponse.statusCode, 201);
           assert.match(next.whatsappReplyText, /\?/);
+          assert.notStrictEqual(next.nextMessage.metadata.fallbackReason, "blocked_early_close", next.whatsappReplyText);
           assert.strictEqual(store._session.conversationState.pendingQuestionType, currentIndex < 3 ? "service" : "overall_rating", next.whatsappReplyText);
           if (currentIndex < 3) assert.strictEqual(store._session.conversationState.pendingServiceKey, `guided_${currentIndex + 1}`);
           assert.strictEqual(store._session.conversationState.mentionedServices[`guided_${currentIndex}`].serviceFollowUpAskCount <= 1, true);

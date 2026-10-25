@@ -59,6 +59,16 @@ Pre-feature snapshot: `../local-backups/before-one-time-idle-rating-22-oct`. `np
 
 ## Deployment
 
+### 25 October contextual service-answer validation
+
+- Rollback baseline: `827e486`. This is a targeted correction, not a new conversation flow or restoration of the broad writer-fact merge.
+- The latest-reply reader receives configured stable service keys and the pending question identity. Correcting a display-name spelling does not require a new service identity.
+- When a brief semantic answer to the currently asked service fails lexical paraphrase matching, retain its literal client text and understood sentiment. Recovery is limited to a single current-service answer; ratings, declines, postponements, requests/observations, whole-project reviews, other-service facts and closing windows do not use this shortcut. The response writer still cannot supply facts.
+- Unicode letters and skin-tone emoji are not rejected as unreadable before interpretation. Digits inside mobile words are not extracted as ratings. Standalone decimal, zero, negative and out-of-range scores retain their existing validation.
+- A validated pending question is not treated as premature closure merely because its introduction says that service coverage is complete.
+- Regression fixtures cover alternate wordings, languages, neutral/negative opinions, misspelled display names, full multi-service API progression, response-generation failure, preserved scores and rejected fabricated facts. Tests do not guarantee every possible live model response.
+- No new migration, secret, n8n workflow or timing change is required for this follow-up.
+
 ### 25 October guided service progression
 
 - A neutral service answer is valid feedback, even if the reader requests more detail. Only an unexplained negative point enters complaint clarification. The optional service follow-up is offered once.

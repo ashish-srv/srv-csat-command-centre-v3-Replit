@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost, apiPut, apiWriteWithAdminPin } from '../api';
 import { hasPermission } from '../permissions';
 import { MultiSelect, SingleSelect, FilterBar } from './Filters.jsx';
-import { Button, Panel, MetricCard, LoadingBlock } from './Ui.jsx';
+import { Button, MetricCard, LoadingBlock } from './Ui.jsx';
+import Panel, { revealBirthdaySection } from './BirthdaySection.jsx';
+import BirthdayInternalPocs from './BirthdayInternalPocs.jsx';
 import { downloadBirthdayWorkbook, parseBirthdayWorkbook } from '../lib/birthday-workbook.mjs';
 import './BirthdayCentre.css';
 import BirthdayReplyInbox from './BirthdayReplyInbox.jsx';
@@ -34,6 +36,8 @@ export default function BirthdayCentre({ currentUser }) {
   const [settings, setSettings] = useState(null), [gift, setGift] = useState(''), [specialGift, setSpecialGift] = useState(''), [reason, setReason] = useState('');
   const [cleanup, setCleanup] = useState(null), [password, setPassword] = useState(''), [confirmation, setConfirmation] = useState('');
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState(''), [settingsError, setSettingsError] = useState('');
+  const settingsRef = useRef(null);
   const editorRef = useRef(null), detailsRef = useRef(null), fileRef = useRef(null), requestRef = useRef(0), historyRequestRef = useRef(0);
   const canManage = hasPermission(currentUser, 'birthday_manage'), canRemind = hasPermission(currentUser, 'birthday_reminders');
   const canCleanup = hasPermission(currentUser, 'birthday_cleanup'), isSuper = currentUser.role === 'super_admin';
@@ -55,7 +59,7 @@ export default function BirthdayCentre({ currentUser }) {
     document.addEventListener('visibilitychange', refresh);
     return () => { window.clearInterval(interval); document.removeEventListener('visibilitychange', refresh); };
   }, [year, busy]);
-  function reveal(ref) { window.requestAnimationFrame(() => ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
+  function reveal(ref) { window.requestAnimationFrame(() => { if (ref.current) revealBirthdaySection(ref.current.id); }); }
   async function loadHistory(contactId) {
     setHistoryLoading(true);
     const request = ++historyRequestRef.current;
@@ -130,6 +134,31 @@ export default function BirthdayCentre({ currentUser }) {
     if (success) { if (cleanup.removeContact) { setOpened(''); setDraft(null); } setCleanup(null); setPassword(''); setConfirmation(''); setSelected([]); }
   }
   function askCleanup(value) { setPassword(''); setConfirmation(''); setCleanup(value); }
+  async function saveSettings() {
+    setBusy(true); setError(''); setSettingsError(''); setSettingsNotice('');
+    try {
+      const saved = await apiPut('/api/birthdays/settings', { ...settings,
+        ...Object.fromEntries(['deskEmails','notificationEmails','giftOptions'].map(key => [key,
+          (settings[`${key}Text`] || '').split(/[\n;,]/).map(value => value.trim()).filter(Boolean)])) });
+      setSettings({ ...saved.settings,
+        ...Object.fromEntries(['deskEmails','notificationEmails','giftOptions'].map(key => [`${key}Text`, (saved.settings[key] || []).join('\n')])) });
+      setSettingsNotice('Birthday settings saved successfully.');
+      setNotice('Birthday settings saved successfully.');
+      await load();
+      if (settingsRef.current) {
+        settingsRef.current.open = false;
+        window.requestAnimationFrame(() => {
+          settingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          settingsRef.current?.querySelector('summary')?.focus({ preventScroll: true });
+        });
+      }
+    } catch (e) { setSettingsError(e.message); }
+    finally { setBusy(false); }
+  }
+  function ownerCreated(person) {
+    setData(old => ({ ...old, directory: { ...old.directory,
+      internalPocs: [...old.directory.internalPocs.filter(p => p.id !== person.id), person] } }));
+  }
   if (loading && !data) return <LoadingBlock label="Loading Birthday Centre" />;
   return <div className="birthday-centre">
     <header className="birthday-heading"><div><p className="eyebrow">Client Relationships</p><h1>Birthday Centre</h1><p>Wishes, shared gift decisions and yearly delivery records.</p></div><strong className={`birthday-badge ${data?.settings?.enabled ? 'good' : ''}`}>Scheduled Automation {data?.settings?.enabled ? 'ON' : 'OFF'}</strong></header>
@@ -137,14 +166,14 @@ export default function BirthdayCentre({ currentUser }) {
     {error ? <div className="error-block" role="alert">{error}<Button onClick={() => { setError(''); load(); }}>Reload</Button></div> : null}
     {notice ? <p className="birthday-notice" role="status">{notice}</p> : null}
     {!data ? null : <>
-      <nav className="birthday-nav" aria-label="Birthday sections">{[['birthday-list','Birthday Table'], ...(canManage ? [['birthday-import','Excel Upload'],['birthday-editor','Add / Edit Contact']] : []), ['birthday-replies','Birthday Replies'], ['birthday-details','Gift & History'], ...(isSuper ? [['birthday-settings','Settings']] : []), ...(canCleanup ? [['birthday-cleanup','History Cleanup']] : [])].map(([id, label]) => <button key={id} type="button" onClick={() => { if (id === 'birthday-editor' && !draft) edit(); else document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>{label}</button>)}</nav>
+      <nav className="birthday-nav" aria-label="Birthday sections">{[['birthday-list','Birthday Table'], ...(canManage ? [['birthday-import','Excel Upload'],['birthday-editor','Add / Edit Contact'],['birthday-internal-pocs','Internal Gift POCs']] : []), ['birthday-replies','Birthday Replies'], ['birthday-details','Gift & History'], ...(isSuper ? [['birthday-settings','Settings']] : []), ...(canCleanup ? [['birthday-cleanup','History Cleanup']] : [])].map(([id, label]) => <button key={id} type="button" onClick={() => { if (id === 'birthday-editor' && !draft) edit(); else revealBirthdaySection(id); }}>{label}</button>)}</nav>
       <div className="birthday-metrics">
         <MetricCard label="Matching Birthdays" value={filtered.length} caption={`${year} · Current filters`} />
         <MetricCard label="Gift Decisions Pending" value={filtered.filter(c => occasionFor(c).giftEligible && !occasionFor(c).gift && !occasionFor(c).historyCleared).length} caption="Includes escalated decisions" />
         <MetricCard label="Delivery Pending" value={filtered.filter(c => { const o = occasionFor(c); return o.gift && o.gift !== 'No Gift' && o.stage !== 'Delivered'; }).length} caption="Gift selected; not delivered" />
         <MetricCard label="WhatsApp Skipped for Feedback" value={filtered.filter(c => wishFor(c, 'whatsapp')?.result?.reason === 'Active Feedback Cycle').length} caption="Recorded skip; no automatic late wish" />
       </div>
-      <Panel id="birthday-list" title="Birthdays & Gift Progress" className="birthday-section">
+      <Panel id="birthday-list" title="Birthdays & Gift Progress" defaultOpen>
         <FilterBar showReset={true} onReset={() => { setFilters({ months: [], clusters: [], organizations: [], owners: [], eligibility: [], stages: [], wishes: [], contactStates: ['active','inactive'], day: '' }); setSearch(''); }}>
           <SingleSelect label="Birthday Year" value={String(year)} options={Array.from({ length: 8 }, (_, i) => ({ value: String(currentYear - 6 + i), label: String(currentYear - 6 + i) }))} allowClear={false} onChange={value => { setYear(Number(value)); setPreview(null); }} />
           <MultiSelect label="Months" selected={filters.months} options={months.map(m => m.value)} renderOption={value => months.find(m => m.value === value)?.label} onChange={v => updateFilter('months', v)} />
@@ -175,19 +204,36 @@ export default function BirthdayCentre({ currentUser }) {
           <MultiSelect label="Linked CSAT Contacts (Optional)" options={directory.clientPocs.map(p => p.id)} selected={draft.linkedPocIds} allLabel="No CSAT project required" renderOption={id => { const p = directory.clientPocs.find(p => p.id === id); return `${p?.name} · ${p?.projectName}`; }} onChange={ids => setDraft(old => ({ ...old, linkedPocIds: ids }))} />
           <label>Delivery Address<textarea value={draft.address} onChange={e => setDraft(old => ({ ...old, address: e.target.value }))} /></label><label>Notes<textarea value={draft.notes} onChange={e => setDraft(old => ({ ...old, notes: e.target.value }))} /></label>
         </div><div className="birthday-switches">{[['active','Contact Active'],['giftEligible','Gift Eligible by Default'],['emailEnabled','Email Birthday Wishes'],['whatsappOptIn','WhatsApp Messaging Permission Recorded'],['whatsappEnabled','WhatsApp Birthday Wishes']].map(([key, label]) => <label key={key}><input type="checkbox" checked={draft[key]} onChange={e => setDraft(old => ({ ...old, [key]: e.target.checked }))} />{label}</label>)}</div><div className="birthday-actions"><button className="button primary" type="submit" disabled={busy}>Save Birthday Contact</button><Button disabled={busy} onClick={() => setDraft(null)}>Cancel</Button></div></form> : <p>Add someone independently, or copy their contact details from CSAT.</p>}</Panel></div> : null}
+      {canManage ? <BirthdayInternalPocs directory={directory} canAdd={hasPermission(currentUser, 'manage_internal_pocs')} onCreated={ownerCreated} /> : null}
       <BirthdayReplyInbox key={year} year={year} canManage={canManage} refreshToken={data} />
       <div id="birthday-details" ref={detailsRef} className="birthday-section"><Panel title={openContact ? `${openContact.name} · ${openContact.organization} · ${year}` : 'Gift Decisions & Birthday History'}>{!openContact ? <p>Open a birthday from the table to view its gift, approvals and history.</p> : <>
         <Progress occasion={openOccasion} /><p><strong>Selected Gift:</strong> {openOccasion.gift || 'Awaiting decision'} · <strong>Selected By:</strong> {openOccasion.selectedBy || '—'}</p><p><strong>Selection Time:</strong> {stamp(openOccasion.selectedAt)} · <strong>Gift Eligible for {year}:</strong> {openOccasion.giftEligible ? 'Yes' : 'No'}</p>
         {historyLoading ? <p role="status">Loading birthday history…</p> : null}
         {openOccasion.deliveryReason ? <p className="birthday-reason">Not Delivered: {openOccasion.deliveryReason} · {openOccasion.deliveryCheckedBy} · {stamp(openOccasion.deliveryCheckedAt)}</p> : null}
         {canManage && !openOccasion.historyCleared && !openContact.removedAt ? <div className="birthday-gift-editor"><div className="birthday-form-grid"><SingleSelect label="Gift" value={gift} options={(data.settings.giftOptions || []).map(g => ({ value: g, label: g }))} onChange={setGift} /><label>Special Gift Details<input value={specialGift} onChange={e => setSpecialGift(e.target.value)} /></label><label>Change / Non-Delivery Reason<textarea value={reason} onChange={e => setReason(e.target.value)} /></label></div><div className="birthday-actions"><Button disabled={busy || !gift || !openOccasion.giftEligible} onClick={() => { if (openOccasion.gift && !window.confirm('Changing the gift resets arrangement and delivery progress. Continue?')) return; act(openOccasion.gift ? 'change_gift' : 'select'); }}>{openOccasion.gift ? 'Change Gift (Authorised User)' : 'Confirm Gift Selection'}</Button><Button disabled={busy || !openOccasion.gift || openOccasion.gift === 'No Gift' || openOccasion.stage === 'Delivered'} onClick={() => act('arranged')}>Mark Arranged</Button><Button disabled={busy || !openOccasion.gift || openOccasion.gift === 'No Gift' || openOccasion.stage === 'Delivered'} onClick={() => act('delivered')}>Mark Delivered</Button><Button disabled={busy || !reason || !openOccasion.gift || openOccasion.gift === 'No Gift'} onClick={() => act('delivery_no')}>Record Not Delivered</Button><Button disabled={busy} onClick={() => act('eligibility', { eligible: !openOccasion.giftEligible })}>{openOccasion.giftEligible ? 'Disable' : 'Enable'} Gift Eligibility for {year}</Button></div></div> : null}
-        {(openOccasion.changeRequests || []).map(r => <div key={r.id} className="birthday-request"><strong>{r.status.toUpperCase()} · {r.gift}</strong><p>{r.reason}</p><small>Requested by {r.actor} · {stamp(r.at)}</small>{canManage && r.status === 'pending' ? <div className="birthday-actions"><Button disabled={busy} onClick={() => { if (window.confirm('Approve this gift change? Arrangement and delivery progress will restart for the revised gift.')) act('approve', { requestId: r.id }); }}>Approve Change</Button><Button disabled={busy} onClick={() => act('reject', { requestId: r.id })}>Reject Change</Button></div> : null}</div>)}
+        {openOccasion.changeRequests?.length ? <div className="birthday-requests" tabIndex={0} role="region" aria-label="Gift change requests">{openOccasion.changeRequests.map(r => <div key={r.id} className="birthday-request"><strong>{r.status.toUpperCase()} · {r.gift}</strong><p>{r.reason}</p><small>Requested by {r.actor} · {stamp(r.at)}</small>{canManage && r.status === 'pending' ? <div className="birthday-actions"><Button disabled={busy} onClick={() => { if (window.confirm('Approve this gift change? Arrangement and delivery progress will restart for the revised gift.')) act('approve', { requestId: r.id }); }}>Approve Change</Button><Button disabled={busy} onClick={() => act('reject', { requestId: r.id })}>Reject Change</Button></div> : null}</div>)}</div> : null}
         {canRemind && !openContact.removedAt ? <div className="birthday-actions"><Button disabled={busy || !!openOccasion.gift || !openOccasion.giftEligible || openOccasion.historyCleared} onClick={() => reminder([opened], 'decision')}>Remind All Responsible Internal POCs</Button><Button disabled={busy || !openOccasion.gift || openOccasion.gift === 'No Gift' || openOccasion.stage === 'Delivered'} onClick={() => reminder([opened], 'delivery')}>Ask Desk About Delivery</Button><Button disabled={busy || !openOccasion.gift || openOccasion.gift === 'No Gift' || openOccasion.stage === 'Delivered'} onClick={() => reminder([opened], 'pending_arrangement')}>Remind POCs & Desk About Arrangement</Button></div> : null}
         <h4>Wish & Email Status</h4><div className="birthday-bounded">{jobs.filter(j => j.contact_id === opened).map(job => <div key={job.id} className="birthday-history-row"><strong>{job.channel.toUpperCase()} · {job.kind.replaceAll('_', ' ')} · {statusLabel(job.status)}</strong><span>{job.result?.reason || ''}</span><small>{stamp(job.created_at)}</small></div>)}{!jobs.some(j => j.contact_id === opened) ? <p>No send history for this birthday year.</p> : null}</div>
         <h4>Follow-up, Gift & Approval History</h4><div className="birthday-bounded">{(data.events || []).filter(e => e.contact_id === opened).map(event => <details key={event.id} className="birthday-history-row"><summary><strong>{event.action}</strong> · {event.actor} · {stamp(event.created_at)}</summary><pre>{JSON.stringify(event.details, null, 2)}</pre></details>)}{!data.events.some(e => e.contact_id === opened) ? <p>No follow-up or gift history recorded for this year.</p> : null}</div>
         {canManage && !openContact.removedAt ? <Button disabled={busy} onClick={() => askCleanup({ removeContact: true, contactIds: [opened], year, kind: 'contact' })}>Remove Contact From Birthday Flows</Button> : null}
       </>}</Panel></div>
-      {isSuper && settings ? <Panel id="birthday-settings" title="Birthday Automation & Email Settings" className="birthday-section"><p>Schedules use India time: wishes from 8 AM, internal follow-ups from 9 AM. Enable the separate birthday scheduler workflow after configuration.</p><label className="birthday-check"><input type="checkbox" checked={settings.enabled} onChange={e => setSettings(old => ({ ...old, enabled: e.target.checked }))} />Enable Scheduled Birthday Automation</label><div className="birthday-form-grid">{[['deskEmails','Desk Email Recipients'],['notificationEmails','Additional Birthday Notification Recipients'],['giftOptions','Standard Gift Options']].map(([key, label]) => <label key={key}>{label}<textarea value={settings[`${key}Text`] || ''} onChange={e => setSettings(old => ({ ...old, [`${key}Text`]: e.target.value }))} placeholder="One per line" /></label>)}<label>Approved WhatsApp Birthday Template<input value={settings.whatsappTemplate} onChange={e => setSettings(old => ({ ...old, whatsappTemplate: e.target.value }))} /></label><label>WhatsApp Template Language<input value={settings.whatsappLanguage} onChange={e => setSettings(old => ({ ...old, whatsappLanguage: e.target.value }))} /></label></div><p>All active Super Admins receive escalations and change requests. Recipient settings here apply only to birthday operations. Email acceptance does not confirm inbox delivery.</p>{!data.smtpConfigured ? <p className="birthday-reason">SMTP is not configured. Sending attempts will be shown as failed until SMTP secrets are configured.</p> : null}<Button variant="primary" disabled={busy} onClick={() => execute(() => apiPut('/api/birthdays/settings', { ...settings, ...Object.fromEntries(['deskEmails','notificationEmails','giftOptions'].map(key => [key, (settings[`${key}Text`] || '').split(/[\n;,]/).map(value => value.trim()).filter(Boolean)])) }), 'Birthday settings saved.')}>Save Birthday Settings</Button></Panel> : null}
+      {isSuper && settings ? <Panel id="birthday-settings" title="Birthday Automation & Email Settings" sectionRef={settingsRef} notice={settingsNotice}>
+        <form onSubmit={event => { event.preventDefault(); saveSettings(); }} onChange={() => setSettingsNotice('')} className="birthday-settings-form">
+          <div className="birthday-settings-scroll" tabIndex={0} role="region" aria-label="Birthday automation settings">
+            <p>Schedules use India time: wishes from 8 AM, internal follow-ups from 9 AM. Enable the separate birthday scheduler workflow after configuration.</p>
+            <label className="birthday-check"><input type="checkbox" checked={settings.enabled} onChange={e => setSettings(old => ({ ...old, enabled: e.target.checked }))} />Enable Scheduled Birthday Automation</label>
+            <div className="birthday-form-grid">
+              {[['deskEmails','Desk Email Recipients'],['notificationEmails','Additional Birthday Notification Recipients'],['giftOptions','Standard Gift Options']].map(([key, label]) => <label key={key}>{label}<textarea value={settings[`${key}Text`] || ''} onChange={e => setSettings(old => ({ ...old, [`${key}Text`]: e.target.value }))} placeholder="One per line" /></label>)}
+              <label>Approved WhatsApp Birthday Template<input value={settings.whatsappTemplate} onChange={e => setSettings(old => ({ ...old, whatsappTemplate: e.target.value }))} /></label>
+              <label>WhatsApp Template Language<input value={settings.whatsappLanguage} onChange={e => setSettings(old => ({ ...old, whatsappLanguage: e.target.value }))} /></label>
+            </div>
+            <p>All active Super Admins receive escalations and change requests. Recipient settings here apply only to birthday operations. Email acceptance does not confirm inbox delivery.</p>
+            {!data.smtpConfigured ? <p className="birthday-reason">SMTP is not configured. Sending attempts will be shown as failed until SMTP secrets are configured.</p> : null}
+          </div>
+          {settingsError ? <p className="birthday-reason" role="alert">{settingsError}</p> : null}
+          <div className="birthday-actions"><button className="button primary" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save Birthday Settings'}</button></div>
+        </form>
+      </Panel> : null}
       {canCleanup ? <Panel id="birthday-cleanup" title="Birthday History Cleanup" className="birthday-section"><p>Select contacts in the table and choose the birthday year above. Cleanup affects those matching selections only. Contacts, CSAT data and minimal duplicate-send protection are preserved.</p><strong>{selectedIds.length} Selected Contacts · {year}</strong><div className="birthday-cleanup-grid">{[['followup','Follow-up History','Reminders and escalation history'],['wish','Wish History','Email and WhatsApp wish history'],['gift','Gift History','Selections, changes and delivery details'],['all','Complete Birthday History','All selected birthday process history']].map(([kind, title, description]) => <section key={kind}><h4>{title}</h4><p>{description}</p><Button disabled={busy || !selectedIds.length} onClick={() => askCleanup({ contactIds: selectedIds, year, kind })}>Review & Delete {title}</Button></section>)}</div></Panel> : null}
     </>}
     {cleanup ? <div className="birthday-modal-backdrop"><form onSubmit={confirmCleanup} className="birthday-modal" role="dialog" aria-modal="true" aria-labelledby="birthday-cleanup-title"><h2 id="birthday-cleanup-title">Confirm {cleanup.removeContact ? 'Birthday Contact Removal' : 'Birthday History Cleanup'}</h2><p>{cleanup.contactIds.length} selected contacts · {cleanup.year} · {cleanup.kind}</p><div className="birthday-bounded">{contacts.filter(c => cleanup.contactIds.includes(c.id)).map(c => <p key={c.id}>{c.name} · {c.organization}</p>)}</div><p>{cleanup.removeContact ? 'Future birthday sends will stop. Existing birthday and CSAT history is preserved.' : 'Selected history will be permanently removed. Clearing gift history also stops further gift follow-ups for that birthday year.'}</p><label>Type DELETE<input autoFocus value={confirmation} onChange={e => setConfirmation(e.target.value)} autoComplete="off" /></label><label>Manage Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" /></label><div className="birthday-actions"><button className="button primary" type="submit" disabled={busy || confirmation !== 'DELETE' || !password}>Confirm Deletion</button><Button disabled={busy} onClick={() => { setCleanup(null); setPassword(''); }}>Cancel</Button></div></form></div> : null}

@@ -33,7 +33,7 @@ function review(type = "project_end", customProject = project) {
     get state() { return session.conversationState; }, turns,
     turn(text, extraction = null, writing = {}) {
       const before = JSON.parse(JSON.stringify(session.conversationState));
-      const interpretation = extraction ? flow.groundLatestReplyInterpretation(extraction, text, customProject) : null;
+      const interpretation = extraction ? flow.groundLatestReplyInterpretation(extraction, text, customProject, before) : null;
       const turn = sm.processWhatsAppReply({
         session: { ...session, conversationState: JSON.parse(JSON.stringify(before)) },
         project: customProject, poc, text, interpretation, geminiUnavailable: !interpretation
@@ -208,6 +208,78 @@ scenario("first guided praise always includes the next step regardless of extrac
         assert.equal(chat.state.mentionedServices[service.serviceKey].serviceFollowUpAskCount, 1);
       }
     }
+  }
+});
+
+scenario("contextual short opinions survive paraphrasing without replaying the original service question", () => {
+  const variants = [
+    ["goood", "positive", "The experience has been good"],
+    ["excllent", "positive", "The work has been excellent"],
+    ["kaafi achchha", "positive", "The experience has been positive"],
+    ["बहुत अच्छा", "positive", "The service has been good"],
+    ["pas mal", "positive", "The service has been satisfactory"],
+    ["meh", "neutral", "The experience has been average"],
+    ["not gr8", "negative", "The service has been disappointing"],
+    ["👍🏻", "positive", "The experience has been good"]
+  ];
+  for (const type of ["pulse", "project_end"]) {
+    for (const [text, sentiment, summary] of variants) {
+      const chat = review(type);
+      Object.assign(chat.state, { state: sm.STATES.WAITING_FOR_SERVICE_FEEDBACK, pendingQuestionType: "service",
+        pendingServiceKey: "creatives", serviceScopeStatus: "service_by_service", mentionedServices: {} });
+      const extraction = normaliseReplyInterpretation({ intent: "feedback", sentiment,
+        serviceFeedback: [{ serviceKey: "creatives", serviceHint: "Creative Design", sentiment, summary,
+          needsFollowUp: sentiment === "negative" }] }, project, text);
+      const next = chat.turn(text, extraction);
+      assert.ok(next.action, `${type}/${text}: ${JSON.stringify(next)}`);
+      assert.ok(["service_followup", "issue_reason"].includes(next.action.type), `${type}/${text}: ${next.action.type}`);
+      assert.equal(next.action.serviceKey, "creatives");
+      assert.equal(chat.state.mentionedServices.creatives.sentiment, sentiment);
+      assert.equal(chat.state.overallRating, null);
+      assert.equal(chat.state.npsScore, null);
+      assert.deepEqual(next.facts.observations, []);
+      assert.equal(chat.state.feedbackContinuationPending, false);
+      const afterDecline = chat.turn("no");
+      assert.equal(afterDecline.action.type, "service");
+      assert.notEqual(afterDecline.action.serviceKey, "creatives");
+      assert.equal(chat.state.mentionedServices.creatives.serviceFollowUpAnswered, true);
+    }
+  }
+});
+
+scenario("contextual recovery retains literal evidence and cannot import unrelated facts or score answers", () => {
+  const before = { state: sm.STATES.WAITING_FOR_SERVICE_FEEDBACK, pendingQuestionType: "service", pendingServiceKey: "creatives" };
+  const extraction = read({ sentiment: "positive", captured: [fact("creatives", "Everything is excellent", "positive")] });
+  const grounded = flow.groundLatestReplyInterpretation(extraction, "goood", project, before);
+  assert.equal(grounded.captured[0].summary, "goood", "do not preserve an unsupported model embellishment");
+  const conducted = { captured: [fact("account", "A manager missed meetings")], observations: [{ topic: "Senior Involvement", detail: "A director was absent" }] };
+  flow.enrichConductedWithDeterministicFacts(conducted, "goood", project, grounded);
+  assert.deepEqual(conducted.captured.map((item) => item.serviceKey), ["creatives"]);
+  assert.equal(conducted.captured[0].summary, "goood");
+  assert.deepEqual(conducted.observations, []);
+  for (const text of ["10", "0", "9/10", "no", "next", "nothing else", "please send the spend report", "I will reply tomorrow"]) {
+    assert.equal(flow.groundLatestReplyInterpretation(extraction, text, project, before).captured.length, 0, text);
+  }
+  for (const state of [{}, { ...before, pendingServiceKey: "account" },
+    ...["overall_rating", "nps", "final_sweep", "rating_feedback", "service_followup"].map((pendingQuestionType) => ({ ...before, pendingQuestionType })),
+    { ...before, closingGraceExpiresAt: new Date(Date.now() + 600000).toISOString() }]) {
+    assert.equal(flow.groundLatestReplyInterpretation(extraction, "goood", project, state).captured.length, 0, JSON.stringify(state));
+  }
+  for (const extra of [{ source: "fallback" }, { error: "gemini_timeout" }, { intent: "unclear" },
+    { intent: "off_topic" }, { intent: "negative" }, { deferRequested: true }, { rating: 9 },
+    { serviceScope: "overall_feedback" }, { completionScope: "feedback" },
+    { observations: [{ topic: "Visit", kind: "request", detail: "Office visit" }] }]) {
+    assert.equal(flow.groundLatestReplyInterpretation({ ...extraction, ...extra }, "goood", project, before).captured.length, 0, JSON.stringify(extra));
+  }
+});
+
+scenario("mobile words containing digits are not ratings, while standalone scores retain precision", () => {
+  for (const text of ['gr8', 'not gr8', '4ever', 'b4', 'Q3', 'abc9xyz']) {
+    assert.equal(sm.detectors.detectNumber(text), null, text);
+    assert.equal(sm.detectors.detectRatingCorrection(text), null, text);
+  }
+  for (const [text, value] of [['9', 9], ['0', 0], ['9/10', 9], ['6.5', 6.5], ['-3', -3], ['100', 100], ['score: 8', 8], ['three point five', 3.5]]) {
+    assert.equal(sm.detectors.detectNumber(text).value, value, text);
   }
 });
 

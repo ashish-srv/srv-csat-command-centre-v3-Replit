@@ -1076,7 +1076,7 @@ async function verifySurveyControl(read, { question, text, pendingRatingChoice }
   return safe;
 }
 
-async function interpretReply({ project, question, text, longForm = false, pendingRatingChoice = null, verifySurveyControls = false, recentOpenings = [] }) {
+async function interpretReply({ project, question, text, longForm = false, pendingRatingChoice = null, pendingServiceKey = null, pendingQuestionType = null, verifySurveyControls = false, recentOpenings = [] }) {
   const fallback = {
     intent: null, acknowledgement: "", ratingChoice: "none", ratingChoiceEvidence: null,
     deferRequested: false, serviceScope: "none", sentiment: null, rating: null,
@@ -1094,7 +1094,7 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "Return strict JSON only, no markdown:",
     '{"intent": "...", "deferRequested": false, "completionScope": "none", "completionEvidence": null, "ratingChoice": "none", "ratingChoiceEvidence": null, "serviceScope": "none", "sentiment": "...", "rating": null,',
     ' "acknowledgement": "...", "serviceHint": null, "serviceHints": [], "explainsProblem": false, "isObservation": false,',
-    ' "serviceFeedback": [{"serviceHint": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
+    ' "serviceFeedback": [{"serviceKey": "...", "serviceHint": "...", "sentiment": "...", "summary": "...", "declined": false, "needsFollowUp": false}],',
     ' "observations": [{"topic": "...", "detail": "...", "sentiment": "...", "severity": "...", "needsFollowUp": false, "kind": "feedback"}],',
     ' "concerns": [{"title": "...", "summary": "...", "sentiment": "negative", "severity": "watch", "serviceHint": null, "needsFollowUp": false}],',
     ' "appreciations": [{"subject": "...", "detail": "...", "serviceHint": null}]}',
@@ -1212,6 +1212,11 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "serviceFeedback contains every service fact in THIS reply, one entry per",
     "service. Use the service asked about in question_we_asked when a short",
     "answer clearly refers to it. summary must contain only that service's point.",
+    "Use the exact serviceKey from configured_services, even if you correct or",
+    "paraphrase its display name. pending_service identifies the actual current",
+    "question, not permission to attach unrelated requests or overall feedback",
+    "to that service. Interpret short opinions by meaning, including typos,",
+    "other languages and emoji; do not invent an explanation they did not give.",
     "Do not attach a broad relationship/project-wide paragraph to the service",
     "in question merely because that service was asked; mark overall_feedback.",
     "needsFollowUp is true only when a negative point does not say what is wrong.",
@@ -1287,6 +1292,8 @@ async function interpretReply({ project, question, text, longForm = false, pendi
     "  'not happy with PPC'                 -> false",
     "",
     fence("pending_rating_choice", ["overall_rating", "nps"].includes(pendingRatingChoice) ? pendingRatingChoice : "none"),
+    fence("configured_services", JSON.stringify((project?.services || []).map(({ serviceKey, name }) => ({ serviceKey, name })))),
+    fence("pending_service", JSON.stringify({ serviceKey: pendingServiceKey, questionType: pendingQuestionType })),
     fence("recent_assistant_openings", JSON.stringify(recentOpenings.slice(-3))),
     fence("question_we_asked", question),
     "",

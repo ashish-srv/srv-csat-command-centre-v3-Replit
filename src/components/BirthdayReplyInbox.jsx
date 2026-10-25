@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../api';
 import { SingleSelect } from './Filters.jsx';
-import { Button, Panel } from './Ui.jsx';
+import { Button } from './Ui.jsx';
+import Panel from './BirthdaySection.jsx';
 
 const stamp = value => new Date(value).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 

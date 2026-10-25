@@ -56,6 +56,25 @@ engine. Birthday-only organisations are entered directly.
 
 ## Contacts and Excel
 
+### Internal gift owners and compact sections
+
+Birthday Centre → Internal Gift POCs lists existing Internal POCs and lets users
+with Internal POC management permission add a name, email, optional phone and
+multiple assigned clusters using the Manage password. It writes only the existing
+Internal POC directory, not Application Users; no login role or CSAT access is
+granted. External email domains are supported for these recipients. Assign them
+to birthday contacts in Add / Edit Contact (or the existing Excel template).
+All assigned active owners with valid email addresses receive the existing gift
+decision/reminder emails and can use their signed email links without logging in.
+
+Birthday sections can be expanded/minimised without clearing their form values.
+Top section links open their target before scrolling. Tables, owner lists,
+settings, import previews, replies and history have bounded scroll areas. After a
+successful Settings save, the section minimises and keeps its confirmation visible
+in the heading; a failure keeps the form and error visible. This UI follow-up
+requires no additional migration, credentials or workflow changes beyond the
+Birthday Centre deployment already described above.
+
 Download the template from Birthday Centre. Fill Birthday Contacts only.
 Birthdays accept MM-DD, YYYY-MM-DD or an Excel date. Birth year is optional.
 Use | between multiple existing active Internal POC email addresses.

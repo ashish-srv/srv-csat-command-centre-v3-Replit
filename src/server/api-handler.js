@@ -2224,6 +2224,9 @@ function groundModelFact(kind, item, text, project = {}) {
     && isExplicitActionRequest(source)
     && !detectedServiceKeys.includes(item.serviceKey)) return null;
   let grounded = overlap.shared >= 2 || overlap.ratio >= 0.5;
+  // Literal current-reply evidence remains valid even when it contains no
+  // English tokens (for example, a service answer in another language).
+  if (kind === "captured" && String(evidenceText || "").trim() === source) grounded = true;
   if (!grounded && sourceTokenCount <= 4 && overlap.shared >= 1) grounded = true;
 
   if (kind === "captured" && item.serviceKey) {
@@ -2244,10 +2247,45 @@ function groundModelFact(kind, item, text, project = {}) {
   return result;
 }
 
-function groundLatestReplyInterpretation(interpretation, text, project = {}) {
+function contextualServiceAnswer(interpretation, text, project, stateBefore) {
+  const source = String(text || "").trim();
+  const serviceKey = stateBefore.pendingServiceKey;
+  // Only the latest-reply reader may interpret a brief answer to the service
+  // actually being asked. Never recover facts from the response writer, old
+  // transcript, a score, closing window, request, or whole-project review.
+  if (pendingQuestionTypeFor(stateBefore) !== "service"
+    || stateBefore.closingGraceExpiresAt
+    || !project.services?.some((service) => service.serviceKey === serviceKey)
+    || interpretation.source !== "gemini" || interpretation.error
+    || interpretation.intent !== "feedback" || interpretation.isObservation
+    || interpretation.deferRequested || interpretation.rating != null
+    || ![undefined, null, "none"].includes(interpretation.serviceScope)
+    || ![undefined, null, "none"].includes(interpretation.completionScope)
+    || ![undefined, null, "none"].includes(interpretation.ratingChoice)
+    || interpretation.observations?.length || interpretation.concerns?.length
+    || interpretation.captured?.length !== 1
+    || !source || source.length > 200
+    || (!/\p{L}/u.test(source) && !detectors.emojiSentiment(source))
+    || factFreeControlReply(source, interpretation)
+    || isExplicitActionRequest(source)
+    || detectors.isDeferral(source)
+    || detectors.clientRequestedDeferral(source, interpretation)) return null;
+  const item = interpretation.captured[0];
+  if (item.serviceKey !== serviceKey || item.declined
+    || !["positive", "neutral", "negative"].includes(item.sentiment)
+    || detectors.detectServices(source, project).some((key) => key !== serviceKey)) return null;
+  // Semantic understanding selects the answer's sentiment and referent, not
+  // new facts. Retain the client's literal words instead of accepting an
+  // unsupported paraphrase. This also survives subsequent grounding passes.
+  return { ...item, summary: source };
+}
+
+function groundLatestReplyInterpretation(interpretation, text, project = {}, stateBefore = {}) {
   if (!interpretation) return null;
+  const contextualAnswer = contextualServiceAnswer(interpretation, text, project, stateBefore);
   const captured = (interpretation.captured || [])
-    .map((item) => groundModelFact("captured", item, text, project))
+    .map((item) => groundModelFact("captured", item, text, project)
+      || (item.serviceKey === contextualAnswer?.serviceKey ? contextualAnswer : null))
     .filter(Boolean);
   const observations = (interpretation.observations || [])
     .map((item) => groundModelFact("observation", item, text, project))
@@ -3935,6 +3973,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       question: lastQuestion ? lastQuestion.body : "",
       text,
       pendingRatingChoice: stateBefore.ratingFeedbackPause?.ratingType || null,
+      pendingServiceKey: stateBefore.pendingServiceKey || null,
+      pendingQuestionType: pendingQuestionTypeFor(stateBefore),
       recentOpenings: recentAssistantOpenings(previousMessages),
       verifySurveyControls: true
     });
@@ -3949,7 +3989,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     // and still be unsure what kind of reply it is. Discarding the whole
     // response over one field threw away everything it understood.
     interpretation = read.source === "gemini"
-      ? groundLatestReplyInterpretation(read, text, project)
+      ? groundLatestReplyInterpretation(read, text, project, stateBefore)
       : null;
 
     // Rewind to exactly where the turn started before running it again.
@@ -4321,7 +4361,12 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
       // the outstanding question. The model ended a conversation after one
       // service with "Have a great day ahead!" — the client reasonably read
       // that as the end, and the cycle closed with no rating and no score.
-      const wantsToLeave = soundsLikeFarewell(conducted.text);
+      // "That is everything covered. Overall, how would you rate ...?" is
+      // a transition, not a farewell. Keep the guard for genuine premature
+      // closure, but do not reject a validated outstanding question.
+      const continuesRequiredQuestion = actionRequiresQuestion(requiredAction)
+        && messageMatchesRequiredAction(requiredAction, conducted.text);
+      const wantsToLeave = soundsLikeFarewell(conducted.text) && !continuesRequiredQuestion;
       if (!covered && wantsToLeave) {
         const services = Object.values(turn.conversationState.mentionedServices || {});
         const uncovered = (project.services || [])
