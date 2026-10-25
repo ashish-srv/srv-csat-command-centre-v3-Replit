@@ -186,6 +186,53 @@ async function main() {
   await repo.enqueue(repo.people[0],2026,'already-delivered','delivery','email',{to:['desk@example.com']});
   await S.processEmailJobs(repo);check(repo.queue[2].status,'cancelled');
 
+  // The fixed stakeholder list is Super Admin managed, separate from gift
+  // responsibility, and works even when both client wish channels are off.
+  repo = new MemoryRepo();
+  repo.config.deskEmails=[];repo.config.notificationEmails=[];
+  const stakeholderSettings={...repo.config,birthdayTodayEmails:['STAKEHOLDER@gmail.com','stakeholder@gmail.com']};
+  check((await response(repo,'PUT','/api/birthdays/settings',stakeholderSettings,admin)).statusCode,403);
+  check((await response(repo,'PUT','/api/birthdays/settings',{...stakeholderSettings,birthdayTodayEmails:['invalid']})).statusCode,400);
+  check((await response(repo,'PUT','/api/birthdays/settings',stakeholderSettings)).statusCode,200);
+  check(repo.config.birthdayTodayEmails,['stakeholder@gmail.com']);
+  const oldSettingsClient={...repo.config};delete oldSettingsClient.birthdayTodayEmails;
+  check((await response(repo,'PUT','/api/birthdays/settings',oldSettingsClient)).statusCode,200);
+  check(repo.config.birthdayTodayEmails,['stakeholder@gmail.com']);
+  repo.people[0].birthday=today.date.slice(5);repo.people[0].giftEligible=false;
+  const birthdayArgs={repo,store,baseUrl,now:new Date(today.date+'T04:00:00Z')};
+  await S.runBirthdaySchedule({...birthdayArgs,now:new Date(today.date+'T03:00:00Z')});
+  check(repo.queue.some(j=>j.kind==='birthday_today'),false);
+  await S.runBirthdaySchedule(birthdayArgs);
+  const stakeholderNotices=repo.queue.filter(j=>j.kind==='birthday_today'&&j.payload.to.includes('stakeholder@gmail.com'));
+  check(stakeholderNotices.length,1);check(stakeholderNotices[0].status,'accepted');
+  check(stakeholderNotices[0].payload.text.includes(contact.name),true);
+  check(stakeholderNotices[0].payload.text.includes(contact.organization),true);
+  check(repo.queue.some(j=>j.kind==='wish'),false);
+  const stakeholderSendCount=sent.length;
+  await S.runBirthdaySchedule(birthdayArgs);check(sent.length,stakeholderSendCount);
+  const adminSettings=JSON.parse((await response(repo,'GET','/api/birthdays',{},admin)).body).settings;
+  check('birthdayTodayEmails' in adminSettings,false);
+  repo = new MemoryRepo();repo.config.birthdayTodayEmails=['desk@example.com'];
+  repo.people[0].birthday=today.date.slice(5);
+  await repo.change(repo.people[0],today.year,'gift','select','Fixture',o=>({...o,gift:'Plant',stage:'Arranged'}));
+  await S.runBirthdaySchedule({repo,store,baseUrl,now:new Date(today.date+'T04:00:00Z')});
+  check(repo.queue.filter(j=>j.kind==='birthday_today'&&j.payload.to.includes('desk@example.com')).length,1);
+  repo = new MemoryRepo();repo.config.birthdayTodayEmails=['stakeholder@gmail.com'];
+  await S.runBirthdaySchedule({repo,store,baseUrl,now:new Date('2026-10-14T04:00:00Z')});
+  check(repo.queue.some(j=>j.payload.to.includes('stakeholder@gmail.com')),false);
+
+  // Refresh an older queued greeting at delivery; do not resend an accepted wish.
+  repo = new MemoryRepo();Object.assign(repo.people[0],{birthday:today.date.slice(5),emailEnabled:true});
+  const oldGreeting=require('../src/lib/email-theme').brandEmail({title:'Happy Birthday',text:'Previous greeting'});
+  await repo.enqueue(repo.people[0],today.year,'legacy-wish','wish','email',{to:[contact.email],...oldGreeting});
+  await S.processEmailJobs(repo,undefined,null,baseUrl);
+  check(repo.queue[0].status,'accepted');
+  check(sent.at(-1).text.endsWith('Best Regards,\nSRV Media'),true);
+  check(sent.at(-1).html.includes('Ashish Kate'),false);
+  check(sent.at(-1).html.includes(baseUrl+'/images/birthday-celebration-v1.gif'),true);
+  const wishSendCount=sent.length;await S.processEmailJobs(repo);check(sent.length,wishSendCount);
+  check(fs.readFileSync(path.join(__dirname,'../public/images/birthday-celebration-v1.gif')).subarray(0,6).toString(),'GIF89a');
+
   const statements=[];
   const connection={query:async sql=>{statements.push(sql);return {rows:sql.includes('select status')?[{status:'processing'}]:[],rowCount:0};},release:()=>{}};
   const sqlRepo=new BirthdayRepository({pool:{connect:async()=>connection}});
@@ -196,7 +243,7 @@ async function main() {
     check(workflow.active,false);check(workflow.settings.timezone,'Asia/Kolkata');
     check(workflow.nodes.some(n=>n.type.includes('googleSheets')),false);
   }
-  for(const email of sent) { check(email.html.includes('Verdana'),true);check(email.text.includes('Best Regards,\nAshish Kate'),true); }
+  for(const email of sent) { check(email.html.includes('Verdana'),true);check(email.text.includes(email.html.includes('data-srv-email-kind="birthday-wish"')?'Best Regards,\nSRV Media':'Best Regards,\nAshish Kate'),true); }
   console.log(`${checks} isolated Birthday Centre checks passed.`);
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

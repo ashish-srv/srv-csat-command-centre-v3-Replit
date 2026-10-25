@@ -58,22 +58,60 @@ engine. Birthday-only organisations are entered directly.
 
 ### Internal gift owners and compact sections
 
-Birthday Centre → Internal Gift POCs lists existing Internal POCs and lets users
+Birthday Centre → Internal Gift POCs lists only people assigned to at least one
+non-removed birthday contact and lets users
 with Internal POC management permission add a name, email, optional phone and
 multiple assigned clusters using the Manage password. It writes only the existing
 Internal POC directory, not Application Users; no login role or CSAT access is
 granted. External email domains are supported for these recipients. Assign them
 to birthday contacts in Add / Edit Contact (or the existing Excel template).
+The list shows their assigned birthday contacts. Unassigned people remain
+available in the contact editor's Responsible Internal POCs dropdown. Creating
+an Internal POC does not automatically assign them or put them on this list.
 All assigned active owners with valid email addresses receive the existing gift
 decision/reminder emails and can use their signed email links without logging in.
 
 Birthday sections can be expanded/minimised without clearing their form values.
 Top section links open their target before scrolling. Tables, owner lists,
 settings, import previews, replies and history have bounded scroll areas. After a
-successful Settings save, the section minimises and keeps its confirmation visible
-in the heading; a failure keeps the form and error visible. This UI follow-up
+successful Settings save, the section stays open and shows its confirmation;
+users can minimise it manually. A failure keeps the form and error visible. This UI follow-up
 requires no additional migration, credentials or workflow changes beyond the
 Birthday Centre deployment already described above.
+
+Contact email and WhatsApp wish preferences have labelled green ON / rose OFF
+indicators in the table, contact editor and opened contact details. Preferences
+and send results are shown separately, so last year's/earlier delivery result
+cannot hide the current switch. Bulk actions show the selected contacts' ON/OFF
+counts and use explicit Turn ON / Turn OFF labels.
+
+### Fixed stakeholder notices and client greetings
+
+Under Birthday Automation & Email Settings, Super Admin can save **Birthday
+Stakeholder Emails**, one address per line (commas/semicolons are also accepted).
+These are fixed recipients for birthday-day notices from 9 AM IST, independent
+of the client's Email/WhatsApp Wish switches or gift eligibility. Scheduled
+Birthday Automation must be enabled. Recipients need no application account.
+Each contact/year/recipient notice is deduplicated across scheduler runs and
+includes the contact/client, birthday, gift progress and responsible Internal
+POCs. This stakeholder list does not receive gift-decision/escalation messages
+unless its addresses are separately configured for those responsibilities.
+Desk, existing additional notifications and Super Admin recipients continue to
+receive the birthday notices; duplicate addresses are combined.
+
+Client birthday email wishes use the approved cream, coral, mint and blush card,
+warm wording, cake/flower emojis and a small self-hosted animated GIF. The
+greeting addresses the contact's full name, rather than salutation.
+The SRV MEDIA heading and signature both use the logo's red (#DD1F26). Emails end
+with **Best Regards, SRV Media**, in HTML and plain text. Mail readers that block
+images still display the full greeting. Older pending wish jobs use the current
+greeting at send time; already accepted wishes are never resent by this update.
+The GIF is versioned in public/images/ and copied by the normal Vite build;
+no external image service is required. Internal operational and CSAT emails
+retain their existing presentation and Ashish Kate signature.
+
+These additions use the existing birthday settings JSON and workflows; no new
+database migration, secret or n8n workflow change is required.
 
 Download the template from Birthday Centre. Fill Birthday Contacts only.
 Birthdays accept MM-DD, YYYY-MM-DD or an Excel date. Birth year is optional.
@@ -106,7 +144,8 @@ February 29 is observed on February 28 in non-leap years without changing the DO
   Default gift eligibility applies to new yearly records. Existing yearly
   eligibility can be changed explicitly in Gift & History.
 - Manual reminder buttons work independently of client wish channel switches.
-  Emails use the existing Verdana SRV presentation and Ashish Kate signature.
+  Internal emails use the existing Verdana SRV presentation and Ashish Kate
+  signature. Client birthday wishes use the SRV Media signature described above.
 
 ## WhatsApp guard and send results
 

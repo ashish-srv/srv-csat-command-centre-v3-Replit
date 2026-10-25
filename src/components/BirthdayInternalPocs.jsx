@@ -6,11 +6,13 @@ import BirthdaySection from './BirthdaySection.jsx';
 
 const emptyOwner = () => ({ name: '', email: '', phone: '', clusterIds: [] });
 
-export default function BirthdayInternalPocs({ directory, canAdd, onCreated }) {
+export default function BirthdayInternalPocs({ directory, contacts = [], canAdd, onCreated }) {
   const [draft, setDraft] = useState(emptyOwner), [password, setPassword] = useState('');
   const [query, setQuery] = useState(''), [adding, setAdding] = useState(false), [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(''), [error, setError] = useState('');
-  const rows = directory.internalPocs.filter(p => `${p.name} ${p.email}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const assignedContacts = person => contacts.filter(c => !c.removedAt && c.internalPocIds?.includes(person.id));
+  const assigned = directory.internalPocs.filter(p => assignedContacts(p).length);
+  const rows = assigned.filter(p => `${p.name} ${p.email} ${assignedContacts(p).map(c => `${c.name} ${c.organization}`).join(' ')}`.toLowerCase().includes(query.trim().toLowerCase()));
   async function save(event) {
     event.preventDefault(); setError(''); setNotice('');
     if (directory.internalPocs.some(p => p.email?.trim().toLowerCase() === draft.email.trim().toLowerCase())) {
@@ -26,16 +28,16 @@ export default function BirthdayInternalPocs({ directory, canAdd, onCreated }) {
       }, 'POST', password);
       onCreated(result.internalPoc);
       setDraft(emptyOwner()); setPassword(''); setAdding(false);
-      setNotice('Internal POC saved. No application access was created. Assign this person to the relevant birthday contacts.');
+      setNotice('Internal POC saved. Assign this person in a birthday contact’s Responsible Internal POCs field; they will then appear in this list. No application access was created.');
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
   return <BirthdaySection id="birthday-internal-pocs" title="Internal Gift POCs — Email Recipients" notice={notice}>
-    <p>These people can receive gift-selection and reminder emails without an Application User account. Assign one or more active POCs to each birthday contact. They can respond using the secure links in their emails; this does not grant dashboard or CSAT access.</p>
-    <label className="birthday-search">Search Internal POCs<input value={query} onChange={e => setQuery(e.target.value)} placeholder="Name or email" /></label>
+    <p>Only Internal POCs assigned to birthday contacts are listed here. Active assigned POCs with a valid email receive gift-selection and reminder emails and can respond through the secure links, without an Application User account.</p>
+    <label className="birthday-search">Search Assigned Gift POCs<input value={query} onChange={e => setQuery(e.target.value)} placeholder="Name, email or assigned birthday contact" /></label>
     <div className="birthday-bounded" tabIndex={0} role="region" aria-label="Internal birthday POCs">
-      {rows.map(p => <div key={p.id} className="birthday-owner-row"><strong>{p.name}</strong><span>{p.email || 'Email missing'}</span><span className={`birthday-badge ${p.active !== false ? 'good' : ''}`}>{p.active !== false ? 'Active' : 'Inactive'}</span></div>)}
-      {!rows.length ? <p>No Internal POCs match this search.</p> : null}
+      {rows.map(p => <div key={p.id} className="birthday-owner-row"><strong>{p.name}</strong><span>{p.email || 'Email missing'}</span><span className={`birthday-badge ${p.active !== false ? 'good' : ''}`}>{p.active !== false ? 'Active' : 'Inactive'}</span><small className="birthday-owner-assignments">Assigned to: {assignedContacts(p).map(c => `${c.name} · ${c.organization}`).join('; ')}</small></div>)}
+      {!rows.length ? <p>{assigned.length ? 'No assigned gift POCs match this search.' : 'No gift POCs have been assigned yet. Edit a birthday contact and select its Responsible Internal POCs.'}</p> : null}
     </div>
     {canAdd ? <div className="birthday-actions"><Button disabled={busy} onClick={() => { setAdding(value => !value); setError(''); setPassword(''); }}>{adding ? 'Minimise Add Form' : 'Add Internal POC Without App Access'}</Button></div> : <p>An authorised user with Internal POC management permission can add new people. Existing POCs remain available for birthday assignments.</p>}
     {canAdd && adding ? <form onSubmit={save} className="birthday-owner-form">

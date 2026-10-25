@@ -13,6 +13,7 @@ const maxBodyBytes = 1_000_000;
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
   ".jpeg": "image/jpeg",

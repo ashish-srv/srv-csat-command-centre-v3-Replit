@@ -7,7 +7,7 @@ const { ComponentHarness, elements } = require('./workspace-navigation-smoke');
 const { SupabaseStore } = require('../src/lib/supabase-store');
 
 const permissions = { hasPermission: (user, name) => user.role === 'super_admin' || user.permissions?.[name] === true };
-const directory = { clusters: [{ id: 'c1', name: 'Orion' }], internalPocs: [{ id: 'p1', name: 'Existing Owner', email: 'owner@example.com', active: true }], clientPocs: [] };
+const directory = { clusters: [{ id: 'c1', name: 'Orion' }], internalPocs: [{ id: 'p1', name: 'Existing Owner', email: 'owner@example.com', active: true }, { id: 'p3', name: 'Unassigned Owner', email: 'unassigned@example.com', active: true }], clientPocs: [] };
 const settings = { enabled: false, deskEmails: [], notificationEmails: [], giftOptions: ['Plant', 'No Gift', 'Special Gift'], whatsappTemplate: '', whatsappLanguage: 'en' };
 const event = { preventDefault() {} };
 const labelInput = (h, label) => elements(h.find(n => n.type === 'label' && Array.isArray(n.props.children) && n.props.children[0] === label), n => n.type === 'input')[0];
@@ -22,24 +22,26 @@ async function main() {
   h.window.setInterval = () => 1; h.window.clearInterval = () => {};
   await h.settle();
   const section = () => h.find(n => n.props.id === 'birthday-settings');
-  let focused = false, scrolled = false;
-  const dom = { open: true, scrollIntoView: () => { scrolled = true; }, querySelector: () => ({ focus: () => { focused = true; } }) };
-  section().props.sectionRef.current = dom;
+  h.find(n => n.type === 'textarea' && n.props.value === '').props.onChange({ target: { value: 'desk@example.com' } });
+  const stakeholderField = h.find(n => n.type === 'label' && n.props.children[0] === 'Birthday Stakeholder Emails');
+  elements(stakeholderField, n => n.type === 'textarea')[0].props.onChange({ target: { value: 'stakeholder@gmail.com; director@example.com' } });
+  await h.settle();
   await h.find(n => n.props.className === 'birthday-settings-form').props.onSubmit(event);
   await h.settle();
   assert.equal(writes[0].url, '/api/birthdays/settings');
-  assert.equal(dom.open, false, 'successful save collapses only Settings');
   assert.match(section().props.notice, /saved successfully/i);
-  assert.ok(focused && scrolled, 'confirmation stays in view with keyboard focus');
+  assert.deepEqual(Array.from(writes[0].body.birthdayTodayEmails), ['stakeholder@gmail.com', 'director@example.com']);
+  assert.ok(h.find(n => n.props.className === 'birthday-settings-form'), 'saved settings remain available');
+  assert.equal(h.scrolls.length, 0, 'saving leaves the user at their current section');
   assert.equal(h.find(n => n.props.id === 'birthday-list').props.defaultOpen, true);
   h.find(n => n.props.onClick && n.props.children === 'Settings').props.onClick();
   assert.deepEqual(navigated, ['birthday-settings']);
   h.find(n => n.props.className === 'birthday-settings-form').props.onChange();
   await h.settle(); assert.equal(section().props.notice, '');
-  fail = true; dom.open = true;
+  fail = true;
   await h.find(n => n.props.className === 'birthday-settings-form').props.onSubmit(event);
   await h.settle();
-  assert.equal(dom.open, true, 'failed save must leave settings visible');
+  assert.ok(h.find(n => n.props.className === 'birthday-settings-form'), 'failed save leaves the form available');
   assert.equal(section().props.notice, '');
   assert.match(h.find(n => n.props.role === 'alert').props.children, /save failed/);
 
@@ -65,14 +67,32 @@ async function main() {
   helpers.exports.revealBirthdaySection('direct'); helpers.exports.revealBirthdaySection('wrapper'); helpers.exports.revealBirthdaySection('missing');
   assert.deepEqual(navigated, ['birthday-settings', 'direct', 'wrapper']);
 
+  // The current switch stays visible independently of a historical send result.
+  for (const [channel, enabled, state] of [['email', false, 'OFF'], ['whatsapp', true, 'ON']]) {
+    const status = new ComponentHarness('src/components/BirthdayCentre.jsx', { channel, contact: { emailEnabled: enabled, whatsappEnabled: enabled }, caption: 'Accepted by Sender' }, '/', async () => ({}), 'WishStatus');
+    await status.settle();
+    assert.ok(elements(status.tree, n => n.props.className?.includes(enabled ? 'is-on' : 'is-off')).length);
+    assert.ok(elements(status.tree, n => Array.isArray(n.props.children) && n.props.children.includes(state)).length);
+    assert.equal(status.find(n => n.type === 'small').props.children, 'Accepted by Sender');
+  }
+
   const added = [], ownerWrites = [];
   let ownerFail = false;
-  const owners = new ComponentHarness('src/components/BirthdayInternalPocs.jsx', { directory, canAdd: true, onCreated: row => added.push(row) }, '/', async () => ({}), null,
+  const owners = new ComponentHarness('src/components/BirthdayInternalPocs.jsx', { directory, contacts: [], canAdd: true, onCreated: row => added.push(row) }, '/', async () => ({}), null,
     { modules: { '../api': { apiWriteWithAdminPin: async (url, body, method, password) => {
       ownerWrites.push({ url, body, method, password }); if (ownerFail) throw new Error('Incorrect Manage password');
       return { internalPoc: { id: 'p2', ...body } };
     } } } });
   await owners.settle();
+  const ownerRows = () => elements(owners.tree, n => n.props.className === 'birthday-owner-row');
+  assert.equal(ownerRows().length, 0, 'unassigned directory entries stay out of the gift-recipient list');
+  owners.props.contacts = [{ id: 'b1', name: 'Birthday Client', organization: 'Test Client', internalPocIds: ['p1'] }, { id: 'b2', name: 'Removed Client', organization: 'Test Client', internalPocIds: ['p3'], removedAt: '2026-10-25' }];
+  owners.dirty = true; await owners.settle();
+  assert.equal(ownerRows().length, 1);
+  assert.ok(owners.find(n => n.props.children === 'Existing Owner'));
+  assert.ok(!owners.find(n => n.props.children === 'Unassigned Owner'));
+  labelInput(owners, 'Search Assigned Gift POCs').props.onChange({ target: { value: 'Birthday Client' } });
+  await owners.settle(); assert.equal(ownerRows().length, 1, 'assigned contact names are searchable');
   const openOwner = async () => { owners.find(n => n.props.children === 'Add Internal POC Without App Access').props.onClick(); await owners.settle(); };
   const fill = async (email) => {
     labelInput(owners, 'Name').props.onChange({ target: { value: 'Gift Coordinator' } });
@@ -101,6 +121,6 @@ async function main() {
   persistence.request = async (table, options) => { tables.push(table); return [{ id: 'p2', ...options.body[0] }]; };
   await persistence.createInternalPoc(ownerWrites.at(-1).body);
   assert.deepEqual(tables, ['internal_pocs'], 'gift owner creation does not write app_users');
-  console.log('Birthday UI: settings success/failure, collapse/draft preservation, navigation, duplicate owners, permissions and no-app-access checks passed.');
+  console.log('Birthday UI: save confirmation, retained settings, channel state/history, assigned recipients, navigation, duplicate owners and permissions passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

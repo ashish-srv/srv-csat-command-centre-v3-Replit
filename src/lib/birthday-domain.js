@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 
 const STAGES = ['Awaiting Decision', 'Gift Selected', 'Arranged', 'Delivered'];
-const DEFAULT_SETTINGS = { enabled: false, deskEmails: [], notificationEmails: [],
+const DEFAULT_SETTINGS = { enabled: false, deskEmails: [], notificationEmails: [], birthdayTodayEmails: [],
   giftOptions: ['Cake + Plant', 'Cake', 'Plant', 'Bouquet', 'Special Gift', 'No Gift'],
   whatsappTemplate: '', whatsappLanguage: 'en' };
 const emailValid = value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);

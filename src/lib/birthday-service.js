@@ -3,6 +3,7 @@ const { BirthdayRepository } = require('./birthday-repository');
 const D = require('./birthday-domain');
 const { brandEmail, escapeEmail } = require('./email-theme');
 const { sendEmail } = require('./email');
+const { birthdayWishEmail } = require('./birthday-wish-email');
 const { phoneHash } = require('./birthday-inbound');
 
 const actorFor = access => access.email || access.name || 'Super Admin';
@@ -48,9 +49,11 @@ async function queueNotification({ repo, store, directory, settings, contact, oc
   else if (kind === 'delivery') recipients = settings.deskEmails.map(email => ({ email, name: 'Desk Team', purpose: 'delivery' }));
   else {
     const addresses = kind === 'change_request' ? supervisors
+      : kind === 'birthday_today' ? [...settings.birthdayTodayEmails, ...settings.notificationEmails, ...owners.map(p => p.email), ...settings.deskEmails, ...supervisors]
       : ['missed_wish','escalation'].includes(kind) || (kind === 'pending_arrangement' && !occasion.gift) ? [...settings.notificationEmails, ...settings.deskEmails, ...supervisors]
       : [...owners.map(p => p.email), ...settings.deskEmails, ...supervisors];
-    recipients = D.unique(addresses.map(e => e.toLowerCase())).filter(email => !(kind === 'birthday_today' && occasion.gift && occasion.gift !== 'No Gift' && occasion.stage !== 'Delivered' && settings.deskEmails.includes(email))).map(email => ({ email, name: 'Team' }));
+    recipients = D.unique(addresses.map(e => e.toLowerCase())).filter(email => !(kind === 'birthday_today' && occasion.gift && occasion.gift !== 'No Gift' && occasion.stage !== 'Delivered' && settings.deskEmails.includes(email)
+      && !settings.birthdayTodayEmails.includes(email) && !settings.notificationEmails.includes(email))).map(email => ({ email, name: 'Team' }));
   }
   if (!recipients.length) {
     return await repo.enqueue(contact, occasion.year, `${key}:missing-recipient`, kind, 'email', { to: [], subject: 'Birthday Recipient Configuration Required', error: kind === 'delivery' ? 'Configure Desk Email Recipients.' : 'No active owner / Super Admin email recipient is configured.' }) ? 1 : 0;
@@ -73,7 +76,7 @@ async function queueNotification({ repo, store, directory, settings, contact, oc
   }
   return queued;
 }
-async function processEmailJobs(repo, send = sendEmail, contactIds = null) {
+async function processEmailJobs(repo, send = sendEmail, contactIds = null, baseUrl = '') {
   const jobs = await repo.claim('email', contactIds), results = [];
   const settings = await settingsFor(repo);
   async function processOne(job) {
@@ -95,7 +98,10 @@ async function processEmailJobs(repo, send = sendEmail, contactIds = null) {
       }
     }
     try {
-      const result = await send(job.payload);
+      // Render client wishes at send time so an older queued wish also gets
+      // the current greeting and SRV Media signature, without resending history.
+      const payload = job.kind === 'wish' ? { ...job.payload, ...birthdayWishEmail(current, baseUrl) } : job.payload;
+      const result = await send(payload);
       await repo.finish(job.id, result.sent ? 'accepted' : 'failed', result);
       results.push({ id: job.id, status: result.sent ? 'accepted' : 'failed' });
     } catch (error) {
@@ -114,7 +120,7 @@ async function runBirthdaySchedule({ repo, store, baseUrl, now = new Date() }) {
   const settings = await settingsFor(repo);
   // Recover unconfirmed send claims even when scheduled wishes are switched off.
   await repo.stale();
-  if (!settings.enabled) return { enabled: false, queued: 0, emailResults: await processEmailJobs(repo) };
+  if (!settings.enabled) return { enabled: false, queued: 0, emailResults: await processEmailJobs(repo, undefined, null, baseUrl) };
   const local = D.localDate(now), directory = await store.getDirectory();
   let queued = 0;
   const errors = [];
@@ -135,14 +141,12 @@ async function runBirthdaySchedule({ repo, store, baseUrl, now = new Date() }) {
         queued += count;
       }
       if (days !== 0 || local.hour < 8) continue;
-      if (local.hour >= 9 && (settings.notificationEmails.length || settings.deskEmails.length)) {
+      if (local.hour >= 9 && (settings.notificationEmails.length || settings.deskEmails.length || settings.birthdayTodayEmails.length)) {
         await queueNotification({ repo, store, directory, settings, contact, occasion, kind: 'birthday_today', key: `today:${contact.id}:${year}`, baseUrl });
       }
       if (contact.emailEnabled && contact.email) {
-        const salutation = contact.salutation || contact.name;
         await repo.enqueue(contact, year, `wish:${contact.identityKey}:${year}:email`, 'wish', 'email', {
-          to: [contact.email], subject: `Happy Birthday, ${contact.name}!`,
-          ...brandEmail({ title: 'Happy Birthday', text: `Dear ${salutation},\n\nWishing you a wonderful birthday and a happy, healthy and fulfilling year ahead.\n\nWarm birthday wishes from everyone at SRV Media.` }) });
+          to: [contact.email], ...birthdayWishEmail(contact, baseUrl) });
       }
       if (contact.whatsappEnabled && contact.whatsappOptIn && contact.whatsapp) {
         await repo.enqueue(contact, year, `wish:${contact.identityKey}:${year}:whatsapp`, 'wish', 'whatsapp', {});
@@ -153,7 +157,7 @@ async function runBirthdaySchedule({ repo, store, baseUrl, now = new Date() }) {
       await repo.enqueue(contact, local.year, `setup-error:${contact.id}:${local.date}`, 'setup_error', 'email', { to: [], error: e.message });
     }
   }
-  return { enabled: true, queued, errors, emailResults: await processEmailJobs(repo) };
+  return { enabled: true, queued, errors, emailResults: await processEmailJobs(repo, undefined, null, baseUrl) };
 }
 async function claimWhatsappJobs({ repo, store, baseUrl }) {
   const settings = await settingsFor(repo), jobs = await repo.claim('whatsapp'), result = [];
@@ -175,7 +179,7 @@ async function claimWhatsappJobs({ repo, store, baseUrl }) {
     await repo.prepareWhatsappRoute(job, contact, phoneHash(contact.whatsapp));
     result.push({ jobId: job.id, to: contact.whatsapp, template: settings.whatsappTemplate, language: settings.whatsappLanguage, name: contact.salutation || contact.name });
   }
-  await processEmailJobs(repo);
+  await processEmailJobs(repo, undefined, null, baseUrl);
   return result;
 }
 function actionPage({ token, contact, occasion, settings, purpose, requestedGift }) {
@@ -234,7 +238,7 @@ async function applyOccasionAction({ repo, store, directory, settings, contact, 
     extra: notificationExtra || `Decision recorded by: ${actor}` }); }
   catch (e) { notificationWarning = ` Update saved; email could not be queued: ${e.message}`; }
   // Save succeeds even when SMTP isn't configured; the dashboard exposes queued/failed mail.
-  await processEmailJobs(repo, undefined, [contact.id]);
+  await processEmailJobs(repo, undefined, [contact.id], baseUrl);
   const duplicateMessage = action === 'request_change' ? 'A matching change request is already awaiting approval.' : action === 'delivered' ? 'Delivery is already confirmed.' : action === 'arranged' ? 'The arrangement is already recorded.' : `${occasion.gift || 'The request'} is already recorded${occasion.selectedBy ? ` by ${occasion.selectedBy}` : ''}. Reload this page to request a change.`;
   return { occasion, message: (occasion.duplicate ? duplicateMessage : action === 'request_change' ? 'Your change request is saved for Super Admin / authorised Admin approval.' : 'Birthday update saved.') + notificationWarning };
 }
@@ -313,11 +317,13 @@ async function handleBirthdayRequest({ store, access, request, pathname, method,
     }
     if (method === 'PUT' && pathname === '/api/birthdays/settings') {
       if (access.role !== 'super_admin') D.problem('Only Super Admin can change birthday settings.', 403);
+      const previousSettings = await settingsFor(repo);
       const emails = key => { if (!Array.isArray(body[key]) || body[key].some(e => !D.emailValid(e))) D.problem(`Enter valid ${key}.`); return D.unique(body[key].map(e => e.toLowerCase())); };
       const giftOptions = D.unique((body.giftOptions || []).map(g => String(g).trim()).filter(Boolean));
       if (!giftOptions.includes('No Gift') || !giftOptions.includes('Special Gift') || giftOptions.length > 30 || giftOptions.some(g => g.length > 100)) D.problem('Keep Special Gift and No Gift in the catalogue (maximum 30 options).');
       if (body.whatsappTemplate && !/^[a-z0-9_]+$/.test(body.whatsappTemplate)) D.problem('Enter the approved WhatsApp template name.');
       const settings = { enabled: body.enabled === true, deskEmails: emails('deskEmails'), notificationEmails: emails('notificationEmails'), giftOptions,
+        birthdayTodayEmails: body.birthdayTodayEmails === undefined ? previousSettings.birthdayTodayEmails : emails('birthdayTodayEmails'),
         whatsappTemplate: String(body.whatsappTemplate || ''), whatsappLanguage: String(body.whatsappLanguage || 'en').slice(0, 10), updatedBy: actorFor(access) };
       await repo.saveSettings(settings); return json(200, { settings });
     }
@@ -371,7 +377,7 @@ async function handleBirthdayRequest({ store, access, request, pathname, method,
         await queueNotification({ repo, store, directory, settings, contact: contacts[i], occasion: occasions[i], kind: body.kind, key: `manual:${requestId}:${contacts[i].id}:${year}`, baseUrl });
         await repo.change(contacts[i], year, 'followup', 'Manual Reminder', actorFor(access), o => ({ ...o, followupsStarted: true }));
       }
-      return json(200, { results: await processEmailJobs(repo, undefined, ids), message: 'Reminder requests recorded. Review email status below for acceptance or failure.' });
+      return json(200, { results: await processEmailJobs(repo, undefined, ids, baseUrl), message: 'Reminder requests recorded. Review email status below for acceptance or failure.' });
     }
     const contactMatch = /^\/api\/birthdays\/contacts\/([^/]+)$/.exec(pathname);
     if (contactMatch && method === 'DELETE') {

@@ -11,7 +11,12 @@ const escapeEmail = value => String(value ?? '').replace(/[&<>"']/g, char => ({
 
 function brandEmail({ title = 'CSAT Command Centre', html = '', text = '' }) {
   const plain = String(text).trimEnd();
-  const signedText = plain.endsWith(EMAIL_SIGNATURE) ? plain : `${plain}${plain ? '\n\n' : ''}${EMAIL_SIGNATURE}`;
+  // Preserve the team signature when a complete birthday greeting passes
+  // through the shared SMTP helper. Other mail retains its existing signature.
+  const birthdayWish = String(html).includes('data-srv-email-kind="birthday-wish"')
+    && String(html).includes('data-srv-email-signature="srv-media"');
+  const signature = birthdayWish ? 'Best Regards,\nSRV Media' : EMAIL_SIGNATURE;
+  const signedText = plain.endsWith(signature) ? plain : `${plain}${plain ? '\n\n' : ''}${signature}`;
   // Allow an already formatted app email to pass through the SMTP helper once.
   if (String(html).includes('data-srv-email-theme="v1"')) return { html, text: signedText };
   const c = EMAIL_COLORS;

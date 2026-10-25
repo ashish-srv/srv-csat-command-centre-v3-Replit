@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { brandEmail, EMAIL_COLORS, EMAIL_SIGNATURE } = require('../src/lib/email-theme');
 const { emailReport } = require('../src/lib/csat-email-policy');
+const { birthdayWishEmail, BIRTHDAY_SIGNATURE } = require('../src/lib/birthday-wish-email');
 let checks = 0;
 const check = (actual, expected) => { assert.deepEqual(actual, expected); checks++; };
 const count = (value, part) => value.split(part).length - 1;
@@ -62,6 +63,19 @@ async function main() {
     const branded = brandEmail({ text: 'END OF ORIGINAL CONTENT' });
     await sendEmail({ to: 'admin@example.test', subject: 'Already branded', ...branded });
     verify(sent.at(-1));
+    const birthday = birthdayWishEmail({ name: 'Client <&>', salutation: 'Client Ma’am <&>' }, 'https://fixture.invalid');
+    await sendEmail({ to: 'client@example.test', ...birthday });
+    const greeting = sent.at(-1);
+    check(greeting.text.endsWith(BIRTHDAY_SIGNATURE), true);
+    check(count(greeting.text, 'Best Regards,'), 1);
+    check(count(greeting.html, 'data-srv-email-signature="srv-media"'), 1);
+    check(greeting.html.includes('Ashish Kate') || greeting.text.includes('Ashish Kate'), false);
+    check(greeting.html.includes('Dear Client &lt;&amp;&gt;,'), true);
+    check(greeting.html.includes('Ma’am') || greeting.text.includes('Ma’am'), false);
+    check(greeting.text.startsWith('Dear Client <&>,'), true);
+    check(greeting.html.includes('https://fixture.invalid/images/birthday-celebration-v1.gif'), true);
+    check(brandEmail(greeting), { html: greeting.html, text: greeting.text });
+    check(birthdayWishEmail({ name: 'Name' }, 'javascript:alert(1)').html.includes('<img'), false);
   } finally {
     nodemailer.createTransport = originalTransport;
     for (const key of keys) { if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key]; }
