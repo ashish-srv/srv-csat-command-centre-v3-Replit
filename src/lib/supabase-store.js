@@ -2256,7 +2256,10 @@ class SupabaseStore {
   async getDueReminderTargets(nowIso = new Date().toISOString()) {
     const levels = await this.pocLevels();
     const rows = await this.request("feedback_sessions", {
-      query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,no_response,partial)&select=*,client_pocs(name,salutation,honorific,contact_whatsapp,contact_email,poc_level_id,weight_percentage,removed_at),feedback_cycles(cycle_type),projects(project_key,name)&order=reminder_due_at.asc`
+      // Negative feedback can set needs_attention while ratings are still
+      // pending. It remains eligible for reminders and eventual partial closure;
+      // completion/opt-out checks below, not sentiment, determine terminality.
+      query: `reminder_due_at=lte.${encodeURIComponent(nowIso)}&status=in.(started,no_response,partial,needs_attention)&select=*,client_pocs(name,salutation,honorific,contact_whatsapp,contact_email,poc_level_id,weight_percentage,removed_at),feedback_cycles(cycle_type),projects(project_key,name)&order=reminder_due_at.asc`
     });
 
     return rows.filter((row) => row.feedback_cycles?.cycle_type !== "quick_checkin" && !row.client_pocs?.removed_at

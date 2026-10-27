@@ -3554,6 +3554,95 @@ async function scenario(name, fn) {
     }
   });
 
+  for (const cycleType of ["project_end", "pulse"]) {
+    await scenario(`${cycleType}: unfinished negative feedback stays in the reminder loop with automatic sending off`, async () => {
+      const reminderStore = Object.create(SupabaseStore.prototype);
+      const due = "2026-10-23T07:10:00.000Z";
+      let row = {
+        id: "sess_negative_reminders", cycle_id: "cyc_negative_reminders",
+        project_id: "prj_1", client_poc_id: "poc_1",
+        status: "needs_attention", completion_status: "partial", reminder_count: 1,
+        last_client_response_at: "2026-10-22T07:10:00.000Z", reminder_due_at: due,
+        csat_score: null, nps_score: null,
+        conversation_state: {
+          state: "waiting_for_overall_rating", pendingQuestionType: "overall_rating",
+          overallRatingAsked: true, overallRating: null, npsScore: null,
+          idleRatingPromptEligible: true, ratingFeedbackPause: null,
+          generalConcernText: "Slow deliveries, mistakes and no campaign results."
+        },
+        client_pocs: { name: "Test respondent", active: true, weight_percentage: 100 },
+        projects: { project_key: project.key, name: project.name, automatic_feedback_enabled: false },
+        feedback_cycles: { cycle_type: cycleType }
+      };
+      const originalFeedback = row.conversation_state.generalConcernText;
+      let recomputed = 0;
+      reminderStore.pocLevels = async () => new Map();
+      reminderStore.recomputeCycle = async () => { recomputed += 1; };
+      reminderStore.request = async (table, options = {}) => {
+        assert.strictEqual(table, "feedback_sessions");
+        if (options.method === "PATCH") {
+          row = { ...row, ...structuredClone(options.body) };
+          return [structuredClone(row)];
+        }
+        const query = new URLSearchParams(options.query);
+        const statuses = query.get("status");
+        if (statuses && !statuses.slice(4, -1).split(",").includes(row.status)) return [];
+        const cutoff = query.get("reminder_due_at");
+        if (cutoff && (!row.reminder_due_at || Date.parse(row.reminder_due_at) > Date.parse(cutoff.slice(4)))) return [];
+        return [structuredClone(row)];
+      };
+
+      assert.deepStrictEqual(await reminderStore.getDueReminderTargets("2026-10-23T07:09:59.999Z"), []);
+      const targets = await reminderStore.getDueReminderTargets("2026-10-27T07:10:00.000Z");
+      assert.strictEqual(targets.length, 1, "Needs Attention is not a terminal session status");
+      assert.strictEqual(targets[0].reminderKind, "complete_partial_feedback");
+      assert.strictEqual(targets[0].reminderAction, "send_reminder");
+      assert.strictEqual(targets[0].session.reminderCount, 1);
+
+      const second = await reminderStore.markNoResponse(row.id);
+      assert.strictEqual(second.reminderCount, 2);
+      const beforeSecondDue = new Date(Date.parse(second.reminderDueAt) - 1).toISOString();
+      assert.deepStrictEqual(await reminderStore.getDueReminderTargets(beforeSecondDue), [], "Do not catch up missed reminders in a burst");
+      assert.strictEqual((await reminderStore.getDueReminderTargets(second.reminderDueAt))[0].reminderAction, "send_reminder");
+      const third = await reminderStore.markNoResponse(row.id);
+      assert.strictEqual(third.reminderCount, 3);
+      assert.strictEqual(Date.parse(third.reminderDueAt) - Date.parse(third.conversationState.lastReminderAt), 24 * 60 * 60 * 1000);
+      assert.strictEqual((await reminderStore.getDueReminderTargets(third.reminderDueAt))[0].reminderAction, "close_after_grace");
+      await assert.rejects(() => reminderStore.markNoResponse(row.id), /Reminder limit reached/);
+      const closed = await reminderStore.finalizeReminderLoop(row.id);
+      assert.strictEqual(sessionIsTerminal(closed), true);
+      assert.strictEqual(closed.completionStatus, "partial");
+      assert.strictEqual(closed.csatScore, null);
+      assert.strictEqual(closed.npsScore, null);
+      assert.strictEqual(closed.conversationState.generalConcernText, originalFeedback);
+      assert.strictEqual(closed.conversationState.closureReason, "partial_after_three_reminders");
+      assert.strictEqual(recomputed, 1);
+      assert.deepStrictEqual(await reminderStore.getDueReminderTargets(third.reminderDueAt), []);
+    });
+  }
+
+  await scenario("Needs Attention reminder selection still excludes closed, opted-out, handed-off and quick-check-in sessions", async () => {
+    const reminderStore = Object.create(SupabaseStore.prototype);
+    reminderStore.pocLevels = async () => new Map();
+    const excluded = [
+      { conversation_state: { state: "closing_grace" }, completion_status: "completed" },
+      { conversation_state: { state: "completed" } },
+      { conversation_state: { state: "opted_out", optedOut: true } },
+      { conversation_state: { state: "handed_off" } },
+      { conversation_state: { reminderExhausted: true } },
+      { feedback_cycles: { cycle_type: "quick_checkin" } },
+      { client_pocs: { removed_at: "2026-10-22T10:00:00Z" } },
+      { conversation_state: { idleRatingPromptEligible: true,
+        ratingFeedbackPause: { overallReview: true, ratingType: "overall_rating" } } }
+    ];
+    reminderStore.request = async () => excluded.map((overrides, index) => ({
+      id: `excluded_${index}`, status: "needs_attention", completion_status: "partial",
+      reminder_count: 1, reminder_due_at: "2026-10-23T07:10:00Z",
+      feedback_cycles: { cycle_type: "project_end" }, conversation_state: {}, ...overrides
+    }));
+    assert.deepStrictEqual(await reminderStore.getDueReminderTargets("2026-10-27T07:10:00Z"), []);
+  });
+
   await scenario("Supabase reminder persistence schedules exactly 24 hours and closes after three", async () => {
     const policyStore = Object.create(SupabaseStore.prototype);
     let current = {

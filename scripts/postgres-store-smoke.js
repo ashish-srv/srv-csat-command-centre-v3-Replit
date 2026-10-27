@@ -88,6 +88,15 @@ async function main() {
     "2026-10-01T01:00:00.000Z", 1000
   ]);
 
+  const reminderPool = new FakePool([[]]);
+  const reminderStore = new PostgresStore({ pool: reminderPool });
+  reminderStore.pocLevels = async () => new Map();
+  await reminderStore.getDueReminderTargets("2026-10-27T07:10:00.000Z");
+  assert.match(reminderPool.calls[0].sql, /t\."status" IN \(\$2, \$3, \$4, \$5\)/);
+  assert.deepStrictEqual(reminderPool.calls[0].values, [
+    "2026-10-27T07:10:00.000Z", "started", "no_response", "partial", "needs_attention"
+  ], "PostgreSQL must select unfinished Needs Attention sessions for reminders too");
+
   const ratingClaimPool = new FakePool([[{ id: "session-idle" }], []]);
   const ratingClaimStore = new PostgresStore({ pool: ratingClaimPool });
   const oldRatingState = { idleRatingPromptEligible: true, generalFeedbackText: "Good support, but reports need detail." };
