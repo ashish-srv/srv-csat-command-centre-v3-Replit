@@ -302,16 +302,89 @@ scenario("a service-only listening pause cannot trigger a rating reminder and sk
   }
 });
 
-scenario("30-day: additional service detail is retained and the optional question is not repeated", () => {
+scenario("30-day: additional service detail advances to the next service without repeating the optional question", () => {
   const chat = review("pulse", { ...project, services: project.services.slice(0, 2) });
   assert.equal(chat.turn("The account manager never replies", read({ captured: [fact("account", "The account manager never replies")] })).action.type, "service_followup");
   const second = chat.turn("Our requirements are also ignored", read({ captured: [fact("account", "Our requirements are also ignored")] }));
-  assert.equal(second.action.type, "feedback_continuation");
-  assert.doesNotMatch(second.message, /How has|anything else|\?/i);
+  assert.equal(second.action.type, "service");
+  assert.equal(second.action.serviceKey, "campaign");
+  assert.match(second.message, /Campaign Management.*\?/i);
+  assert.doesNotMatch(second.message, /anything else.*Account Management/i);
   assert.equal(chat.state.mentionedServices.campaign, undefined, "Do not invent an answer for the remaining service");
   assert.match(chat.state.mentionedServices.account.reasonText, /never replies/);
   assert.match(chat.state.mentionedServices.account.reasonText, /requirements are also ignored/);
   assert.equal(chat.state.mentionedServices.account.serviceFollowUpAskCount, 1);
+});
+
+scenario("Vandana: a useful answer to the Account Management follow-up moves to Chatbot", () => {
+  const services = ["Account Management", "Chatbot", "Creatives", "Landing Page Development", "SEO", "Social Media"]
+    .map((name, index) => ({ serviceKey: `service_${index}`, name }));
+  const configured = { ...project, services };
+  for (const representation of ["service", "request", "appreciation", "unavailable"]) {
+    for (let index = 0; index < services.length - 1; index += 1) {
+      const current = services[index];
+      const remaining = { ...configured, services: services.slice(index) };
+      const chat = review("pulse", remaining);
+      chat.turn("Start Feedback");
+      const first = chat.turn("Good", read({ sentiment: "positive", explainsProblem: false,
+        captured: [fact(current.serviceKey, "Good", "positive")] }));
+      assert.equal(first.action.type, "service_followup");
+      const detail = representation === "appreciation" ? "The team explains every step clearly"
+        : index === 0 ? "Need more time to time intervention to ensure campaign success."
+          : ["", "The handovers should be clearer", "The last update was delivered late",
+            "Please share progress updates more regularly", "The team should check the data more carefully"][index];
+      const extraction = representation === "unavailable" ? null : read({ serviceScope: "none",
+        sentiment: representation === "appreciation" ? "positive" : "neutral",
+        captured: representation === "service" ? [fact(current.serviceKey, detail, "neutral")] : [],
+        observations: representation === "request" ? [{ topic: "Follow-up request", kind: "request", detail, sentiment: "neutral", needsFollowUp: false }] : [],
+        appreciations: representation === "appreciation" ? [{ subject: current.name, serviceKey: current.serviceKey, detail }] : [] });
+      const next = chat.turn(detail, extraction);
+      const label = `${representation}/${current.name}`;
+      assert.equal(next.action.type, "service", label);
+      assert.equal(next.action.serviceKey, services[index + 1].serviceKey, label);
+      assert.match(next.message, /\?/, label);
+      assert.equal(chat.state.feedbackContinuationPending, false, label);
+      assert.equal(chat.state.mentionedServices[current.serviceKey].serviceFollowUpAskCount, 1, label);
+      assert.equal(chat.state.mentionedServices[current.serviceKey].serviceFollowUpAnswered, true, label);
+      assert.ok(JSON.stringify(chat.state).includes(detail), `Keep the additional feedback: ${label}`);
+      assert.equal(chat.state.overallRating, null, label);
+      assert.equal(chat.state.npsScore, null, label);
+      assert.equal(sm.buildChecklist(chat.state, remaining).servicesNotYetDiscussedWithKeys.length,
+        services.length - index - 1, label);
+      const at = Date.parse("2026-10-28T13:00:00Z");
+      const transcript = [{ side: "client", body: detail, createdAt: new Date(at).toISOString() },
+        { side: "srv", body: next.message, createdAt: new Date(at).toISOString(), metadata: { pendingQuestionType: "service" } }];
+      for (const hours of [1, 6]) assert.equal(idleRatingEligibility({ sessionType: "pulse", status: "partial",
+        completionStatus: "partial", conversationState: chat.state }, transcript, at + hours * IDLE_RATING_MS).eligible, false, label);
+    }
+  }
+});
+
+scenario("a guided follow-up still honours explicit continued sharing, postponement and a necessary clarification", () => {
+  for (const control of ["continue", "pause", "clarify"]) {
+    const chat = review("pulse");
+    chat.turn("Start Feedback");
+    chat.turn("Good", read({ sentiment: "positive", explainsProblem: false, captured: [fact("account", "Good", "positive")] }));
+    if (control === "continue") {
+      const text = "Updates have been late. Please let me finish sharing my other points first.";
+      const next = chat.turn(text, read({ captured: [fact("account", "Updates have been late")],
+        controlVerification: "verified", verifiedControl: { decision: "continue_feedback", evidence: "Please let me finish sharing my other points first" } }));
+      assert.equal(next.action.type, "feedback_continuation");
+      assert.doesNotMatch(next.message, /\?/);
+      const done = "That is everything I wanted to share";
+      assert.equal(chat.turn(done, read({ intent: "negative", completionScope: "feedback", completionEvidence: done })).action.type, "overall_rating");
+    } else if (control === "pause") {
+      const next = chat.turn("I need to leave now; I will continue tomorrow", read({ intent: "defer", deferRequested: true }));
+      assert.equal(next.control.deferred, true);
+      assert.doesNotMatch(next.message, /Campaign Management|out of 10/);
+    } else {
+      const next = chat.turn("But something has gone wrong", read({
+        captured: [fact("account", "Something has gone wrong", "negative", true)] }));
+      assert.equal(next.action.type, "issue_reason");
+      assert.equal(next.action.serviceKey, "account");
+      assert.equal(chat.state.overallRating, null);
+    }
+  }
 });
 
 scenario("a genuine clarification is asked once; switching topic preserves the old concern and follows the client", () => {

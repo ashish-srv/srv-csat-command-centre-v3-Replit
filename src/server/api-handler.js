@@ -839,6 +839,17 @@ function updateFeedbackContinuation(state, before, facts, text, interpretation, 
   const supplied = [facts?.captured, facts?.observations, facts?.appreciations].some((items) => items?.length);
   if (!supplied || factFreeControlReply(text, interpretation)) return;
   if (["feedback", "conversation"].includes(detectors.completionScopeFor(text, interpretation))) return;
+  const answeredService = state.mentionedServices?.[before.pendingServiceKey];
+  const guidedAnswer = ["service", "service_followup", "issue_reason"].includes(pendingQuestionTypeFor(before))
+    && answeredService?.serviceFollowUpAnswered === true
+    && ["captured", "rated", "declined"].includes(answeredService.status);
+  const explicitlyContinuing = interpretation?.controlVerification === "verified"
+    && interpretation?.verifiedControl?.decision === "continue_feedback";
+  // Answering our bounded service follow-up completes that step. Do not turn
+  // the next pending service into an acknowledgement-only listening pause.
+  // Unsolicited feedback and an explicit request to keep sharing still retain
+  // their existing listening flow; no additional service facts are inferred.
+  if (guidedAnswer && !wasContinuing && !explicitlyContinuing) return;
   const next = requiredConversationAction(buildChecklist(state, project), state);
   if (next.type === "service" || wasContinuing) state.feedbackContinuationPending = true;
 }

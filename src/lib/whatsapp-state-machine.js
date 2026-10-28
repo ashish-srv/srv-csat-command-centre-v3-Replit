@@ -2614,6 +2614,13 @@ function processWhatsAppReply({
       service.reasonTags = [...new Set([...(service.reasonTags || []), ...reasons])];
       service.detailAnswered = true;
       service.noteNeedsAck = true;
+      // This answers the current checklist's optional follow-up even when the
+      // model is unavailable. Keep the separate legacy per-service-rating path.
+      if (conversationState.pendingQuestionType === "service_followup"
+        || Number(service.serviceFollowUpAskCount || 0) > 0) {
+        service.serviceFollowUpAnswered = true;
+        service.status = hasServiceRating(service) ? "rated" : "captured";
+      }
       // A niggle mentioned after praise is worth capturing, but on its own it
       // is not a complaint. Only a low rating turns a praised service into an
       // issue for an owner to action.

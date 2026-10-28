@@ -69,6 +69,14 @@ Pre-feature snapshot: `../local-backups/before-one-time-idle-rating-22-oct`. `np
 - Regression fixtures cover alternate wordings, languages, neutral/negative opinions, misspelled display names, full multi-service API progression, response-generation failure, preserved scores and rejected fabricated facts. Tests do not guarantee every possible live model response.
 - No new migration, secret, n8n workflow or timing change is required for this follow-up.
 
+### 28 October answered service follow-up progression
+
+- A useful answer to a guided service follow-up completes that step. Its acknowledgement is followed by the next pending service question instead of being suppressed by the freeform-listening rule. This covers additional concerns, suggestions, requests and praise, not a fixed client phrase.
+- The current checklist also completes that optional follow-up when interpretation or response generation is unavailable and the fallback has retained the additional detail. Legacy per-service-rating sessions keep their separate behavior.
+- Unsolicited feedback, verified requests to continue sharing, postponement, necessary clarification, project-end overall reviews and closing windows retain their existing handling. The broader model-fact merge remains disabled.
+- Regression coverage includes the six-service Vandana sequence, varied follow-up answers at different service positions, model failures and acknowledgement-only responses. Remaining services cannot be silently skipped by the one-hour rating prompt. These are controlled fixtures, not a guarantee of every live model response.
+- No migration, secret or n8n workflow update is required. Deploying this correction does not itself send a recovery message to a conversation that already stalled.
+
 ### 25 October guided service progression
 
 - A neutral service answer is valid feedback, even if the reader requests more detail. Only an unexplained negative point enters complaint clarification. The optional service follow-up is offered once.

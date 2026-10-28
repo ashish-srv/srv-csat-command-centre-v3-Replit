@@ -1676,26 +1676,28 @@ async function scenario(name, fn) {
     process.env.GEMINI_API_KEY = "test-key";
     const names = ["Account Management", "Creatives", "Landing Page", "SEO"];
     project.services = names.map((name, index) => ({ id: `svc_guided_${index}`, projectId: project.id, serviceKey: `guided_${index}`, name }));
-    let clientText = "", currentIndex = 0, responseMode = "", answerMode = "", providerSequence = 0;
+    let clientText = "", currentIndex = 0, responseMode = "", answerMode = "", providerSequence = 0, isDetailReply = false;
     global.fetch = async (_url, options) => {
       const input = JSON.parse(options.body).input;
       let result;
       if (input.includes("Task: interpret ONE client reply")) {
+        if (responseMode === "reader_timeout") throw new Error("fixture: reply interpretation timeout");
         const name = names[currentIndex];
         if (answerMode === "semantic" && clientText !== "no") {
           assert.ok(input.includes('<pending_service>'), "reader receives current question identity");
           assert.ok(input.includes(`\"serviceKey\":\"guided_${currentIndex}\"`));
         }
-        result = { intent: "feedback", serviceScope: "none", sentiment: currentIndex === 0 ? "neutral" : "positive",
-          explainsProblem: false, serviceHint: name,
+        const sentiment = isDetailReply ? "neutral" : currentIndex === 0 ? "neutral" : "positive";
+        result = { intent: "feedback", serviceScope: "none", sentiment,
+          explainsProblem: isDetailReply, serviceHint: name,
           serviceFeedback: [{ serviceKey: `guided_${currentIndex}`, serviceHint: name,
             summary: answerMode === "semantic" ? (currentIndex === 0 ? "The experience has been average" : "The work has been good") : clientText,
-            sentiment: currentIndex === 0 ? "neutral" : "positive", needsFollowUp: currentIndex === 0 }],
-          appreciations: currentIndex === 0 ? [] : [{ subject: name, detail: clientText, serviceHint: name }], observations: [], concerns: [] };
+            sentiment, needsFollowUp: !isDetailReply && currentIndex === 0 }],
+          appreciations: isDetailReply || currentIndex === 0 ? [] : [{ subject: name, detail: clientText, serviceHint: name }], observations: [], concerns: [] };
       } else if (input.includes("Task: review latest-message scope")) {
         result = {};
       } else {
-        if (responseMode === "timeout") throw new Error("fixture: response generation timeout");
+        if (["timeout", "reader_timeout"].includes(responseMode)) throw new Error("fixture: response generation timeout");
         const actionText = input.split("Required next action based on the facts already captured:\n")[1]?.split("\n")[0];
         const action = JSON.parse(actionText || "{}");
         // Structured markers falsely claim a question was asked. Only actual
@@ -1707,11 +1709,18 @@ async function scenario(name, fn) {
         if (action.type === "overall_rating") {
           result.message = "That is everything covered. Overall, how would you rate the work SRV Media has done for you so far, out of 10?";
         }
+        if (isDetailReply) {
+          result.message = `We have noted your feedback: ${clientText}`;
+          if (responseMode === "next_question" && action.type === "service") {
+            result.message += ` How has your experience been with ${action.name}?`;
+          }
+        }
       }
       return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
     };
     try {
-      for (const mode of [["acknowledgement_only", "literal"], ["timeout", "literal"], ["acknowledgement_only", "semantic"], ["timeout", "semantic"]]) {
+      for (const mode of [["acknowledgement_only", "literal"], ["timeout", "literal"], ["acknowledgement_only", "semantic"], ["timeout", "semantic"],
+        ["acknowledgement_only", "detail"], ["next_question", "detail"], ["timeout", "detail"], ["reader_timeout", "detail"]]) {
         [responseMode, answerMode] = mode;
         // A stable identity still resolves if a service display name changes
         // or the reader spells an older typo correctly.
@@ -1721,6 +1730,7 @@ async function scenario(name, fn) {
           sessionType: "pulse", completionStatus: "partial", conversationState: { state: "waiting_for_service_feedback",
             pendingQuestionType: "service", pendingServiceKey: "guided_0", mentionedServices: {} } };
         for (currentIndex = 0; currentIndex < names.length; currentIndex += 1) {
+          isDetailReply = false;
           clientText = answerMode === "semantic" ? ["meh", "goood", "kaafi achchha", "👍🏻"][currentIndex] : currentIndex === 0 ? "avg" : "good";
           const response = await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` });
           const payload = JSON.parse(response.body);
@@ -1735,7 +1745,9 @@ async function scenario(name, fn) {
           if (currentIndex < 3) {
             assert.strictEqual(idleRatingEligibility(store._session, calls.messages, Date.now() + IDLE_RATING_MS).eligible, false);
           }
-          clientText = "no";
+          isDetailReply = answerMode === "detail" && currentIndex < names.length - 1;
+          clientText = isDetailReply ? ["Need more time to time intervention to ensure campaign success.",
+            "The handovers should be clearer", "Please share progress updates more regularly"][currentIndex] : "no";
           const nextResponse = await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` });
           const next = JSON.parse(nextResponse.body);
           assert.strictEqual(nextResponse.statusCode, 201);
@@ -1744,6 +1756,13 @@ async function scenario(name, fn) {
           assert.strictEqual(store._session.conversationState.pendingQuestionType, currentIndex < 3 ? "service" : "overall_rating", next.whatsappReplyText);
           if (currentIndex < 3) assert.strictEqual(store._session.conversationState.pendingServiceKey, `guided_${currentIndex + 1}`);
           assert.strictEqual(store._session.conversationState.mentionedServices[`guided_${currentIndex}`].serviceFollowUpAskCount <= 1, true);
+          if (isDetailReply) {
+            assert.ok(JSON.stringify(store._session.conversationState).includes(clientText), "Keep the follow-up answer");
+            assert.strictEqual(store._session.conversationState.feedbackContinuationPending, false);
+            assert.strictEqual(store._session.conversationState.overallRating, null);
+            assert.strictEqual(idleRatingEligibility(store._session, calls.messages, Date.now() + 6 * IDLE_RATING_MS).eligible, false);
+            if (responseMode === "next_question") assert.notStrictEqual(next.nextMessage.metadata.fallbackReason, "rejected_wrong_next_action", next.whatsappReplyText);
+          }
         }
         clientText = "6";
         let final = JSON.parse((await rawReq("POST", "/api/whatsapp/inbound", { from: "+91 99999 99999", text: clientText, providerMessageId: `wamid.guided.${++providerSequence}` })).body);
