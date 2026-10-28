@@ -1666,6 +1666,80 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("guided service acknowledgements survive wording repair and writer failure without changing progression", async () => {
+    const priorKey = process.env.GEMINI_API_KEY, priorFetch = global.fetch;
+    const priorSession = store._session, priorServices = project.services, priorMessages = [...calls.messages];
+    process.env.GEMINI_API_KEY = "test-key";
+    project.services = [{ serviceKey: "account", name: "Account Management" }, ...priorServices];
+    const examples = [
+      ["Need more time to time intervention to ensure campaign success.", "We have noted your request for more regular team intervention to support campaign success."],
+      ["Account Management should share weekly reports about campaign spend.", "We have noted your request for weekly campaign spend reports from Account Management."],
+      ["The Account Management team should check the figures before sending reports.", "We understand your concern about Account Management checking the figures before sending reports."]
+    ];
+    let readerText = "", acknowledgement = "", mode = "", sequence = 0;
+    global.fetch = async (_url, options) => {
+      const input = JSON.parse(options.body).input;
+      let result;
+      if (input.includes("Task: interpret ONE client reply")) {
+        result = { intent: "feedback", serviceScope: "none", sentiment: "negative", explainsProblem: true,
+          acknowledgement, serviceFeedback: [{ serviceKey: "account", serviceHint: "Account Management",
+            summary: readerText, sentiment: "negative", needsFollowUp: false }], observations: [], appreciations: [] };
+      } else if (input.includes("Task: review latest-message scope")) {
+        result = {};
+      } else {
+        if (mode === "timeout") throw new Error("fixture: response generation timeout");
+        // One draft omits the question; the other has the right question but
+        // fails acknowledgement wording checks. Keep the reader's safe detail.
+        result = { message: mode === "missing_question" ? "Thank you for sharing that."
+          : "Thank you for sharing that. Is there anything else about Account Management we should know?",
+          askedServiceFollowUpKey: "account" };
+      }
+      return { ok: true, status: 200, json: async () => ({ output_text: JSON.stringify(result) }) };
+    };
+    try {
+      for (const sessionType of ["pulse", "project_end"]) {
+        for (const variant of ["wording_repair", "missing_question", "timeout"]) {
+          mode = variant;
+          for (const example of examples) {
+            [readerText, acknowledgement] = example;
+            calls.messages.length = 0;
+            store._session = { id: "sess_1", cycleId: "cyc_1", projectId: project.id, clientPocId: poc.id,
+              status: "partial", completionStatus: "partial", sessionType,
+              conversationState: { state: "waiting_for_service_feedback", sessionType,
+                pendingQuestionType: "service", pendingServiceKey: "account", mentionedServices: {},
+                serviceScopeStatus: "service_by_service", projectEndReviewCaptured: sessionType === "project_end" } };
+            const response = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp,
+              text: readerText, providerMessageId: `wamid.ack-repair.${++sequence}` });
+            const payload = JSON.parse(response.body), state = store._session.conversationState;
+            assert.equal(response.statusCode, 201, JSON.stringify(payload));
+            assert.ok(payload.whatsappReplyText.startsWith(acknowledgement), `${sessionType}/${mode}: ${payload.whatsappReplyText}`);
+            assert.equal((payload.whatsappReplyText.match(/\?/g) || []).length, 1, `${sessionType}/${mode}: ${payload.whatsappReplyText}`);
+            assert.doesNotMatch(payload.whatsappReplyText, /sorry|frustrat|notified|Senior Involvement|out of 10/i);
+            assert.equal(state.pendingQuestionType, "service_followup");
+            assert.equal(state.pendingServiceKey, "account");
+            assert.equal(state.mentionedServices.account.serviceFollowUpAskCount, 1, `${sessionType}/${mode}: ${JSON.stringify(state)}`);
+            assert.ok(state.mentionedServices.account.reasonText.includes(readerText));
+            assert.equal(state.overallRating, null);
+            assert.equal(state.npsScore, null);
+            assert.ok(!state.closingGraceExpiresAt);
+            if (mode === "wording_repair") assert.equal(payload.nextMessage.metadata.fallbackReason, "required_wording");
+            const nextResponse = await rawReq("POST", "/api/whatsapp/inbound", { from: poc.contactWhatsapp,
+              text: "no", providerMessageId: `wamid.ack-repair.${++sequence}` });
+            assert.equal(nextResponse.statusCode, 201);
+            assert.equal(store._session.conversationState.pendingQuestionType, "service");
+            assert.equal(store._session.conversationState.pendingServiceKey, "ppc");
+            assert.equal(store._session.conversationState.mentionedServices.account.serviceFollowUpAskCount, 1, `${sessionType}/${mode}: ${JSON.stringify(store._session.conversationState)}`);
+          }
+        }
+      }
+    } finally {
+      global.fetch = priorFetch;
+      if (priorKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = priorKey;
+      store._session = priorSession; project.services = priorServices;
+      calls.messages.length = 0; calls.messages.push(...priorMessages);
+    }
+  });
+
   await scenario("monthly guided replies keep moving through all services with imperfect or unavailable response generation", async () => {
     const priorKey = process.env.GEMINI_API_KEY;
     const priorFetch = global.fetch;

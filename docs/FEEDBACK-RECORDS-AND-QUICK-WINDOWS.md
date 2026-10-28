@@ -69,6 +69,13 @@ Pre-feature snapshot: `../local-backups/before-one-time-idle-rating-22-oct`. `np
 - Regression fixtures cover alternate wordings, languages, neutral/negative opinions, misspelled display names, full multi-service API progression, response-generation failure, preserved scores and rejected fabricated facts. Tests do not guarantee every possible live model response.
 - No new migration, secret, n8n workflow or timing change is required for this follow-up.
 
+### 28 October acknowledgement preservation during question repair
+
+- A validated current-message acknowledgement is retained when a service follow-up or clarification question needs repair. The fallback appends only the required question, rather than replacing the acknowledgement with a generic service-level apology. Observation follow-ups also avoid adding a second acknowledgement after the preserved one.
+- Existing topic-grounding and unsupported-claim checks remain in force. Reply wording is not merged into service facts or scores. Progression, optional-question counts, CSAT/NPS ownership, email routing and deadlines are unchanged.
+- Regression coverage includes varied requests, suggestions, neutral answers, complaints, praise and mixed feedback; older negative service sentiment cannot append an apology to a valid neutral acknowledgement. API checks cover both full-feedback flows, required-wording repair, missing writer questions and writer timeouts. Quick check-in and closing-window regressions remain part of the full suite.
+- No migration, dependency, secret or n8n workflow change is required. When no validated acknowledgement is available, the existing conservative fallback remains; this change does not promise a perfect live model response for every wording.
+
 ### 28 October answered service follow-up progression
 
 - A useful answer to a guided service follow-up completes that step. Its acknowledgement is followed by the next pending service question instead of being suppressed by the freeform-listening rule. This covers additional concerns, suggestions, requests and praise, not a fixed client phrase.

@@ -54,6 +54,61 @@ scenario("wrong next questions are repaired without discarding detailed acknowle
   }
 });
 
+scenario("service and clarification repairs retain specific acknowledgement and only append the required question", () => {
+  const replies = examples.concat([
+    ["Need more time to time intervention to ensure campaign success.",
+      "We have noted your request for more regular team intervention to support campaign success."],
+    ["The experience with the team has been average.",
+      "Thank you for sharing that your experience with the team has been average."],
+    ["The team responds quickly and explains the reports clearly.",
+      "Thank you for appreciating the quick responses and clear explanations of the reports."]
+  ]);
+  for (const sessionType of ["pulse", "project_end"]) {
+    for (const [detail, ack] of replies) {
+      for (const action of [
+        { type: "service_followup", serviceKey: "account", name: "Account Management" },
+        { type: "issue_reason", serviceKey: "account", name: "Account Management" },
+        { type: "observation_reason", topic: "Delivery" },
+        { type: "observation_followup", topic: "Delivery" }
+      ]) {
+        const state = { sessionType, overallRating: 7, npsScore: 9,
+          closingGraceExpiresAt: null, serviceScopeStatus: "service_by_service",
+          mentionedServices: { account: { serviceKey: "account", status: "needs_service_followup",
+            sentiment: "negative", reasonText: "Older concern", serviceFollowUpAskCount: 0 } },
+          pendingObservation: { topic: "Delivery", sentiment: "negative" } };
+        const facts = { ...context(detail, ack), acknowledgementReviewed: true };
+        const before = JSON.stringify({ state, facts });
+        assert.equal(flow.clientFacingAcknowledgement(facts, project, action), ack, "Fixture acknowledgement is grounded");
+        const reply = flow.fallbackForAction(action, state, project, facts);
+        assert.ok(reply.startsWith(ack), `${sessionType}/${action.type}: ${reply}`);
+        assert.equal((reply.match(/\?/g) || []).length, 1, reply);
+        assert.equal(flow.messageMatchesRequiredAction(action, reply), true, reply);
+        assert.doesNotMatch(reply.slice(ack.length), /sorry|frustrat|Our team will look into|recorded your request|out of 10|on a scale/i);
+        assert.equal(JSON.stringify({ state, facts }), before, "Wording cannot alter progress, facts or scores");
+      }
+    }
+  }
+});
+
+scenario("repair retains the appreciation-name question and rejects unsafe acknowledgements in each repaired stage", () => {
+  const ack = "We hear your concern about late reports.";
+  const facts = context("The reports keep arriving late", ack);
+  const personState = { awaitingAppreciationPersonName: { serviceKey: "account", role: "account manager" } };
+  const nameReply = flow.fallbackForAction({ type: "service_followup", serviceKey: "account", name: "Account Management" }, personState, project, facts);
+  assert.ok(nameReply.startsWith(ack));
+  assert.match(nameReply, /account manager's name/);
+  for (const type of ["service_followup", "issue_reason", "observation_reason", "observation_followup"]) {
+    for (const unsafe of ["Senior Involvement has been disappointing.", "We have notified the Directors about late reports.",
+      "Our team has fixed the reports.", "Your rating is 10 out of 10."]) {
+      const reply = flow.fallbackForAction({ type, serviceKey: "account", name: "Account Management", topic: "Reporting" }, {}, project, {
+        ...facts, extractedAcknowledgement: unsafe, acknowledgementReviewed: true
+      });
+      assert.ok(!reply.includes(unsafe), reply);
+      assert.match(reply, /\?/);
+    }
+  }
+});
+
 scenario("a repetitive opening never licenses replacing specific content with a short alternate", () => {
   for (const [detail, acknowledgement] of examples) {
     const facts = context(detail, acknowledgement);

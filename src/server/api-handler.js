@@ -1027,10 +1027,11 @@ function suppressDuplicateIssues(services = []) {
   return services;
 }
 
-function baseFallbackForAction(action, conversationState, project, context = {}) {
+function baseFallbackForAction(action, conversationState, project, context = {}, options = {}) {
   if (action.type === "project_end_review") return projectEndReviewQuestion(project);
   if (action.type === "service_scope") return SERVICE_SCOPE_QUESTION;
   if (action.type === "issue_reason") {
+    if (options.questionOnly) return `Could you share what specifically should improve with ${action.name}?`;
     return `I am sorry to hear that ${action.name} needs improvement. Our team will look into it. Could you share what specifically should improve?`;
   }
   if (action.type === "service_followup") {
@@ -1046,6 +1047,7 @@ function baseFallbackForAction(action, conversationState, project, context = {})
     if (action.askCount > 0) {
       return `Anything more you would like to add about ${action.name}? If that is all, just reply no.`;
     }
+    if (options.questionOnly) return `Is there anything else about ${action.name} we should know?`;
     const service = conversationState.mentionedServices?.[action.serviceKey];
     if (service?.sentiment === "negative") {
       if (service.noteNeedsAck) {
@@ -1070,12 +1072,14 @@ function baseFallbackForAction(action, conversationState, project, context = {})
     const pending = conversationState.pendingObservation;
     if (pending?.responseKind === "request") return "Could you share a little more about your request?";
     if (pending?.sentiment !== "negative") return "Could you share a little more about that point?";
+    if (options.questionOnly) return "Could you share what needs attention?";
     return "I am sorry to hear about your concern. Could you share what needs attention?";
   }
   if (action.type === "observation_followup") {
     if (conversationState.pendingObservation?.acknowledged) {
       return "Before we move on, is there anything else you would like the Directors to know? If not, just reply no.";
     }
+    if (options.questionOnly) return "Is there anything else you would like the Directors to know?";
     if (conversationState.pendingObservation?.responseKind === "request") {
       const positiveLead = conversationState.pendingObservation?.positiveContext === "Social Media"
         ? "Glad to hear that social media is working well. "
@@ -1202,9 +1206,12 @@ function clientFacingAcknowledgement(context, project, action) {
 function fallbackForAction(action, conversationState, project, context = {}) {
   const acknowledgement = appreciationAcknowledgement(context, project, conversationState);
   const naturalAcknowledgement = clientFacingAcknowledgement(context, project, action);
-  if (naturalAcknowledgement && !["issue_reason", "service_followup", "observation_reason"].includes(action.type)) {
+  if (naturalAcknowledgement) {
     const praise = acknowledgement && !responseAcknowledgesAppreciation(naturalAcknowledgement, context) ? acknowledgement : "";
-    return [naturalAcknowledgement, praise, baseFallbackForAction(action, conversationState, project, context)].filter(Boolean).join(" ");
+    // The acknowledgement has already passed grounding/claim checks. Repair
+    // only the required question, without discarding detail or adding a second
+    // apology based on the service's older sentiment. This is wording only.
+    return [naturalAcknowledgement, praise, baseFallbackForAction(action, conversationState, project, context, { questionOnly: true })].filter(Boolean).join(" ");
   }
   const processConcern = (context.observations || []).find((item) =>
     item.fallbackKind === "delivery_process"
