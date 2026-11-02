@@ -59,6 +59,12 @@ Pre-feature snapshot: `../local-backups/before-one-time-idle-rating-22-oct`. `np
 
 ## Deployment
 
+### 2 November no-response email wording
+
+- Summary emails with no client response use the title "Feedback Closed — No Response" and replace the invitation-only transcript with "Client Has Not Responded" and "No response was received from the client for this feedback request."
+- The shared template covers monthly, project-end and quick-check-in summary payloads. Any inbound reply retains its transcript, even without ratings; stored response timestamps, stated scores (including zero) and recorded quick-check-in outcomes also prevent false no-response labels when historical message rows are unavailable.
+- This changes email presentation only. It does not add quick-check-in expiry notifications, alter recipients, reminders, closure timing or conversation flow. Existing Workflow 10 renders the application-supplied email, so no workflow update or database migration is needed. Workflow contract tests cover all three feedback types without sending real emails.
+
 ### 25 October contextual service-answer validation
 
 - Rollback baseline: `827e486`. This is a targeted correction, not a new conversation flow or restoration of the broad writer-fact merge.

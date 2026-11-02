@@ -16,9 +16,23 @@ function emailRecipients(users, clusterId, handoff = false) {
 function emailReport(eventType, payload) {
   const handoff = HANDOFF.has(eventType);
   const quick = payload.summaryType === 'quick_checkin_poc';
-  const title = handoff ? 'Human Handoff — Review Required' : quick ? 'Quick Check-in — Completed Feedback' : 'Completed Feedback Summary';
   const session = payload.session || payload.sessions?.[0] || {};
   const csat = session.csatSource === 'predicted' ? null : payload.csatScore ?? session.csatScore;
+  const nps = payload.npsScore ?? session.npsScore;
+  const outcome = payload.quickCheckinOutcome || session.conversationState?.quickCheckinOutcome;
+  // Only a supplied transcript with no inbound reply can be called unanswered.
+  // Retain evidence of a response even if older transcript rows are unavailable;
+  // missing ratings and generated score estimates do not establish a reply.
+  const noClientResponse = !handoff && eventType === 'cycle_completed'
+    && Array.isArray(payload.messages) && !payload.messages.some(row => row.side === 'client')
+    && !session.lastClientResponseAt && csat == null
+    && (session.npsSource === 'predicted' || nps == null)
+    && !['all_good', 'feedback_shared'].includes(outcome);
+  const title = handoff ? 'Human Handoff — Review Required' : noClientResponse
+    ? 'Feedback Closed — No Response'
+    : quick ? 'Quick Check-in — Completed Feedback' : 'Completed Feedback Summary';
+  const transcriptHeading = noClientResponse ? 'Client Has Not Responded' : 'Conversation Transcript';
+  const noResponseText = 'No response was received from the client for this feedback request.';
   const entries = [
     ['Cluster', payload.project?.clusterName], ['Client', payload.project?.clientName], ['Project', payload.project?.name],
     ['Client POC', payload.poc?.name || session.pocName], ['Feedback Type', quick ? 'Quick Check-in' : payload.cycle?.cycleType || session.sessionType],
@@ -36,14 +50,14 @@ function emailReport(eventType, payload) {
   const messages = (payload.messages || []).filter(row => row.body);
   const transcript = messages.map(row => ({ speaker: row.speaker || (row.side === 'client' ? payload.poc?.name || 'Client' : 'SRV Media'), time: row.createdAt || row.created_at || '', body: row.body, client: row.side === 'client' }));
   const text = [title, ...entries.map(([name, value]) => `${name}: ${value || 'Not set'}`),
-    ...sections.map(([name, values]) => `\n${name}\n${values.join('\n')}`), '\nConversation Transcript',
-    ...transcript.map(row => `${row.speaker} · ${row.time}\n${row.body}`)].join('\n');
+    ...sections.map(([name, values]) => `\n${name}\n${values.join('\n')}`), `\n${transcriptHeading}`,
+    ...(noClientResponse ? [noResponseText] : transcript.map(row => `${row.speaker} · ${row.time}\n${row.body}`))].join('\n');
   const c = EMAIL_COLORS;
   const heading = name => `<h2 style="font-size:17px;line-height:1.5;background:${c.section};border-left:4px solid ${c.accent};padding:10px 12px;margin:24px 0 12px;color:${c.sectionInk}">${escape(name)}</h2>`;
   const html = `<table style="width:100%;border-collapse:collapse;font-size:14px">${entries.map(([name, value]) => `<tr><th scope="row" style="text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid ${c.border};color:${c.heading}">${escape(name)}</th><td style="padding:10px 12px;border-bottom:1px solid ${c.border};color:${c.ink}">${escape(value || 'Not set')}</td></tr>`).join('')}</table>
 ${sections.map(([name, values]) => `${heading(name)}<ul style="padding-left:24px;margin:12px 0">${values.map(value => `<li style="white-space:pre-wrap;margin:8px 0">${escape(value)}</li>`).join('')}</ul>`).join('')}
-${heading('Conversation Transcript')}
-${transcript.map(row => `<div style="margin:12px ${row.client ? '24px 12px 0' : '0 12px 24px'};padding:14px;border:1px solid ${c.border};border-left:3px solid ${row.client ? '#777078' : c.accent};border-radius:6px;background:${row.client ? c.clientBubble : c.teamBubble}"><strong style="color:${c.heading}">${escape(row.speaker)}</strong><div style="font-size:12px;color:${c.muted}">${escape(row.time)}</div><div style="white-space:pre-wrap;margin-top:6px">${escape(row.body)}</div></div>`).join('')}`;
+${heading(transcriptHeading)}
+${noClientResponse ? `<p style="color:${c.ink};line-height:1.6">${noResponseText}</p>` : transcript.map(row => `<div style="margin:12px ${row.client ? '24px 12px 0' : '0 12px 24px'};padding:14px;border:1px solid ${c.border};border-left:3px solid ${row.client ? '#777078' : c.accent};border-radius:6px;background:${row.client ? c.clientBubble : c.teamBubble}"><strong style="color:${c.heading}">${escape(row.speaker)}</strong><div style="font-size:12px;color:${c.muted}">${escape(row.time)}</div><div style="white-space:pre-wrap;margin-top:6px">${escape(row.body)}</div></div>`).join('')}`;
   return { subject: `${title} | ${payload.project?.name || 'Project'} | ${payload.poc?.name || session.pocName || 'Client POC'}`, ...brandEmail({ title, html, text }) };
 }
 

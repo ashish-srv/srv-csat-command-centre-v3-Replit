@@ -98,10 +98,67 @@ async function main() {
   check(build(10, quick).text.includes('CSAT: Not collected'), true);
   const monthly = await payload('cycle_completed', { ...summary, cycle: { cycleType: 'pulse' } });
   check(build(10, monthly).allowed, true);
+  // No-response notices use the same application template in all three flows.
+  // Exercise that template through the existing n8n Code node, without sends.
+  for (const cycleType of ['pulse', 'project_end', 'quick_checkin']) {
+    const invitation = { sessionId: 'session', side: 'system', body: `${cycleType} started for Test POC.` };
+    const unanswered = { ...clone(summary), cycle: { cycleType },
+      summaryType: cycleType === 'quick_checkin' ? 'quick_checkin_poc' : 'feedback_poc',
+      csatScore: null, npsScore: null, issues: [], observations: [], appreciations: [],
+      sessions: [{ id: 'session', projectId: 'project', clientPocId: 'poc', sessionType: cycleType,
+        status: 'completed', completionStatus: 'no_response', lastClientResponseAt: null,
+        csatScore: null, npsScore: null, conversationState: { closureReason: 'no_response' } }],
+      messages: [invitation, { sessionId: 'session', side: 'bot', body: 'Reminder to share your feedback.' }] };
+    const unchanged = clone(unanswered);
+    for (const messages of [[], unanswered.messages]) {
+      const notice = build(10, await payload('cycle_completed', { ...unanswered, messages }));
+      check(notice.allowed, true);
+      check(notice.to, built.to);
+      check(notice.subject, 'Feedback Closed — No Response | Project <&> | Test POC');
+      for (const content of [notice.text, notice.html]) {
+        check(content.includes('Client Has Not Responded'), true);
+        check(content.includes('No response was received from the client for this feedback request.'), true);
+        check(content.includes('Conversation Transcript'), false);
+        check(content.includes('Completed Feedback'), false);
+        check(content.includes(invitation.body), false);
+        check(content.includes('Reminder to share your feedback.'), false);
+      }
+    }
+    // Any real inbound reply retains its transcript, even without a rating or
+    // with a stale no-response status. Do not judge feedback from its wording.
+    for (const reply of ['Start Feedback', 'Thank you', 'Still waiting for campaign results.', 'All good', '👍']) {
+      const response = build(10, await payload('cycle_completed', { ...unanswered,
+        messages: [...unanswered.messages, { sessionId: 'session', side: 'client', body: reply }] }));
+      check(response.allowed, true);
+      for (const content of [response.text, response.html]) {
+        check(content.includes('Conversation Transcript'), true);
+        check(content.includes(reply), true);
+        check(content.includes('Client Has Not Responded'), false);
+      }
+    }
+    // Historical records with unavailable transcript rows still have response
+    // evidence. Explicit zero scores and saved Quick Check-in outcomes count.
+    for (const sessionFields of [
+      { lastClientResponseAt: '2026-10-30T10:00:00Z' },
+      { csatScore: 0, csatSource: 'stated' }, { npsScore: 0, npsSource: 'stated' },
+      { conversationState: { quickCheckinOutcome: 'all_good' } },
+      { conversationState: { quickCheckinOutcome: 'feedback_shared' } }
+    ]) {
+      const response = build(10, await payload('cycle_completed', { ...unanswered,
+        sessions: [{ ...unanswered.sessions[0], ...sessionFields }] }));
+      check(response.allowed, true);
+      check(response.text.includes('Client Has Not Responded'), false);
+    }
+    const estimated = build(10, await payload('cycle_completed', { ...unanswered,
+      sessions: [{ ...unanswered.sessions[0], csatScore: 5, csatSource: 'predicted' }] }));
+    check(estimated.text.includes('Client Has Not Responded'), true);
+    check(unanswered, unchanged);
+  }
   const handoff = await payload('handoff', { project: summary.project, session: summary.sessions[0], poc: summary.poc, clientText: 'Need help' });
   check(build(3, handoff).allowed, true);
   check(build(3, handoff).recipients, ['super@example.test', 'second@example.test']);
   check(build(3, handoff).text.includes('Need human help <&>'), true);
+  check(build(3, handoff).text.includes('Client Has Not Responded'), false);
   check(build(3, { ...handoff, eventType: 'post_completion_message' }).allowed, true);
   for (const eventType of ['client_question', 'manager_alert', 'escalation', 'wrong_person', 'opt_out', 'feedback_received', 'gemini_timeout', 'cycle_completed', undefined]) {
     check(build(3, { ...handoff, eventType }).allowed, false);
