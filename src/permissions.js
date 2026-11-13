@@ -12,6 +12,8 @@ export const APP_PERMISSION_LABELS = {
   manage_project_users: "Project User management",
   add_projects: "Add projects from Project Performance",
   edit_project_performance: "Edit Project Performance",
+  zoho_push: "Push to Zoho Analytics",
+  zoho_connection_check: "Check Zoho Connection",
   manage_project_services: "Add/remove catalogue services under a project",
   birthday_centre: "View Birthday Centre",
   birthday_manage: "Manage birthday contacts, gifts and change approvals",
@@ -24,7 +26,9 @@ export const ADMIN_PERMISSION_KEYS = Object.keys(APP_PERMISSION_LABELS);
 export const PROJECT_USER_PERMISSION_KEYS = [
   "project_performance",
   "add_projects",
-  "edit_project_performance"
+  "edit_project_performance",
+  "zoho_push",
+  "zoho_connection_check"
 ];
 
 export function defaultPermissions(role) {
@@ -32,11 +36,11 @@ export function defaultPermissions(role) {
     return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, true]));
   }
   if (role === "admin") {
-    return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_")]));
+    return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_") && !key.startsWith("zoho_")]));
   }
   return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [
     key,
-    PROJECT_USER_PERMISSION_KEYS.includes(key)
+    PROJECT_USER_PERMISSION_KEYS.includes(key) && !key.startsWith("zoho_")
   ]));
 }
 

@@ -310,6 +310,8 @@ export default function ProjectPerformance({ currentUser = null }) {
   const editorIdentity = currentUser?.email || currentUser?.name || "";
   const canAddProjects = hasPermission(currentUser, "add_projects");
   const canEditPerformance = hasPermission(currentUser, "edit_project_performance");
+  const canPushZoho = hasPermission(currentUser, "project_performance") && hasPermission(currentUser, "zoho_push");
+  const canCheckZoho = hasPermission(currentUser, "project_performance") && hasPermission(currentUser, "zoho_connection_check");
   const canDirectlyManageServices = currentUser?.role === "super_admin";
   const canRequestServiceChanges = currentUser?.role !== "super_admin";
   const [data, setData] = useState(null);
@@ -334,6 +336,10 @@ export default function ProjectPerformance({ currentUser = null }) {
   const [form, setForm] = useState(formFromProject(null, editorIdentity));
   const [kpis, setKpis] = useState([]);
   const [downloadingWorkbook, setDownloadingWorkbook] = useState(false);
+  const [zohoBusy, setZohoBusy] = useState(false);
+  const [zohoMessage, setZohoMessage] = useState("");
+  const [zohoError, setZohoError] = useState("");
+  const [zohoSkipped, setZohoSkipped] = useState([]);
   const [readingWorkbook, setReadingWorkbook] = useState(false);
   const [applyingWorkbook, setApplyingWorkbook] = useState(false);
   const [workbookPreview, setWorkbookPreview] = useState(null);
@@ -581,6 +587,23 @@ export default function ProjectPerformance({ currentUser = null }) {
     }
   }
 
+  async function runZoho(checkOnly = false) {
+    if (zohoBusy || (checkOnly ? !canCheckZoho : !canPushZoho)) return;
+    setZohoBusy(true);
+    setZohoMessage(""); setZohoError(""); setZohoSkipped([]);
+    try {
+      const result = await apiPost(`/api/project-performance/zoho/${checkOnly ? "connection-check" : "push"}`);
+      if (checkOnly) {
+        setZohoMessage(`Connected to Zoho. ${result.columnCount} columns found. ${result.tokenReused ? "Existing access token reused." : "Access token generated and saved."}`);
+        if (result.missingColumns?.length) setZohoError(`Before pushing, add these Zoho columns: ${result.missingColumns.join(", ")}`);
+      } else {
+        setZohoMessage(`Zoho push completed: ${result.updated} updated, ${result.added} added, ${result.skipped.length} skipped. All accessible projects were checked, regardless of page filters.`);
+        setZohoSkipped(result.skipped);
+      }
+    } catch (requestError) { setZohoError(requestError.message || "Could not complete the Zoho operation."); }
+    finally { setZohoBusy(false); }
+  }
+
   async function readWorkbook(event) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -825,7 +848,7 @@ export default function ProjectPerformance({ currentUser = null }) {
         <button type="button" onClick={() => scrollToSection("performance-portfolio")}>Portfolio Overview</button>
         <button type="button" onClick={() => scrollToSection("performance-project-details")}>Project Details</button>
         {canEditPerformance ? <button type="button" onClick={() => scrollToSection("performance-update")}>Update Project</button> : null}
-        {canEditPerformance ? <button type="button" onClick={() => scrollToSection("performance-excel-upload")}>Excel Upload</button> : null}
+        {canEditPerformance || canPushZoho || canCheckZoho ? <button type="button" onClick={() => scrollToSection("performance-excel-upload")}>{canEditPerformance ? "Excel Upload" : "Zoho Analytics"}</button> : null}
         <button type="button" onClick={() => scrollToSection("performance-audit")}>Audit History</button>
       </nav>
 
@@ -1079,22 +1102,28 @@ export default function ProjectPerformance({ currentUser = null }) {
         )}
       </section> : null}
 
-      {canEditPerformance ? <section id="performance-excel-upload" className="performance-section-anchor">
+      {canEditPerformance || canPushZoho || canCheckZoho ? <section id="performance-excel-upload" className="performance-section-anchor">
         <div className="section-heading-inline">
-          <div><p className="eyebrow">Excel Upload</p><h3>Update Multiple Projects From One Worksheet</h3></div>
+          <div><p className="eyebrow">{canEditPerformance ? "Excel Upload" : "Zoho Analytics"}</p><h3>{canEditPerformance ? "Update Multiple Projects From One Worksheet" : "Zoho Analytics Connection and Push"}</h3></div>
         </div>
-        <Panel title="Single-Sheet Project Performance Upload" badge={workbookPreview ? workbookPreview.fileName : "One project per row"}>
+        <Panel title={canEditPerformance ? "Single-Sheet Project Performance Upload" : "Zoho Analytics"} badge={workbookPreview ? workbookPreview.fileName : "One project per row"}>
           <div className="performance-excel-intro">
-            <p>Download the current template, edit the performance columns, then upload it here. Project ID is the match key; Cluster, Client, Project Name, dates, services and CSAT Active Status are never overwritten.</p>
+            <p>{canEditPerformance ? "For Excel updates, download the template, edit the performance columns, then upload it here. Excel uploads match by Project ID; Cluster, Client, Project Name, dates, services and CSAT Active Status are never overwritten in the application." : "Use the Zoho actions enabled for your account."}</p>
             <div>
-              <Button icon={Download} onClick={downloadWorkbook} disabled={downloadingWorkbook}>{downloadingWorkbook ? "Preparing…" : "Download current data"}</Button>
-              <label className={`button primary ${readingWorkbook ? "disabled" : ""}`}>
+              {canEditPerformance ? <Button icon={Download} onClick={downloadWorkbook} disabled={downloadingWorkbook}>{downloadingWorkbook ? "Preparing…" : "Download current data"}</Button> : null}
+              {canPushZoho ? <Button icon={Upload} onClick={() => runZoho()} disabled={zohoBusy}>{zohoBusy ? "Working with Zoho…" : "Push to Zoho Analytics"}</Button> : null}
+              {canCheckZoho ? <Button icon={RefreshCw} onClick={() => runZoho(true)} disabled={zohoBusy}>Check Zoho Connection</Button> : null}
+              {canEditPerformance ? <label className={`button primary ${readingWorkbook ? "disabled" : ""}`}>
                 <Upload size={16} />{readingWorkbook ? "Reading workbook…" : "Choose .xlsx file"}
                 <input type="file" accept=".xlsx" onChange={readWorkbook} disabled={readingWorkbook} hidden />
-              </label>
+              </label> : null}
             </div>
           </div>
           {workbookMessage ? <p className="success-message performance-workbook-message">{workbookMessage}</p> : null}
+          {canPushZoho ? <p className="performance-workbook-message">Zoho push uses saved data for all accessible projects. Rows match on Client Name, Project Name, Project Type and Financial Year. Empty application fields clear matching Zoho values.</p> : null}
+          {zohoMessage ? <p className="success-message performance-workbook-message" role="status">{zohoMessage}</p> : null}
+          {zohoError ? <p className="service-request-error" role="alert">{zohoError}</p> : null}
+          {zohoSkipped.length ? <details><summary>Projects Skipped in Zoho Push ({zohoSkipped.length})</summary><div className="performance-table-scroll compact"><table className="data-table"><thead><tr><th>Project</th><th>Reason</th></tr></thead><tbody>{zohoSkipped.map((row, index) => <tr key={index}><td>{row.project}</td><td>{row.reason}</td></tr>)}</tbody></table></div></details> : null}
           {workbookPreview ? (
             <div className="performance-workbook-preview">
               {workbookPreview.ignoredSheets.length ? <p className="performance-upload-warning">Only “{workbookPreview.sheetName}” was read. Other worksheets were ignored: {workbookPreview.ignoredSheets.join(", ")}.</p> : null}

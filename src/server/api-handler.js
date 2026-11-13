@@ -14,6 +14,7 @@ const { normalizeClusterAccess, clusterVisible, authorizeClusterRequest, scopedB
 const { prepareCsatEmail } = require("../lib/csat-email-policy");
 const { handleBirthdayRequest } = require("../lib/birthday-service");
 const { captureBirthdayInbound } = require("../lib/birthday-inbound");
+const { ZohoAnalytics, ZohoError } = require("../lib/zoho-analytics");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -2828,11 +2829,11 @@ const APP_PERMISSION_KEYS = [
   "dashboard", "project_workspace", "directory", "project_performance", "manage_records",
   "manage_pocs", "manage_internal_pocs", "manage_catalogues", "messaging_controls", "bulk_sends",
   "manage_project_users", "add_projects", "edit_project_performance", "manage_project_services",
-  "birthday_centre", "birthday_manage", "birthday_reminders", "birthday_cleanup"
+  "birthday_centre", "birthday_manage", "birthday_reminders", "birthday_cleanup", "zoho_push", "zoho_connection_check"
 ];
 
 const ROLE_PERMISSION_DEFAULTS = {
-  admin: Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_")])),
+  admin: Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_") && !key.startsWith("zoho_")])),
   project_user: {
     dashboard: false,
     project_workspace: false,
@@ -3058,6 +3059,8 @@ async function projectIdVisibleToAppAccess(store, projectId, appAccess) {
 }
 
 function projectUserRouteAllowed(access, method, pathname) {
+  if (method === "POST" && pathname === "/api/project-performance/zoho/push") return hasAppPermission(access, "project_performance") && hasAppPermission(access, "zoho_push");
+  if (method === "POST" && pathname === "/api/project-performance/zoho/connection-check") return hasAppPermission(access, "project_performance") && hasAppPermission(access, "zoho_connection_check");
   if (method === "GET" && pathname === "/api/project-performance") return hasAppPermission(access, "project_performance");
   if (method === "GET" && /^\/api\/project-performance\/[^/]+\/zoho-password$/.test(pathname)) return hasAppPermission(access, "project_performance");
   if (method === "PUT" && /^\/api\/project-performance\/[^/]+$/.test(pathname)) return hasAppPermission(access, "edit_project_performance");
@@ -3069,6 +3072,8 @@ function projectUserRouteAllowed(access, method, pathname) {
 }
 
 function adminRoutePermission(method, pathname) {
+  if (method === "POST" && pathname === "/api/project-performance/zoho/push") return "zoho_push";
+  if (method === "POST" && pathname === "/api/project-performance/zoho/connection-check") return "zoho_connection_check";
   if (pathname === "/api/dashboard") return "dashboard";
   if (method === "PUT" && /^\/api\/projects\/[^/]+\/automation-settings$/.test(pathname)) return "messaging_controls";
   if (method === "POST" && pathname === "/api/project-performance/projects") return "add_projects";
@@ -5379,6 +5384,7 @@ async function handleApiRequest(request) {
     return error(500, "Data provider is not configured", storeError.message);
   }
 
+  const unscopedStore = store;
   let appAccess = null;
   let clusterContext = null;
   if (!isMachineApiPath(pathname)) {
@@ -5557,6 +5563,30 @@ async function handleApiRequest(request) {
       return leftDue - rightDue;
     });
     return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule, messaging });
+  }
+
+  if (method === "POST" && ["/api/project-performance/zoho/connection-check", "/api/project-performance/zoho/push"].includes(pathname)) {
+    const checkOnly = pathname.endsWith("connection-check");
+    if (!hasAppPermission(appAccess, "project_performance") || !hasAppPermission(appAccess, checkOnly ? "zoho_connection_check" : "zoho_push")) {
+      return error(403, "This Zoho feature is turned off for your account");
+    }
+    try {
+      const zoho = new ZohoAnalytics(store);
+      if (checkOnly) return json(200, await zoho.checkConnection());
+      // Always read saved server data and ignore browser filters, rows and IDs.
+      // The existing scoped store limits Admins; Project Users get team scope.
+      const data = await unscopedStore.getProjectPerformanceData();
+      const adminProjectIds = new Set(clusterContext?.scoped?.projects.map(project => project.id) || []);
+      const projects = appAccess.role === "project_user"
+        ? data.projects.filter(project => projectVisibleToAppAccess(project, appAccess))
+        : appAccess.role === "admin" ? data.projects.filter(project => adminProjectIds.has(project.id)) : data.projects;
+      // Global keys are used only to reject collisions, never sent to Zoho or
+      // the browser. Equal names must not overwrite another cluster's project.
+      return json(200, await zoho.push(projects, data.projects));
+    } catch (zohoError) {
+      return error(zohoError instanceof ZohoError ? zohoError.statusCode : 502,
+        zohoError instanceof ZohoError ? zohoError.message : "Zoho operation failed. Check database availability and try again.");
+    }
   }
 
   if (method === "GET" && pathname === "/api/project-performance") {

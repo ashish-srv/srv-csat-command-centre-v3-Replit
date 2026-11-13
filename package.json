@@ -14,6 +14,7 @@
     "test:birthday": "node scripts/birthday-smoke.js && node scripts/birthday-inbound-smoke.js && node scripts/birthday-workbook-smoke.mjs && node scripts/birthday-ui-smoke.js",
     "test:cluster-access": "node scripts/cluster-access-smoke.js && node scripts/cluster-http-smoke.js && node scripts/consolidated-export-smoke.js && node scripts/manage-clusters-smoke.js && npm run test:n8n-email",
     "test:n8n-email": "node scripts/n8n-email-workflows-smoke.js && node scripts/email-theme-smoke.js",
+    "test:zoho": "node scripts/zoho-analytics-smoke.js && node scripts/zoho-http-smoke.js",
     "test:feedback-history": "node scripts/feedback-history-replay.js",
     "test:acknowledgements": "node scripts/acknowledgement-continuity-smoke.js",
     "test:request-fidelity": "node scripts/request-fidelity-smoke.js",
@@ -35,7 +36,7 @@
     "db:migrate": "node scripts/migrate-postgres.js",
     "db:import:check": "node scripts/import-supabase-postgres.js --check",
     "db:import:supabase": "node scripts/import-supabase-postgres.js --replace",
-    "test:postgres": "node scripts/postgres-store-smoke.js",
+    "test:postgres": "node scripts/postgres-store-smoke.js && npm run test:zoho",
     "test:db-import": "node scripts/supabase-import-smoke.js",
     "test:quick": "node scripts/quick-checkin-smoke.js"
   },

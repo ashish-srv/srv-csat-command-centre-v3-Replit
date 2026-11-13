@@ -20,6 +20,7 @@ async function parseResponse(response) {
       "Application access has not been assigned",
       "Your role can only access Project Performance",
       "This feature is turned off for your Admin account",
+      "This Zoho feature is turned off for your account",
       "Birthday Centre access denied."
     ].includes(payload.error)) {
       window.dispatchEvent(new CustomEvent("csat:access-changed"));

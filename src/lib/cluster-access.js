@@ -95,7 +95,7 @@ async function authorizeClusterRequest(store, access, method, pathname, body = {
     return { directory, scoped, manageable };
   }
 
-  let known = global || ['/api/dashboard', '/api/projects', '/api/project-performance', '/api/admin/status', '/api/admin/directory', '/api/admin/project-teams', '/api/admin/import-workbook-template',
+  let known = global || ['/api/dashboard', '/api/projects', '/api/project-performance', '/api/project-performance/zoho/push', '/api/project-performance/zoho/connection-check', '/api/admin/status', '/api/admin/directory', '/api/admin/project-teams', '/api/admin/import-workbook-template',
     '/api/admin/projects', '/api/admin/projects/bulk', '/api/admin/projects/bulk-status', '/api/admin/project-setups', '/api/admin/clients', '/api/admin/internal-pocs', '/api/admin/services', '/api/admin/pocs', '/api/admin/client-pocs', '/api/project-performance/projects', '/api/admin/pocs/bulk-control',
     '/api/admin/project-automation/preview', '/api/admin/project-automation/bulk', '/api/admin/bulk-feedback/preview', '/api/admin/bulk-feedback/send'].includes(pathname);
   let match;
