@@ -594,8 +594,13 @@ export default function ProjectPerformance({ currentUser = null }) {
     try {
       const result = await apiPost(`/api/project-performance/zoho/${checkOnly ? "connection-check" : "push"}`);
       if (checkOnly) {
-        setZohoMessage(`Connected to Zoho. ${result.columnCount} columns found. ${result.tokenReused ? "Existing access token reused." : "Access token generated and saved."}`);
+        const dateTypes = (result.dateColumns || []).map(column => `${column.columnName}: ${column.reportedType}`).join("; ");
+        setZohoMessage(`Connected to Zoho. ${result.columnCount} columns found. ${result.tokenReused ? "Existing access token reused." : "Access token generated and saved."}${dateTypes ? ` ${dateTypes}.` : ""}`);
         if (result.missingColumns?.length) setZohoError(`Before pushing, add these Zoho columns: ${result.missingColumns.join(", ")}`);
+        else {
+          const invalid = (result.dateColumns || []).filter(column => !column.isDate);
+          if (invalid.length) setZohoError(`Review Zoho column types before pushing: ${invalid.map(column => `${column.columnName}: ${column.reportedType}`).join("; ")}`);
+        }
       } else {
         setZohoMessage(`Zoho push completed: ${result.updated} updated, ${result.added} added, ${result.skipped.length} skipped. All accessible projects were checked, regardless of page filters.`);
         setZohoSkipped(result.skipped);

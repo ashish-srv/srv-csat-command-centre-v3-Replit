@@ -58,6 +58,15 @@ All source IDs and passwords, client POC data, KPIs and CSAT data are excluded.
 Dates are `yyyy-MM-dd`; zero numeric values remain zero. The table must contain
 the agreed column names, with Start Date and End Date defined as Date columns.
 
+Date-column validation reads Zoho's metadata labels and its documented Date type
+ID (93), rather than requiring the literal import enum `DATE` in `dataType`.
+Case/spacing variants and date-time/timestamp labels are accepted; explicit text,
+numeric, time-only, conflicting and unknown types remain blocked. Check Zoho
+Connection reports the recognised Start Date/End Date types for diagnosis.
+The displayed `00:00:00` in Zoho is a column display format, not evidence that
+date-only source values were sent as timestamp strings. Push payloads still use
+`yyyy-MM-dd`.
+
 Push first validates metadata and reads only the target's four matching columns.
 It uses the documented `updateadd` import with those matching columns and the
 explicit field whitelist; it never truncates the table or deletes missing rows.
@@ -96,5 +105,6 @@ Official API references:
 
 - https://www.zoho.com/analytics/api/v2/authentication/refresh-token.html
 - https://www.zoho.com/analytics/api/v2/metadata-api/get-table-metadata.html
+- https://www.zoho.com/analytics/api/v1/metadata-api/view-metadata.html
 - https://www.zoho.com/analytics/api/v2/bulk-api/export-data.html
 - https://www.zoho.com/analytics/api/v2/bulk-api/import-data/existing-table.html

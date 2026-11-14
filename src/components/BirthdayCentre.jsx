@@ -12,6 +12,7 @@ import BirthdayReplyInbox from './BirthdayReplyInbox.jsx';
 const stages = ['Awaiting Decision', 'Gift Selected', 'Arranged', 'Delivered'];
 const months = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1).padStart(2, '0'), label: new Date(2000, i, 1).toLocaleDateString('en-IN', { month: 'long' }) }));
 const stamp = value => value ? new Date(value).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—';
+const birthdayMonthDay = value => String(value || '').match(/^(?:\d{4}-)?(\d{2}-\d{2})(?:$|T)/)?.[1] || '';
 function birthdayLabel(birthday, year) {
   const date = new Date(`${year}-${birthday}T12:00:00Z`);
   if (birthday === '02-29' && date.getUTCMonth() !== 1) date.setUTCDate(0);
@@ -37,6 +38,8 @@ export default function BirthdayCentre({ currentUser }) {
   const [filters, setFilters] = useState({ months: [currentMonth], clusters: [], organizations: [], owners: [], eligibility: [], stages: [], wishes: [], contactStates: ['active','inactive'], day: '' });
   const [search, setSearch] = useState(''), [selected, setSelected] = useState([]), [opened, setOpened] = useState('');
   const [draft, setDraft] = useState(null), [sourceId, setSourceId] = useState(''), [preview, setPreview] = useState(null);
+  const [contactError, setContactError] = useState('');
+  const [sourceNotice, setSourceNotice] = useState('');
   const [settings, setSettings] = useState(null), [gift, setGift] = useState(''), [specialGift, setSpecialGift] = useState(''), [reason, setReason] = useState('');
   const [cleanup, setCleanup] = useState(null), [password, setPassword] = useState(''), [confirmation, setConfirmation] = useState('');
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -100,9 +103,23 @@ export default function BirthdayCentre({ currentUser }) {
   const selectedVisible = filtered.filter(c => selected.includes(c.id)), selectedIds = selectedVisible.map(c => c.id);
   const openContact = contacts.find(c => c.id === opened), openOccasion = openContact ? occasionFor(openContact) : null;
   function updateFilter(key, values) { setFilters(old => ({ ...old, [key]: values })); }
-  function edit(contact = emptyContact()) { setDraft({ ...contact }); setSourceId(''); reveal(editorRef); }
+  function resetFilters() { setFilters({ months: [], clusters: [], organizations: [], owners: [], eligibility: [], stages: [], wishes: [], contactStates: ['active','inactive'], day: '' }); setSearch(''); }
+  function edit(contact = emptyContact()) { setDraft({ ...emptyContact(), ...contact, birthday: birthdayMonthDay(contact.birthday) }); setSourceId(''); setSourceNotice(''); setContactError(''); reveal(editorRef); }
   async function saveDraft(e) {
-    e.preventDefault(); if (await execute(() => apiPost('/api/birthdays/contacts', { contacts: [draft] }))) setDraft(null);
+    e.preventDefault();
+    if (busy) return;
+    setContactError(''); setError(''); setNotice('');
+    if (!draft.internalPocIds.length) {
+      setContactError('Select at least one Responsible Internal POC before saving, even if gift eligibility and birthday wishes are OFF.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiPost('/api/birthdays/contacts', { contacts: [draft] });
+      setNotice('Birthday contact saved successfully.');
+      await load(); setDraft(null);
+    } catch (e) { setContactError(e.message); }
+    finally { setBusy(false); }
   }
   async function importFile(event) {
     const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
@@ -128,8 +145,26 @@ export default function BirthdayCentre({ currentUser }) {
     await execute(() => apiPost(`/api/birthdays/contacts/${opened}/action`, { year, action, gift, specialGift, reason, ...extras }));
   }
   function copySource(id) {
-    setSourceId(id); const p = directory.clientPocs.find(c => c.id === id); if (!p) return;
-    setDraft(old => ({ ...old, name: p.name, organization: p.clientName || '', designation: p.designation || '', birthday: p.birthDate?.slice(-5) || '', email: p.contactEmail || '', whatsapp: p.contactWhatsapp || '', salutation: p.salutation || '', clusterId: p.clusterId, linkedPocIds: [id] }));
+    setSourceId(id); setSourceNotice(''); setContactError('');
+    const p = directory.clientPocs.find(c => c.id === id); if (!p) return;
+    const text = value => String(value || '').trim().toLowerCase();
+    const phone = value => String(value || '').replace(/\D/g, '');
+    const linked = contacts.filter(c => c.linkedPocIds?.includes(id));
+    const matching = linked.length ? linked : contacts.filter(c => text(c.name) === text(p.name) && text(c.organization) === text(p.clientName)
+      && ((phone(p.contactWhatsapp) && phone(c.whatsapp) === phone(p.contactWhatsapp)) || (text(p.contactEmail) && text(c.email) === text(p.contactEmail))));
+    if (matching.length > 1 || matching[0]?.removedAt) {
+      setDraft(emptyContact());
+      setContactError(matching.length > 1 ? 'Multiple birthday records match this POC. Open the intended record using Edit in the birthday table.' : 'This birthday contact was removed. Use the Removed From Birthday Flows filter and Restore the existing record before editing.');
+      return;
+    }
+    if (matching.length) {
+      const existing = matching[0];
+      setDraft({ ...emptyContact(), ...existing, birthday: birthdayMonthDay(existing.birthday), linkedPocIds: [...new Set([...(existing.linkedPocIds || []), id])] });
+      setSourceNotice('Saved birthday details loaded. Saving will update this existing birthday contact.');
+      return;
+    }
+    setDraft({ ...emptyContact(), name: p.name, organization: p.clientName || '', designation: p.designation || '', birthday: birthdayMonthDay(p.birthDate), email: p.contactEmail || '', whatsapp: p.contactWhatsapp || '', salutation: p.salutation || '', clusterId: p.clusterId, linkedPocIds: [id] });
+    setSourceNotice('CSAT details copied for a new birthday contact.');
   }
   async function confirmCleanup(e) {
     e.preventDefault();
@@ -170,9 +205,9 @@ export default function BirthdayCentre({ currentUser }) {
         <MetricCard label="WhatsApp Skipped for Feedback" value={filtered.filter(c => wishFor(c, 'whatsapp')?.result?.reason === 'Active Feedback Cycle').length} caption="Recorded skip; no automatic late wish" />
       </div>
       <Panel id="birthday-list" title="Birthdays & Gift Progress" defaultOpen>
-        <FilterBar showReset={true} onReset={() => { setFilters({ months: [], clusters: [], organizations: [], owners: [], eligibility: [], stages: [], wishes: [], contactStates: ['active','inactive'], day: '' }); setSearch(''); }}>
+        <FilterBar showReset={true} onReset={resetFilters}>
           <SingleSelect label="Birthday Year" value={String(year)} options={Array.from({ length: 8 }, (_, i) => ({ value: String(currentYear - 6 + i), label: String(currentYear - 6 + i) }))} allowClear={false} onChange={value => { setYear(Number(value)); setPreview(null); }} />
-          <MultiSelect label="Months" selected={filters.months} options={months.map(m => m.value)} renderOption={value => months.find(m => m.value === value)?.label} onChange={v => updateFilter('months', v)} />
+          <MultiSelect label="Months" selected={filters.months} options={months.map(m => m.value)} allLabel="All Months" selectAllLabel="Select All Months" renderOption={value => months.find(m => m.value === value)?.label} onChange={v => setFilters(old => ({ ...old, months: v, day: '' }))} />
           <MultiSelect label="Clusters" selected={filters.clusters} options={[...directory.clusters.map(c => c.id), 'unassigned']} renderOption={id => directory.clusters.find(c => c.id === id)?.name || 'Unassigned'} onChange={v => updateFilter('clusters', v)} />
           <MultiSelect label="Organisations" selected={filters.organizations} options={[...new Set(contacts.map(c => c.organization))].sort()} onChange={v => updateFilter('organizations', v)} />
           <MultiSelect label="Responsible POCs" selected={filters.owners} options={directory.internalPocs.map(p => p.id)} renderOption={id => directory.internalPocs.find(p => p.id === id)?.name || id} onChange={v => updateFilter('owners', v)} />
@@ -182,7 +217,7 @@ export default function BirthdayCentre({ currentUser }) {
           <MultiSelect label="Contact State" selected={filters.contactStates} options={['active','inactive','removed']} renderOption={v => ({ active: 'Active', inactive: 'Inactive', removed: 'Removed From Birthday Flows' }[v])} onChange={v => updateFilter('contactStates', v)} />
         </FilterBar>
         <label className="birthday-search">Search Contacts, Organisations or Gifts<input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search names, organisations, email, number or gift" /></label>
-        <div className="birthday-actions"><Button disabled={busy} onClick={() => execute(() => downloadBirthdayWorkbook(directory, filtered), 'Filtered birthday contacts downloaded.')}>Download Filtered Excel</Button><span>{filters.day ? <Button onClick={() => updateFilter('day', '')}>Clear Today Filter</Button> : <Button onClick={() => setFilters(old => ({ ...old, months: [], day: `${currentMonth}-${local.find(p => p.type === 'day').value}` }))}>Today’s Birthdays</Button>}{selectedIds.length} selected within {filtered.length} matching birthdays</span></div>
+        <div className="birthday-actions"><Button disabled={busy} onClick={() => execute(() => downloadBirthdayWorkbook(directory, filtered), 'Filtered birthday contacts downloaded.')}>Download Filtered Excel</Button><Button onClick={() => setFilters(old => ({ ...old, months: [], day: '' }))}>All Months</Button><Button onClick={() => setFilters(old => ({ ...old, months: [currentMonth], day: '' }))}>This Month</Button><Button onClick={resetFilters}>Show All Birthday Contacts</Button><span>{filters.day ? <Button onClick={() => updateFilter('day', '')}>Clear Today Filter</Button> : <Button onClick={() => setFilters(old => ({ ...old, months: [], day: `${currentMonth}-${local.find(p => p.type === 'day').value}` }))}>Today’s Birthdays</Button>}{selectedIds.length} selected within {filtered.length} matching birthdays</span></div>
         <div className="birthday-table-scroll" tabIndex={0} role="region" aria-label="Birthday contacts table"><table className="birthday-table"><thead><tr><th><input type="checkbox" aria-label="Select all matching birthdays" checked={!!filtered.length && filtered.every(c => selected.includes(c.id))} onChange={e => setSelected(e.target.checked ? filtered.map(c => c.id) : [])} /></th>{['Birthday / Contact','Organisation / Cluster','Responsible POCs','Gift / Progress','Email Wish','WhatsApp Wish','Actions'].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>
           {filtered.map(c => { const o = occasionFor(c); return <tr key={c.id} className={opened === c.id ? 'opened' : ''}><td><input type="checkbox" aria-label={`Select ${c.name}`} checked={selected.includes(c.id)} onChange={e => setSelected(old => e.target.checked ? [...old, c.id] : old.filter(id => id !== c.id))} /></td><td><strong>{birthdayLabel(c.birthday, year)}</strong><b>{c.name}</b><small>{c.designation || 'Designation not set'} · {c.removedAt ? 'Removed' : c.active ? 'Active' : 'Inactive'}</small></td><td><b>{c.organization}</b><span>{directory.clusters.find(cluster => cluster.id === c.clusterId)?.name || 'Unassigned'}</span></td><td>{c.internalPocIds.map(id => <span key={id}>{directory.internalPocs.find(p => p.id === id)?.name || 'Unavailable POC'}</span>)}</td><td><strong className="birthday-gift">{o.historyCleared ? 'Gift History Cleared' : o.gift || (o.giftEligible ? 'Gift Not Selected' : 'Not Gift Eligible')}</strong>{o.historyCleared || o.giftEligible || o.gift ? <Progress occasion={o} /> : null}{o.escalated && !o.gift ? <span className="birthday-badge attention">Escalated</span> : null}{o.changeRequests?.some(r => r.status === 'pending') ? <span className="birthday-badge attention">Change Requested</span> : null}{o.deliveryReason ? <span className="birthday-reason">Not Delivered: {o.deliveryReason}</span> : null}</td><td><WishStatus contact={c} channel="email" caption={wishLabel(c, 'email')} /></td><td><WishStatus contact={c} channel="whatsapp" caption={wishLabel(c, 'whatsapp')} /></td><td><Button onClick={() => { setOpened(c.id); loadHistory(c.id); setGift(''); setSpecialGift(''); setReason(''); reveal(detailsRef); }}>Open</Button>{canManage ? c.removedAt ? <Button disabled={busy} onClick={() => execute(() => apiPost(`/api/birthdays/contacts/${c.id}/restore`))}>Restore</Button> : <Button onClick={() => edit(c)}>Edit</Button> : null}</td></tr>; })}
           {!filtered.length ? <tr><td colSpan={8}>No birthdays match these filters. Clear filters or add contacts.</td></tr> : null}
@@ -193,16 +228,24 @@ export default function BirthdayCentre({ currentUser }) {
       {canManage ? <Panel id="birthday-import" title="Bulk Birthday Excel Upload" className="birthday-section"><p>Fill one input sheet. Separate multiple responsible Internal POC emails with <strong>|</strong>. New contacts start with both wish channels OFF.</p><div className="birthday-actions"><Button disabled={busy} onClick={() => execute(() => downloadBirthdayWorkbook(directory), 'Birthday Excel template downloaded.')}>Download Excel Template</Button><Button disabled={busy} onClick={() => fileRef.current?.click()}>Choose Excel Upload</Button><input ref={fileRef} type="file" accept=".xlsx" hidden onChange={importFile} /></div>
         {preview ? <div className="birthday-preview"><h4>Import Preview · {preview.contacts.length} Contacts</h4>{preview.errors.length ? <div className="birthday-bounded" role="alert">{preview.errors.map((e, i) => <p key={i}>{e}</p>)}</div> : <p>Validation passed. No data has been saved yet.</p>}<div className="birthday-bounded">{preview.contacts.map((c, i) => <p key={i}><strong>{c.name}</strong> · {c.organization} · {c.birthday} · {c.internalPocIds.length} responsible POCs · {c.id ? 'Update existing' : 'New contact; wishes OFF'}</p>)}</div><Button variant="primary" disabled={busy || !!preview.errors.length} onClick={async () => { if (await execute(() => apiPost('/api/birthdays/contacts', { contacts: preview.contacts }), `${preview.contacts.length} birthday contacts saved.`)) setPreview(null); }}>Confirm Import</Button><Button disabled={busy} onClick={() => setPreview(null)}>Cancel Preview</Button></div> : null}
       </Panel> : null}
-      {canManage ? <div id="birthday-editor" ref={editorRef} className="birthday-section"><Panel title={draft?.id ? `Edit Birthday Contact — ${draft.name}` : 'Add Birthday Contact'}><Button disabled={busy} onClick={() => edit()}>Add New Birthday Contact</Button>{draft ? <form onSubmit={saveDraft} className="birthday-editor"><SingleSelect label="Copy Existing CSAT Contact (Optional)" value={sourceId} options={directory.clientPocs.map(p => ({ value: p.id, label: `${p.name} · ${p.clientName} · ${p.projectName}` }))} onChange={copySource} />
+      {canManage ? <div id="birthday-editor" ref={editorRef} className="birthday-section"><Panel title={draft?.id ? `Edit Birthday Contact — ${draft.name}` : 'Add Birthday Contact'}><Button disabled={busy} onClick={() => edit()}>Add New Birthday Contact</Button>{draft ? <form onSubmit={saveDraft} className="birthday-editor"><SingleSelect label="Copy Existing CSAT Contact (Optional)" value={sourceId} options={directory.clientPocs.map(p => ({ value: p.id, label: `${p.name} · ${p.clientName} · ${p.projectName}` }))} onChange={copySource} />{sourceNotice ? <p role="status" className="birthday-notice">{sourceNotice}</p> : null}
         <div className="birthday-form-grid">{[['name','POC Name'],['organization','Organisation / Client'],['designation','Designation'],['salutation','Salutation'],['birthday','Birthday (MM-DD or YYYY-MM-DD)'],['email','Email'],['whatsapp','WhatsApp Number With Country Code']].map(([key, label]) => <label key={key}>{label}<input required={['name','organization','birthday'].includes(key)} value={draft[key]} onChange={e => setDraft(old => ({ ...old, [key]: e.target.value }))} /></label>)}
           <SingleSelect label="Cluster" value={draft.clusterId || ''} placeholder="Unassigned" options={directory.clusters.map(c => ({ value: c.id, label: c.name }))} onChange={value => setDraft(old => ({ ...old, clusterId: value || null }))} />
-          <MultiSelect label="Responsible Internal POCs" options={directory.internalPocs.filter(p => p.active !== false).map(p => p.id)} selected={draft.internalPocIds} allLabel="Select Internal POCs" renderOption={id => { const p = directory.internalPocs.find(p => p.id === id); return `${p?.name} · ${p?.email || 'Email missing'}`; }} onChange={ids => setDraft(old => ({ ...old, internalPocIds: ids }))} />
+          <div><MultiSelect label="Responsible Internal POCs" options={directory.internalPocs.filter(p => p.active !== false).map(p => p.id)} selected={draft.internalPocIds} allLabel="Select Internal POCs" renderOption={id => { const p = directory.internalPocs.find(p => p.id === id); return `${p?.name} · ${p?.email || 'Email missing'}`; }} onChange={ids => { setDraft(old => ({ ...old, internalPocIds: ids })); setContactError(''); }} /><small>Required: select at least one responsible person with a valid email, even when gifts and wishes are OFF.</small></div>
           <MultiSelect label="Linked CSAT Contacts (Optional)" options={directory.clientPocs.map(p => p.id)} selected={draft.linkedPocIds} allLabel="No CSAT project required" renderOption={id => { const p = directory.clientPocs.find(p => p.id === id); return `${p?.name} · ${p?.projectName}`; }} onChange={ids => setDraft(old => ({ ...old, linkedPocIds: ids }))} />
           <label>Delivery Address<textarea value={draft.address} onChange={e => setDraft(old => ({ ...old, address: e.target.value }))} /></label><label>Notes<textarea value={draft.notes} onChange={e => setDraft(old => ({ ...old, notes: e.target.value }))} /></label>
-        </div><div className="birthday-switches">{[['active','Contact Active'],['giftEligible','Gift Eligible by Default'],['emailEnabled','Email Birthday Wishes'],['whatsappOptIn','WhatsApp Messaging Permission Recorded'],['whatsappEnabled','WhatsApp Birthday Wishes']].map(([key, label]) => <label key={key} className={['emailEnabled','whatsappEnabled'].includes(key) ? `birthday-channel-switch ${draft[key] ? 'is-on' : 'is-off'}` : ''}><input type="checkbox" checked={draft[key]} onChange={e => setDraft(old => ({ ...old, [key]: e.target.checked }))} /><span>{label}{['emailEnabled','whatsappEnabled'].includes(key) ? `: ${draft[key] ? 'ON' : 'OFF'}` : ''}</span></label>)}</div><div className="birthday-actions"><button className="button primary" type="submit" disabled={busy}>Save Birthday Contact</button><Button disabled={busy} onClick={() => setDraft(null)}>Cancel</Button></div></form> : <p>Add someone independently, or copy their contact details from CSAT.</p>}</Panel></div> : null}
+        </div><div className="birthday-switches">{[['active','Contact Active'],['giftEligible','Gift Eligible by Default'],['emailEnabled','Email Birthday Wishes'],['whatsappOptIn','WhatsApp Messaging Permission Recorded'],['whatsappEnabled','WhatsApp Birthday Wishes']].map(([key, label]) => <label key={key} className={['emailEnabled','whatsappEnabled'].includes(key) ? `birthday-channel-switch ${draft[key] ? 'is-on' : 'is-off'}` : ''}><input type="checkbox" checked={draft[key]} onChange={e => setDraft(old => ({ ...old, [key]: e.target.checked }))} /><span>{label}{['emailEnabled','whatsappEnabled'].includes(key) ? `: ${draft[key] ? 'ON' : 'OFF'}` : ''}</span></label>)}</div><div className="birthday-actions">{contactError ? <p className="birthday-reason" role="alert">{contactError}</p> : null}<button className="button primary" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save Birthday Contact'}</button><Button disabled={busy} onClick={() => { setDraft(null); setContactError(''); }}>Cancel</Button></div></form> : <p>Add someone independently, or copy their contact details from CSAT.</p>}</Panel></div> : null}
       {canManage ? <BirthdayInternalPocs directory={directory} contacts={contacts} canAdd={hasPermission(currentUser, 'manage_internal_pocs')} onCreated={ownerCreated} /> : null}
       <BirthdayReplyInbox key={year} year={year} canManage={canManage} refreshToken={data} />
       <div id="birthday-details" ref={detailsRef} className="birthday-section"><Panel title={openContact ? `${openContact.name} · ${openContact.organization} · ${year}` : 'Gift Decisions & Birthday History'}>{!openContact ? <p>Open a birthday from the table to view its gift, approvals and history.</p> : <>
+        <h4>Birthday Contact Details</h4><dl className="birthday-contact-details">{[
+          ['Full Name', openContact.name], ['Birthday', birthdayLabel(openContact.birthday, year)], ['Organisation / Client', openContact.organization],
+          ['Cluster', directory.clusters.find(c => c.id === openContact.clusterId)?.name || 'Unassigned'], ['Designation', openContact.designation],
+          ['Email', openContact.email], ['WhatsApp Number', openContact.whatsapp], ['Salutation', openContact.salutation],
+          ['Contact Status', openContact.removedAt ? 'Removed' : openContact.active ? 'Active' : 'Inactive'],
+          ['Responsible Internal POCs', openContact.internalPocIds.map(id => { const p = directory.internalPocs.find(person => person.id === id); return p ? `${p.name} (${p.email || 'Email missing'})` : 'Unavailable POC'; }).join('; ')],
+          ['Delivery Address', openContact.address], ['Notes', openContact.notes]
+        ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || 'Not Set'}</dd></div>)}</dl>
         <div className="birthday-contact-channels" aria-label="Birthday wish settings for selected contact"><WishStatus contact={openContact} channel="email" caption={wishLabel(openContact, 'email')} /><WishStatus contact={openContact} channel="whatsapp" caption={wishLabel(openContact, 'whatsapp')} /></div><Progress occasion={openOccasion} /><p><strong>Selected Gift:</strong> {openOccasion.gift || 'Awaiting decision'} · <strong>Selected By:</strong> {openOccasion.selectedBy || '—'}</p><p><strong>Selection Time:</strong> {stamp(openOccasion.selectedAt)} · <strong>Gift Eligible for {year}:</strong> {openOccasion.giftEligible ? 'Yes' : 'No'}</p>
         {historyLoading ? <p role="status">Loading birthday history…</p> : null}
         {openOccasion.deliveryReason ? <p className="birthday-reason">Not Delivered: {openOccasion.deliveryReason} · {openOccasion.deliveryCheckedBy} · {stamp(openOccasion.deliveryCheckedAt)}</p> : null}

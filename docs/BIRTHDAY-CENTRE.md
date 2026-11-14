@@ -56,6 +56,21 @@ engine. Birthday-only organisations are entered directly.
 
 ## Contacts and Excel
 
+The birthday table starts with the current month. Use **All Months** to remove
+the month/day restriction while keeping other filters, or **Show All Birthday
+Contacts** to clear search and filters and show active/inactive contacts across
+all months. Removed contacts remain available through the Contact State filter.
+The Months dropdown also provides Select All Months, search, Clear and OK.
+Open a table row for contact details, responsible POCs, wish status and gift history.
+
+Selecting Copy Existing CSAT Contact loads an already-linked birthday record
+with its saved date, ID, version, owners and channel preferences. A unique exact
+name/organisation plus matching email or phone can also locate an imported,
+unlinked birthday contact. Names alone never match. Removed or ambiguous records
+require an explicit table selection/restoration. New copies start with wishes
+OFF and accept CSAT dates in date-only or ISO timestamp form. Birthday edits
+remain separate from CSAT dates and feedback; this UI update needs no migration.
+
 ### Internal gift owners and compact sections
 
 Birthday Centre → Internal Gift POCs lists only people assigned to at least one

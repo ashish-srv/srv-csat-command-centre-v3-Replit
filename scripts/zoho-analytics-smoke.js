@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { ZohoAnalytics, TOKEN_KEY, MATCH_COLUMNS, COLUMN_NAMES, projectRow, preparePush, parseTargetKeys, toCsv } = require('../src/lib/zoho-analytics');
+const { ZohoAnalytics, TOKEN_KEY, MATCH_COLUMNS, COLUMN_NAMES, dateColumnInfo, projectRow, preparePush, parseTargetKeys, toCsv } = require('../src/lib/zoho-analytics');
 
 // A transactional single-record fixture, shared across independent clients.
 // No production database, Zoho account or external network is used.
@@ -94,6 +94,7 @@ async function main() {
   assert.equal(f.pool.record, null); assert.equal(f.state.calls.length, 0, 'No startup OAuth request');
   let result = await f.client().checkConnection();
   assert.equal(result.connected, true); assert.equal(result.tokenReused, false); assert.deepEqual(result.missingColumns, []);
+  assert.ok(result.dateColumns.every(column => column.isDate));
   assert.equal(f.state.tokenCalls, 1);
   const original = structuredClone(f.pool.record);
   assert.ok(!JSON.stringify(f.pool.record).includes('fixture-access-token-1'));
@@ -148,6 +149,40 @@ async function main() {
     Object.fromEntries(MATCH_COLUMNS.map(name => [name, complex[name]])));
   for (const text of ['{"status":"failure"}', 'Client Name,Project Name\nA,B', '"unclosed']) assert.throws(() => parseTargetKeys(text));
   console.log('PASS exact four-column matching, duplicates, whitespace/case conflicts, date-only values and quoted CSV');
+
+  const validDates = [
+    { dataType: 'DATE' }, { dataType: 'date' }, { dataType: ' Date ' },
+    { dataTypeName: 'Date', dataTypeId: 93 }, { dataType: 93, dataTypeName: 'Date' },
+    { dataTypeId: 93 }, { dataTypeId: '93' }, { dataType: '93' },
+    { dataType: 'DATETIME' }, { dataTypeName: 'Date Time' }, { dataType: 'DATE_TIME' },
+    { dataType: 'TIMESTAMP', dataTypeName: 'Date' }
+  ];
+  for (const metadata of validDates) {
+    for (const name of ['Start Date', 'End Date']) {
+      assert.equal(dateColumnInfo(metadata, name).isDate, true);
+      const d = fixture();
+      d.state.columns = d.state.columns.map(column => column.columnName === name ? { columnName: name, ...metadata } : column);
+      assert.equal((await d.client().push([project])).confirmed, 1, `${name}: ${JSON.stringify(metadata)}`);
+      assert.equal(d.state.imports.length, 1);
+      assert.ok(d.state.imports[0].includes('"2026-04-01"'));
+      assert.ok(!d.state.imports[0].includes('T00:00:00'));
+    }
+  }
+  for (const metadata of [{}, { dataType: 'PLAIN' }, { dataTypeName: 'Plain Text' }, { dataType: 'TEXT' },
+    { dataType: 'NUMBER' }, { dataTypeId: 1 }, { dataType: 'UPDATE' }, { dataType: 'DATE_FORMAT' },
+    { dataType: 'TIME' }, { dataTypeId: [93] }, { dataTypeId: { value: 93 } },
+    { dataType: 'PLAIN', dataTypeName: 'Date', dataTypeId: 93 }]) {
+    for (const name of ['Start Date', 'End Date']) {
+      const d = fixture();
+      d.state.columns = d.state.columns.map(column => column.columnName === name ? { columnName: name, ...metadata } : column);
+      const status = await d.client().checkConnection();
+      assert.equal(status.dateColumns.find(column => column.columnName === name).isDate, false);
+      await assert.rejects(d.client().push([project]), error => error.statusCode === 422 && error.message.startsWith(name));
+      assert.equal(d.state.imports.length, 0);
+    }
+  }
+  assert.equal(dateColumnInfo({ dataTypeName: '<script>unsafe</script>' }, 'Start Date').reportedType, 'Unknown');
+  console.log('PASS documented Date metadata, case/spacing variants and Date-Time types in both date columns; text/numeric/unknown types block imports');
 
   const p = fixture();
   const pushed = await p.client().push([project, next]);

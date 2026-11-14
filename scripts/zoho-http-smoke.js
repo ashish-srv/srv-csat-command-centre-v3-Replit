@@ -127,9 +127,13 @@ async function main() {
     assert.match(messages, /Missing Financial Year/);
     if (check) {
       const checking = check.props.onClick();
-      finish({ columnCount: 26, tokenReused: true, missingColumns: [] });
+      finish({ columnCount: 26, tokenReused: true, missingColumns: [], dateColumns: [
+        { columnName: 'Start Date', reportedType: 'Date', isDate: true },
+        { columnName: 'End Date', reportedType: 'Date Time', isDate: true }
+      ] });
       await checking; await h.settle();
       assert.match(JSON.stringify(h.tree), /Existing access token reused/);
+      assert.match(JSON.stringify(h.tree), /Start Date: Date; End Date: Date Time/);
     }
   }
   for (const role of ['admin', 'project_user']) {

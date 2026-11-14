@@ -23,7 +23,7 @@ function useOutsideClose(onClose, menuRef) {
  * friendlier label — the cycle type is stored as "pulse" but reads
  * "30-Day Feedback", and matching on the label would break the filter.
  */
-export function MultiSelect({ label, options, selected, onChange, allLabel = "All", renderOption }) {
+export function MultiSelect({ label, options, selected, onChange, allLabel = "All", renderOption, selectAllLabel = "" }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState(null);
@@ -133,6 +133,7 @@ export function MultiSelect({ label, options, selected, onChange, allLabel = "Al
             {!visibleOptions.length ? <span className="filter-empty">No matching options</span> : null}
           </div>
           <div className="filter-menu-actions">
+            {selectAllLabel ? <button type="button" className="filter-clear" onClick={() => onChange([...options])} disabled={!options.length || options.every(option => selected.includes(option))}>{selectAllLabel}</button> : null}
             <button
               type="button"
               className="filter-clear"

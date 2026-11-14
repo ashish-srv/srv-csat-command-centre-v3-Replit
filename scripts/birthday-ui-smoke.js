@@ -67,6 +67,157 @@ async function main() {
   helpers.exports.revealBirthdaySection('direct'); helpers.exports.revealBirthdaySection('wrapper'); helpers.exports.revealBirthdaySection('missing');
   assert.deepEqual(navigated, ['birthday-settings', 'direct', 'wrapper']);
 
+  // A copied CSAT contact still needs an assigned birthday owner. Show why
+  // Save is blocked inside the editor rather than above the birthday table.
+  const contactWrites = [];
+  let storedBirthdayContacts = [];
+  let contactFailure = '';
+  const source = { id: 'csat-1', name: 'Copied Client POC', clientName: 'Existing Client', projectName: 'Existing Project', birthDate: '', contactEmail: 'client@example.com', contactWhatsapp: '', clusterId: 'c1', designation: 'Director', salutation: 'Client Sir' };
+  const sourceContacts = [source];
+  const editor = new ComponentHarness('src/components/BirthdayCentre.jsx', { currentUser: { role: 'super_admin' } }, '/birthdays',
+    async () => ({ directory: { ...directory, clientPocs: sourceContacts }, contacts: JSON.parse(JSON.stringify(storedBirthdayContacts)), occasions: [], jobs: [], events: [], settings, year: 2026 }), null,
+    { modules: { '../permissions': permissions, './BirthdaySection.jsx': { __esModule: true, default: 'BirthdaySection', revealBirthdaySection: () => {} } }, write: async (url, body) => {
+      contactWrites.push({ url, body });
+      if (contactFailure) throw new Error(contactFailure);
+      storedBirthdayContacts = [{ ...body.contacts[0], id: 'birthday-1', version: (storedBirthdayContacts[0]?.version || 0) + 1 }];
+      return { contacts: JSON.parse(JSON.stringify(storedBirthdayContacts)) };
+    } });
+  editor.window.setInterval = () => 1; editor.window.clearInterval = () => {};
+  await editor.settle();
+  editor.find(n => n.props.children === 'Add New Birthday Contact').props.onClick(); await editor.settle();
+  editor.find(n => n.props.label === 'Copy Existing CSAT Contact (Optional)').props.onChange(source.id); await editor.settle();
+  labelInput(editor, 'Birthday (MM-DD or YYYY-MM-DD)').props.onChange({ target: { value: '08-02' } }); await editor.settle();
+  const contactForm = () => editor.find(n => n.props.className === 'birthday-editor');
+  const saveArea = () => elements(contactForm(), n => n.props.className === 'birthday-actions')[0];
+  await contactForm().props.onSubmit(event); await editor.settle();
+  assert.equal(contactWrites.length, 0, 'missing owner is caught before any save request');
+  assert.match(elements(saveArea(), n => n.props.role === 'alert')[0].props.children, /select at least one Responsible Internal POC/i);
+  assert.equal(labelInput(editor, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '08-02');
+  editor.find(n => n.props.label === 'Responsible Internal POCs').props.onChange(['p1']); await editor.settle();
+  assert.equal(elements(saveArea(), n => n.props.role === 'alert').length, 0);
+  contactFailure = 'This birthday contact already exists. Edit the existing contact.';
+  await contactForm().props.onSubmit(event); await editor.settle();
+  assert.equal(elements(saveArea(), n => n.props.role === 'alert')[0].props.children, contactFailure, 'server save errors stay beside Save');
+  assert.equal(labelInput(editor, 'POC Name').props.value, source.name, 'failed save preserves copied contact details');
+  contactFailure = '';
+  await contactForm().props.onSubmit(event); await editor.settle();
+  assert.ok(!contactForm(), 'successful save closes the completed editor');
+  assert.match(editor.find(n => n.props.className === 'birthday-notice').props.children, /contact saved successfully/i);
+  assert.equal(contactWrites.length, 2);
+  assert.ok(contactWrites.every(w => w.url === '/api/birthdays/contacts'), 'saving a birthday contact does not write CSAT records');
+  const savedContact = contactWrites.at(-1).body.contacts[0];
+  assert.equal(savedContact.birthday, '08-02'); assert.equal(savedContact.whatsapp, '');
+  assert.deepEqual(Array.from(savedContact.linkedPocIds), [source.id]);
+  assert.deepEqual(Array.from(savedContact.internalPocIds), ['p1']);
+  assert.equal(savedContact.emailEnabled, false); assert.equal(savedContact.whatsappEnabled, false); assert.equal(savedContact.giftEligible, false);
+
+  // Reopen from the real birthday table, then update and refresh. CSAT's
+  // original birthDate remains empty and must not replace the birthday date.
+  editor.find(n => n.props.label === 'Months').props.onChange([]); await editor.settle();
+  const openBirthdayEdit = async () => { editor.find(n => n.props.children === 'Edit').props.onClick(); await editor.settle(); };
+  await openBirthdayEdit();
+  assert.equal(labelInput(editor, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '08-02', 'table Edit loads the saved birthday');
+  labelInput(editor, 'Birthday (MM-DD or YYYY-MM-DD)').props.onChange({ target: { value: '12-09' } }); await editor.settle();
+  await contactForm().props.onSubmit(event); await editor.settle();
+  assert.equal(contactWrites.at(-1).body.contacts[0].id, 'birthday-1', 'editing updates the same birthday contact');
+  assert.equal(contactWrites.at(-1).body.contacts[0].version, 1);
+  await editor.find(n => n.props.children === 'Refresh Birthday Status').props.onClick(); await editor.settle();
+  await openBirthdayEdit();
+  assert.equal(labelInput(editor, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '12-09', 'edited birthday survives save, refresh and reopening');
+  assert.equal(source.birthDate, '', 'birthday editing leaves CSAT data unchanged');
+
+  // The Add form must resolve an existing linked birthday record, rather than
+  // copying the empty CSAT birthDate and accidentally creating a duplicate.
+  storedBirthdayContacts[0] = { ...storedBirthdayContacts[0], internalPocIds: ['p1','p3'], giftEligible: true, emailEnabled: true, whatsappEnabled: true, whatsappOptIn: true, whatsapp: '919876543210', address: 'Saved delivery address', notes: 'Saved birthday notes' };
+  await editor.find(n => n.props.children === 'Refresh Birthday Status').props.onClick(); await editor.settle();
+  editor.find(n => n.props.children === 'Add New Birthday Contact').props.onClick(); await editor.settle();
+  editor.find(n => n.props.label === 'Copy Existing CSAT Contact (Optional)').props.onChange(source.id); await editor.settle();
+  assert.equal(labelInput(editor, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '12-09');
+  assert.deepEqual(Array.from(editor.find(n => n.props.label === 'Responsible Internal POCs').props.selected), ['p1','p3']);
+  assert.ok(editor.find(n => n.props.title === `Edit Birthday Contact — ${source.name}`));
+  assert.ok(editor.find(n => n.props.role === 'status' && /Saved birthday details loaded/.test(n.props.children)));
+  await contactForm().props.onSubmit(event); await editor.settle();
+  const reselected = contactWrites.at(-1).body.contacts[0];
+  assert.equal(reselected.id, 'birthday-1'); assert.equal(reselected.version, 2);
+  for (const key of ['emailEnabled','whatsappEnabled','whatsappOptIn','giftEligible']) assert.equal(reselected[key], true, key);
+  assert.equal(reselected.address, 'Saved delivery address'); assert.equal(reselected.notes, 'Saved birthday notes');
+  sourceContacts.push({ ...source, id: 'another-person', name: 'Another Person', contactEmail: 'another@example.com', birthDate: '1990-04-15T00:00:00.000Z' });
+  await editor.find(n => n.props.children === 'Refresh Birthday Status').props.onClick(); await editor.settle();
+  await openBirthdayEdit();
+  editor.find(n => n.props.label === 'Copy Existing CSAT Contact (Optional)').props.onChange('another-person'); await editor.settle();
+  assert.ok(editor.find(n => n.props.title === 'Add Birthday Contact'), 'switching to a new POC does not retain a different saved record ID');
+  assert.equal(labelInput(editor, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '04-15');
+  assert.equal(editor.find(n => n.props.label === 'Responsible Internal POCs').props.selected.length, 0, 'new POC does not inherit another contact\'s owners');
+  const newSwitches = elements(editor.find(n => n.props.className === 'birthday-switches'), n => n.type === 'input');
+  assert.deepEqual(newSwitches.map(n => n.props.checked), [true,false,false,false,false], 'new POC keeps safe default switches');
+
+  async function copiedFixture(person, saved = []) {
+    const writes = [];
+    const fixture = new ComponentHarness('src/components/BirthdayCentre.jsx', { currentUser: { role: 'super_admin' } }, '/birthdays',
+      async () => ({ directory: { ...directory, clientPocs: [person] }, contacts: saved, occasions: [], jobs: [], events: [], settings, year: 2026 }), null,
+      { modules: { '../permissions': permissions, './BirthdaySection.jsx': { __esModule: true, default: 'BirthdaySection', revealBirthdaySection: () => {} } }, write: async (url, body) => { writes.push({ url, body }); return {}; } });
+    fixture.window.setInterval = () => 1; fixture.window.clearInterval = () => {};
+    await fixture.settle();
+    fixture.find(n => n.props.children === 'Add New Birthday Contact').props.onClick(); await fixture.settle();
+    fixture.find(n => n.props.label === 'Copy Existing CSAT Contact (Optional)').props.onChange(person.id); await fixture.settle();
+    return { fixture, writes };
+  }
+  for (const birthDate of ['1985-08-02', '1985-08-02T00:00:00.000Z', '08-02']) {
+    const { fixture } = await copiedFixture({ ...source, birthDate });
+    assert.equal(labelInput(fixture, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '08-02', birthDate);
+  }
+  const unlinked = { ...storedBirthdayContacts[0], linkedPocIds: [], whatsapp: '' };
+  const matched = await copiedFixture(source, [unlinked]);
+  assert.equal(labelInput(matched.fixture, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '12-09', 'unique name, organisation and email can find an unlinked imported birthday');
+  assert.deepEqual(Array.from(matched.fixture.find(n => n.props.label === 'Linked CSAT Contacts (Optional)').props.selected), [source.id]);
+  const unrelated = await copiedFixture({ ...source, id: 'csat-other', name: 'Someone Else' }, [unlinked]);
+  assert.equal(labelInput(unrelated.fixture, 'Birthday (MM-DD or YYYY-MM-DD)').props.value, '', 'shared email alone cannot load a different person');
+  assert.ok(!unrelated.fixture.find(n => n.props.title === `Edit Birthday Contact — ${source.name}`));
+  for (const rows of [[{ ...storedBirthdayContacts[0], removedAt: '2026-10-01' }], [storedBirthdayContacts[0], { ...storedBirthdayContacts[0], id: 'duplicate-link' }]]) {
+    const { fixture, writes } = await copiedFixture(source, rows);
+    assert.match(fixture.find(n => n.props.role === 'alert').props.children, /removed|Multiple birthday records/);
+    assert.equal(writes.length, 0, 'removed or ambiguous records are never restored or changed automatically');
+  }
+
+  // All-month controls must remove today's day restriction. The full reset
+  // also clears other filters and search, while All Months retains them.
+  const localParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', month: '2-digit' }).formatToParts(new Date());
+  const nowMonth = localParts.find(p => p.type === 'month').value;
+  const otherMonths = ['01','06','12'].filter(month => month !== nowMonth).slice(0, 2);
+  const birthdayRows = [nowMonth, ...otherMonths].map((month, index) => ({ ...storedBirthdayContacts[0], id: `view-${index}`, name: `Birthday ${index}`, organization: `Client ${index}`, birthday: `${month}-01`, active: index !== 2 }));
+  const view = new ComponentHarness('src/components/BirthdayCentre.jsx', { currentUser: { role: 'super_admin' } }, '/birthdays',
+    async () => ({ directory, contacts: birthdayRows, occasions: [], jobs: [], events: [], settings, year: 2026 }), null, { modules: { '../permissions': permissions, './BirthdaySection.jsx': { __esModule: true, default: 'BirthdaySection', revealBirthdaySection: () => {} } } });
+  view.window.setInterval = () => 1; view.window.clearInterval = () => {}; await view.settle();
+  const visible = () => birthdayRows.filter(row => view.find(n => n.type === 'b' && n.props.children === row.name)).map(row => row.id);
+  assert.deepEqual(visible(), ['view-0']);
+  view.find(n => n.props.children === 'All Months').props.onClick(); await view.settle();
+  assert.equal(visible().length, 3);
+  assert.equal(view.find(n => n.props.label === 'Months').props.allLabel, 'All Months');
+  view.find(n => n.props.children === 'Today’s Birthdays').props.onClick(); await view.settle();
+  view.find(n => n.props.children === 'All Months').props.onClick(); await view.settle();
+  assert.equal(visible().length, 3); assert.ok(!view.find(n => n.props.children === 'Clear Today Filter'));
+  view.find(n => n.props.children === 'This Month').props.onClick(); await view.settle(); assert.deepEqual(visible(), ['view-0']);
+  view.find(n => n.props.label === 'Organisations').props.onChange(['Client 1']); await view.settle();
+  view.find(n => n.props.children === 'All Months').props.onClick(); await view.settle(); assert.deepEqual(visible(), ['view-1']);
+  view.find(n => n.props.children === 'Show All Birthday Contacts').props.onClick(); await view.settle(); assert.equal(visible().length, 3);
+  view.find(n => n.props.children === 'Today’s Birthdays').props.onClick(); await view.settle();
+  view.find(n => n.props.label === 'Months').props.onChange(otherMonths); await view.settle();
+  assert.equal(visible().length, 2); assert.ok(!view.find(n => n.props.children === 'Clear Today Filter'));
+  view.find(n => n.props.children === 'Open').props.onClick(); await view.settle();
+  const contactDetails = view.find(n => n.props.className === 'birthday-contact-details');
+  assert.ok(contactDetails, 'Open shows complete contact details alongside gift history');
+  assert.equal(elements(contactDetails, n => n.type === 'dt').length, 12);
+  assert.ok(elements(contactDetails, n => n.type === 'dd' && n.props.children === 'Saved delivery address').length);
+  assert.ok(elements(contactDetails, n => n.type === 'dd' && n.props.children === 'Saved birthday notes').length);
+
+  const monthChanges = [];
+  const picker = new ComponentHarness('src/components/Filters.jsx', { label: 'Months', options: ['01','02','03'], selected: ['01'], selectAllLabel: 'Select All Months', onChange: values => { monthChanges.push(Array.from(values)); picker.props = { ...picker.props, selected: values }; picker.dirty = true; } }, '/', async () => ({}), 'MultiSelect');
+  await picker.settle(); picker.find(n => n.props.className?.startsWith('filter-trigger')).props.onClick(); await picker.settle();
+  picker.find(n => n.props.children === 'Select All Months').props.onClick(); await picker.settle();
+  assert.deepEqual(monthChanges.at(-1), ['01','02','03']);
+  picker.find(n => n.props.children === 'Clear').props.onClick(); await picker.settle(); assert.deepEqual(monthChanges.at(-1), []);
+  picker.find(n => n.props.children === 'OK').props.onClick(); await picker.settle(); assert.ok(!picker.find(n => n.props.role === 'listbox'));
+
   // The current switch stays visible independently of a historical send result.
   for (const [channel, enabled, state] of [['email', false, 'OFF'], ['whatsapp', true, 'ON']]) {
     const status = new ComponentHarness('src/components/BirthdayCentre.jsx', { channel, contact: { emailEnabled: enabled, whatsappEnabled: enabled }, caption: 'Accepted by Sender' }, '/', async () => ({}), 'WishStatus');
@@ -121,6 +272,6 @@ async function main() {
   persistence.request = async (table, options) => { tables.push(table); return [{ id: 'p2', ...options.body[0] }]; };
   await persistence.createInternalPoc(ownerWrites.at(-1).body);
   assert.deepEqual(tables, ['internal_pocs'], 'gift owner creation does not write app_users');
-  console.log('Birthday UI: save confirmation, retained settings, channel state/history, assigned recipients, navigation, duplicate owners and permissions passed.');
+  console.log('Birthday UI: inline contact validation, retained drafts, save confirmation, retained settings, channel state/history, assigned recipients, navigation, duplicate owners and permissions passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

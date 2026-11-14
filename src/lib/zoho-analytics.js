@@ -109,6 +109,35 @@ function errorCode(body) {
   return /^[\w-]{1,50}$/.test(code) ? ` (code ${code})` : '';
 }
 
+function dateColumnInfo(column, columnName) {
+  const normalise = value => String(value ?? '').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  const labels = [column?.dataType, column?.dataTypeName]
+    .filter(value => typeof value === 'string' && value.trim()).map(normalise);
+  const dateTypes = new Set(['DATE', 'DATETIME', 'TIMESTAMP']);
+  const otherTypes = new Set(['PLAIN', 'PLAINTEXT', 'TEXT', 'CHAR', 'VARCHAR', 'MULTILINE', 'MULTILINETEXT',
+    'EMAIL', 'URL', 'NUMBER', 'POSITIVENUMBER', 'DECIMALNUMBER', 'CURRENCY', 'PERCENT', 'PERCENTAGE',
+    'BOOLEAN', 'DECISIONBOX', 'DURATION', 'TIME']);
+  // Zoho documents date metadata as dataTypeName: "Date", dataTypeId: 93.
+  // The import enum "DATE" is not the only metadata representation. Explicit
+  // non-date labels still reject a column, even if other metadata conflicts.
+  const hasOtherType = labels.some(value => otherTypes.has(value));
+  const numericType = column?.dataTypeId ?? column?.dataType;
+  const knownDateId = numericType === 93 || (typeof numericType === 'string' && numericType.trim() === '93');
+  const idOnlyDate = labels.every(value => /^\d+$/.test(value)) && knownDateId;
+  const isDate = !hasOtherType && (labels.some(value => dateTypes.has(value)) || idOnlyDate);
+  const safeLabel = value => {
+    if (!['string', 'number'].includes(typeof value)) return '';
+    const text = String(value).trim();
+    return /^[a-zA-Z0-9 _()/.-]{1,60}$/.test(text) ? text : '';
+  };
+  const name = safeLabel(column?.dataTypeName);
+  const raw = safeLabel(column?.dataType);
+  const id = safeLabel(column?.dataTypeId);
+  const reportedType = name && raw && normalise(name) !== normalise(raw)
+    ? `${name} (${raw})` : name || raw || (id ? `Type ID ${id}` : 'Unknown');
+  return { columnName, reportedType, isDate };
+}
+
 class ZohoAnalytics {
   constructor(store, { env = process.env, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
     this.store = store; this.env = env; this.fetch = fetchImpl; this.now = now;
@@ -191,7 +220,8 @@ class ZohoAnalytics {
     const config = configuration(this.env);
     const { columns, token } = await this.metadata(config);
     return { connected: true, tokenReused: token.reused, tokenExpiresAt: token.expiresAt, columnCount: columns.length,
-      missingColumns: COLUMN_NAMES.filter(name => !columns.some(column => column.columnName === name)) };
+      missingColumns: COLUMN_NAMES.filter(name => !columns.some(column => column.columnName === name)),
+      dateColumns: ['Start Date', 'End Date'].map(name => dateColumnInfo(columns.find(column => column.columnName === name), name)) };
   }
 
   async push(projects, allProjects = projects) {
@@ -201,8 +231,9 @@ class ZohoAnalytics {
       const missing = COLUMN_NAMES.filter(name => !columns.some(column => column.columnName === name));
       if (missing.length) throw new ZohoError(`Zoho table is missing columns: ${missing.join(', ')}`, 422);
       for (const name of ['Start Date', 'End Date']) {
-        if (columns.find(column => column.columnName === name)?.dataType !== 'DATE') {
-          throw new ZohoError(`Set ${name} to the Date data type in Zoho before pushing.`, 422);
+        const info = dateColumnInfo(columns.find(column => column.columnName === name), name);
+        if (!info.isDate) {
+          throw new ZohoError(`${name} is not recognised as a date column. Zoho reports: ${info.reportedType}. Check the column type in Zoho.`, 422);
         }
       }
       const exportConfig = { responseFormat: 'csv', selectedColumns: MATCH_COLUMNS, includeHeader: true,
@@ -322,4 +353,4 @@ function parseTargetKeys(text) {
   });
 }
 
-module.exports = { ZohoAnalytics, ZohoError, TOKEN_KEY, MATCH_COLUMNS, COLUMN_NAMES, projectRow, preparePush, parseTargetKeys, toCsv };
+module.exports = { ZohoAnalytics, ZohoError, TOKEN_KEY, MATCH_COLUMNS, COLUMN_NAMES, dateColumnInfo, projectRow, preparePush, parseTargetKeys, toCsv };
