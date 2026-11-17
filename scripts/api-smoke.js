@@ -1426,6 +1426,7 @@ async function scenario(name, fn) {
       pocs: [{ ...poc, id: "poc_second", projectId: "prj_second" }]
     });
     guardStore.hasAnyCycle = async () => false;
+    guardStore.pocsForProject = async () => (await guardStore.getProject()).pocs;
     guardStore.getWhatsappRoutingContext = async () => ({
       status: "active",
       poc,
@@ -1434,7 +1435,7 @@ async function scenario(name, fn) {
     guardStore.getProjectById = async () => ({ id: "prj_first", name: "First Project" });
     await assert.rejects(
       () => guardStore.createCycle("second-project", { cycleType: "quick_checkin" }),
-      /already has an active feedback request on First Project/i
+      /Active Feedback in Progress on First Project/i
     );
   });
 
@@ -9660,6 +9661,48 @@ async function scenario(name, fn) {
     assert.strictEqual(savedState.state, "completed");
     assert.strictEqual(savedState.closureReason, "final_sweep_inactive_six_hours");
     assert.equal(recomputed, true);
+  });
+
+  await scenario("broadcast replies yield to newer active and closed feedback for all three feedback types", async () => {
+    const { BroadcastRepository } = require('../src/lib/broadcast-repository');
+    const prototype = BroadcastRepository.prototype;
+    const original = { evidence: prototype.routingEvidence, latest: prototype.latestFeedbackStart, save: prototype.saveIncoming,
+      pool: store.pool, session: store._session, fetch: global.fetch, webhook: process.env.N8N_HUMAN_HANDOFF_WEBHOOK, key: process.env.GEMINI_API_KEY };
+    const broadcastAt = '2026-10-12T04:00:00Z';
+    let savedBroadcastReplies = 0;
+    prototype.routingEvidence = async () => ({ latest: { id: '00000000-0000-4000-8000-000000000001', sent_at: broadcastAt } });
+    prototype.latestFeedbackStart = async () => store._session.startedAt;
+    prototype.saveIncoming = async () => { savedBroadcastReplies++; return { id: `broadcast-reply-${savedBroadcastReplies}` }; };
+    store.pool = { query: async () => ({ rows: [] }) };
+    delete process.env.GEMINI_API_KEY;
+    process.env.N8N_HUMAN_HANDOFF_WEBHOOK = 'https://n8n.example/webhook/handoff';
+    global.fetch = async () => ({ ok: true, status: 200 });
+    try {
+      for (const sessionType of ['pulse','project_end','quick_checkin']) {
+        store._session = { ...original.session, sessionType, startedAt: '2026-10-11T04:00:00Z', status: 'completed', completionStatus: 'completed', conversationState: { state: 'completed' } };
+        const oldReply = await req('POST','/api/whatsapp/inbound', { from: poc.contactWhatsapp, text: 'Please share the announcement details', providerMessageId: `wamid.broadcast.${sessionType}` });
+        assert.strictEqual(oldReply.statusCode, 200, oldReply.body);
+        assert.strictEqual(JSON.parse(oldReply.body).routedTo, 'broadcast');
+        assert.strictEqual(JSON.parse(oldReply.body).sendToWhatsapp, false);
+        store._session = { ...store._session, startedAt: '2026-10-13T04:00:00Z', status: 'started', completionStatus: 'not_started',
+          conversationState: sessionType === 'quick_checkin' ? { state: 'quick_checkin_choice', quickCheckinOutcome: 'awaiting_response' } : {} };
+        const currentReply = await req('POST','/api/whatsapp/inbound', { from: poc.contactWhatsapp, text: sessionType === 'quick_checkin' ? 'All good' : 'okay', providerMessageId: `wamid.current.${sessionType}`, replyToMessageId: 'wamid.old.broadcast' });
+        assert.strictEqual(currentReply.statusCode, 201, currentReply.body);
+        assert.strictEqual(JSON.parse(currentReply.body).sendToWhatsapp, true);
+        store._session = { ...store._session, status: 'completed', completionStatus: 'completed', conversationState: { state: 'completed', mentionedServices: {}, turnCount: 4 } };
+        const closedReply = await req('POST','/api/whatsapp/inbound', { from: poc.contactWhatsapp, text: 'I need someone to clarify an issue', providerMessageId: `wamid.closed.${sessionType}` });
+        assert.strictEqual(closedReply.statusCode, 201, closedReply.body);
+        assert.match(JSON.parse(closedReply.body).whatsappReplyText, /closed/i);
+        assert.ok(calls.automation.some(event => event.eventType === 'post_completion_message'));
+      }
+      assert.strictEqual(savedBroadcastReplies, 3);
+    } finally {
+      prototype.routingEvidence = original.evidence; prototype.latestFeedbackStart = original.latest; prototype.saveIncoming = original.save;
+      if (original.pool === undefined) delete store.pool; else store.pool = original.pool;
+      store._session = original.session; global.fetch = original.fetch;
+      if (original.webhook === undefined) delete process.env.N8N_HUMAN_HANDOFF_WEBHOOK; else process.env.N8N_HUMAN_HANDOFF_WEBHOOK = original.webhook;
+      if (original.key === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = original.key;
+    }
   });
 
   let failed = 0;

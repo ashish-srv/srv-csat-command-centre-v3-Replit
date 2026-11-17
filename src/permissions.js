@@ -14,6 +14,9 @@ export const APP_PERMISSION_LABELS = {
   edit_project_performance: "Edit Project Performance",
   zoho_push: "Push to Zoho Analytics",
   zoho_connection_check: "Check Zoho Connection",
+  broadcast_view: "View WhatsApp Broadcasts",
+  broadcast_send: "Create and send WhatsApp broadcasts",
+  broadcast_reply: "Reply to WhatsApp broadcast conversations",
   manage_project_services: "Add/remove catalogue services under a project",
   birthday_centre: "View Birthday Centre",
   birthday_manage: "Manage birthday contacts, gifts and change approvals",
@@ -36,7 +39,7 @@ export function defaultPermissions(role) {
     return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, true]));
   }
   if (role === "admin") {
-    return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_") && !key.startsWith("zoho_")]));
+    return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_") && !key.startsWith("zoho_") && !key.startsWith("broadcast_")]));
   }
   return Object.fromEntries(ADMIN_PERMISSION_KEYS.map((key) => [
     key,

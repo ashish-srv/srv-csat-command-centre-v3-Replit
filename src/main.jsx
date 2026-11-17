@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.jsx";
 import { apiGet, apiPost } from "./api";
@@ -17,6 +17,7 @@ function AuthenticatedApplication() {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const statusRequest = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -34,25 +35,28 @@ function AuthenticatedApplication() {
       setError(authErrors[authError] || "Google sign-in could not be completed.");
       window.history.replaceState({}, "", window.location.pathname || "/");
     }
+    const initialRequest = ++statusRequest.current;
     apiGet("/api/auth/status")
       .then((status) => {
-        if (active) setAuth({ checking: false, ...status });
+        if (active && initialRequest === statusRequest.current) setAuth({ checking: false, ...status });
       })
       .catch((statusError) => {
-        if (active) {
+        if (active && initialRequest === statusRequest.current) {
           setAuth((current) => ({ ...current, checking: false, configured: true, authenticated: false, user: null }));
           setError(statusError.message);
         }
       });
 
     const signedOut = () => {
+      statusRequest.current++;
       setAuth((current) => ({ ...current, checking: false, authenticated: false, user: null }));
       setError("Your session expired. Please sign in again.");
     };
     const accessChanged = () => {
+      const request = ++statusRequest.current;
       apiGet("/api/auth/status")
-        .then((status) => setAuth({ checking: false, ...status }))
-        .catch((statusError) => setError(statusError.message));
+        .then((status) => { if (active && request === statusRequest.current) setAuth({ checking: false, ...status }); })
+        .catch((statusError) => { if (active && request === statusRequest.current) setError(statusError.message); });
     };
     window.addEventListener("csat:unauthorized", signedOut);
     window.addEventListener("csat:access-changed", accessChanged);
@@ -63,11 +67,38 @@ function AuthenticatedApplication() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!auth.authenticated) return;
+    let active = true;
+    const refreshAccess = async () => {
+      if (document.hidden) return;
+      const request = ++statusRequest.current;
+      try {
+        const status = await apiGet("/api/auth/status");
+        if (!active || request !== statusRequest.current) return;
+        const next = { checking: false, ...status };
+        // Keep the existing user object when access is unchanged, preserving
+        // page drafts and avoiding another dashboard reload on every poll.
+        setAuth(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+      } catch { /* Preserve the current screen during a temporary network failure. */ }
+    };
+    const timer = window.setInterval(refreshAccess, 30000);
+    window.addEventListener("focus", refreshAccess);
+    document.addEventListener("visibilitychange", refreshAccess);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshAccess);
+      document.removeEventListener("visibilitychange", refreshAccess);
+    };
+  }, [auth.authenticated]);
+
   async function login(password) {
     setBusy(true);
     setError("");
     try {
       const status = await apiPost("/api/auth/login", { password });
+      statusRequest.current++;
       setAuth((current) => ({ ...current, checking: false, authenticated: true, accessAuthorized: true, user: status.user || null }));
     } catch (loginError) {
       setError(loginError.status === 401 ? "That password is not correct." : loginError.message);
@@ -79,6 +110,7 @@ function AuthenticatedApplication() {
   async function logout() {
     try {
       await apiPost("/api/auth/logout");
+      statusRequest.current++;
       setError("");
       setAuth((current) => ({ ...current, authenticated: false, accessAuthorized: false, user: null }));
     } catch (logoutError) {

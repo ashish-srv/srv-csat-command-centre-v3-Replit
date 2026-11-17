@@ -135,6 +135,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState(null);
   const [toast, setToast] = useState("");
+  const [sendSkippedPocs, setSendSkippedPocs] = useState([]);
   const [issueModal, setIssueModal] = useState(null);
   const [showAllIssues, setShowAllIssues] = useState(false);
   const [scoring, setScoring] = useState(false);
@@ -324,6 +325,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
   useEffect(() => {
     setFeedbackPocId("");
     setSelectedActionPocIds([]);
+    setSendSkippedPocs([]);
   }, [projectKey]);
 
   useEffect(() => {
@@ -421,6 +423,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
   }
 
   async function selectCycle(id) {
+    setSendSkippedPocs([]);
     setCycleId(id);
     const cycle = cycles.find((item) => item.id === id);
     const sessions = cycle ? (cycle.sessions || []) : [];
@@ -466,26 +469,23 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
       return;
     }
     if (!actionPocs.length) { showToast("Select at least one POC first."); return; }
-    const unavailable = actionPocs.filter((poc) => !poc.active || !poc.contactWhatsapp);
-    if (unavailable.length) {
-      showToast(`Cannot send to: ${unavailable.map((poc) => poc.name).join(", ")}. Each selected POC must be active and have a WhatsApp number.`);
-      return;
-    }
     const label = cycleType === "quick_checkin"
       ? "quick check-in"
       : cycleType === "project_end" ? "project-end" : `${project.feedbackIntervalDays || 30}-day`;
-    if (!window.confirm(`Send the ${label} request for ${project.name}?\n\n${actionPocs.length} selected POC(s): ${actionPocs.map((poc) => poc.name).join(", ")}`)) return;
+    if (!window.confirm(`Send the ${label} request for ${project.name}?\n\n${actionPocs.length} selected POC(s): ${actionPocs.map((poc) => poc.name).join(", ")}\n\nEligible POCs will receive the request. Skipped POCs will be listed with reasons.`)) return;
     setBulkAction(cycleType);
     try {
       const data = await apiPost(`/api/projects/${encodeURIComponent(project.key)}/request-feedback`, {
         cycleType,
         clientPocIds: actionPocs.map((poc) => poc.id)
       });
-      showToast(`Cycle started for ${data.dispatched.length} POC(s).`);
+      setSendSkippedPocs(data.skippedPocs || []);
+      showToast(`Cycle started for ${data.dispatched.length} POC(s). ${(data.skippedPocs || []).length} skipped.`);
       await loadWorkspace(project.key);
       onReload();
     } catch (requestError) {
-      showToast(requestError.message);
+      setSendSkippedPocs(requestError.details?.skippedPocs || []);
+      showToast(requestError.details?.reason || requestError.message);
     } finally {
       setBulkAction("");
     }
@@ -1421,7 +1421,7 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
                   </div>
                 ) : null}
                 <div className="poc-card-foot">
-                  <em>{session ? formatSessionOutcome(session) : "No session in this cycle"}</em>
+                  <em>{session ? formatSessionOutcome(session) : selectedCycle?.skippedPocs?.find(row => row.id === poc.id)?.reason || "No session in this cycle"}</em>
                   <i className="poc-weight">
                     {formatPocWeightShare(
                       poc,
@@ -1498,10 +1498,11 @@ export default function ProjectWorkspace({ dashboard, locationTick, onReload, cu
           </Button>
         </div>
         <p className="form-note">
-          Monthly, project-end and quick check-in buttons create a new cycle for exactly the selected POCs. Quick check-ins do not ask for a rating and do not use reminders. Reminder and stop buttons
+          Monthly, project-end and quick check-in buttons send to eligible selected POCs. Skipped POCs are listed with reasons. Quick check-ins do not ask for a rating and do not use reminders. Reminder and stop buttons
           use the clearly selected cycle above. Stopping preserves existing feedback and affects only those POCs in
           that cycle; if every remaining open session is stopped, the cycle closes automatically.
         </p>
+        {(sendSkippedPocs.length ? sendSkippedPocs : selectedCycle?.skippedPocs || []).length ? <details open className="panel"><summary>Skipped POCs</summary><div style={{ maxHeight: 240, overflow: 'auto' }}>{(sendSkippedPocs.length ? sendSkippedPocs : selectedCycle?.skippedPocs || []).map(row => <p key={row.id}><strong>{row.name}</strong> · {row.reason}</p>)}</div></details> : null}
         {projectEndFeedbackLocked ? (
           <p className="form-note">
             Project-end feedback has been sent. Monthly feedback and quick check-ins are permanently disabled for

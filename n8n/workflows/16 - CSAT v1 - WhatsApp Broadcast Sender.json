@@ -1,0 +1,405 @@
+{
+  "name": "16. CSAT v1 - WhatsApp Broadcast Sender",
+  "nodes": [
+    {
+      "id": "43fa136d-3bc7-4112-bd02-ae1ea9a95238",
+      "name": "Broadcast Queue Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        0,
+        100
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "csat-broadcast-queue",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "f7ce2758-bf92-4259-93c9-a884d59db6a0",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "id": "52dcbd5b-e166-4289-8cff-2628c5f35e48",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        350
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3b6b7ce6-0659-437b-9372-e57447211a70",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        200
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c55e77e2-07c7-43f8-a342-d658df8efea7",
+              "name": "CSAT_APP_URL",
+              "value": "https://YOUR-REPLIT-APP.replit.app",
+              "type": "string"
+            },
+            {
+              "id": "c1ffba9d-ae8e-46c5-bfdb-d258fe5ba23b",
+              "name": "WHATSAPP_GRAPH_URL",
+              "value": "https://graph.facebook.com/v23.0/YOUR_PHONE_NUMBER_ID/messages",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "5504ca59-f14b-496c-b124-d7df5343f465",
+      "name": "Claim Broadcast Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        450,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $(\"Config\").first().json.CSAT_APP_URL + '/api/automation/broadcasts/claim' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {} }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "id": "4e685472-285d-4795-b88e-1ef9a3ae3395",
+      "name": "Split Broadcast Jobs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        680,
+        200
+      ],
+      "parameters": {
+        "fieldToSplitOut": "jobs",
+        "options": {}
+      }
+    },
+    {
+      "id": "bd56d020-b1ea-47a2-9be4-18b3baf1b6b0",
+      "name": "Authorise Broadcast Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $(\"Config\").first().json.CSAT_APP_URL + '/api/automation/broadcasts/jobs/' + $json.id + '/ready' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {kind:$json.kind} }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      }
+    },
+    {
+      "id": "3c5fd9bc-11c4-4eb9-8fd9-e30dcb17948e",
+      "name": "Send Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "58b533c4-914b-441c-9d02-66a2853b8104",
+              "leftValue": "={{ $json.allowed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "e78a04c8-7f6f-4fed-adf4-8703eff91678",
+      "name": "Send Broadcast WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $(\"Config\").first().json.WHATSAPP_GRAPH_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (()=>{const j=$('Split Broadcast Jobs').item.json;return j.kind==='reply'?{messaging_product:'whatsapp',to:j.to,type:'text',text:{body:j.text}}:{messaging_product:'whatsapp',to:j.to,type:'template',template:{name:j.template.name,language:{code:j.template.language},...(j.parameters.length?{components:[{type:'body',parameters:j.parameters.map(text=>({type:'text',text}))}]}:{})}};})() }}",
+        "options": {
+          "timeout": 20000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DvIltBVRDLmTogMZ",
+          "name": "Meta WhatsApp Token"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "e890098f-5b55-4d06-861a-2f8471d05cfd",
+      "name": "Capture Broadcast Send Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job=$('Split Broadcast Jobs').item.json;const id=$json.messages?.[0]?.id;const code=$json.error?.code;return {json:{id:job.id,kind:job.kind,status:id?'accepted':code?'failed':'unknown',providerMessageId:id||'',reason:id?'Accepted by WhatsApp. Delivery confirmation is pending.':String($json.error?.message||$json.message||'No sender confirmation. Check the sender before retrying.').slice(0,1000)}};"
+      }
+    },
+    {
+      "id": "837c3b2a-02f6-4861-930b-5a6555c8fe21",
+      "name": "Record Broadcast Send Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1790,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $(\"Config\").first().json.CSAT_APP_URL + '/api/automation/broadcasts/jobs/' + $json.id + '/result' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {kind:$json.kind,status:$json.status,providerMessageId:$json.providerMessageId,reason:$json.reason} }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s7cNGrFKA4y4Hy88",
+          "name": "CSAT Webhook Secret"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500
+    },
+    {
+      "id": "5df5a7cf-ba85-4163-9371-fee9536d84bd",
+      "name": "Skipped Before Send",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        350
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "f8ebb566-fa15-46b1-9140-6a2ade15eb65",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        300,
+        520
+      ],
+      "parameters": {
+        "content": "Configure the published app URL and WhatsApp Graph URL. Reuse CSAT Webhook Secret and the existing Meta WhatsApp Token. Activate after migration 026 and an approved text-only announcement template are ready. Add this production webhook URL as N8N_BROADCAST_WEBHOOK in Replit. Do not enable automatic retries on the Meta send node.",
+        "height": 230,
+        "width": 520
+      }
+    }
+  ],
+  "connections": {
+    "Broadcast Queue Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Claim Broadcast Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Broadcast Jobs": {
+      "main": [
+        [
+          {
+            "node": "Split Broadcast Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Broadcast Jobs": {
+      "main": [
+        [
+          {
+            "node": "Authorise Broadcast Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Authorise Broadcast Send": {
+      "main": [
+        [
+          {
+            "node": "Send Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Send Broadcast WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skipped Before Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Broadcast WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Capture Broadcast Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture Broadcast Send Result": {
+      "main": [
+        [
+          {
+            "node": "Record Broadcast Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  }
+}

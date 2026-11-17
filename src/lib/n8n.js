@@ -10,6 +10,7 @@ const EVENT_TO_ENV = {
   feedback_session_closed: "N8N_FEEDBACK_SESSION_CLOSED_WEBHOOK",
   cycle_completed: "N8N_CYCLE_COMPLETED_WEBHOOK",
   manual_whatsapp_message: "N8N_MANUAL_MESSAGE_WEBHOOK",
+  broadcast_queue_ready: "N8N_BROADCAST_WEBHOOK",
 
   // Guardrail / human-in-the-loop events (v2)
   post_completion_message: "N8N_HUMAN_HANDOFF_WEBHOOK",

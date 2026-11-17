@@ -86,6 +86,7 @@ async function run() {
     pocs: []
   });
   automaticGuardStore.hasAnyCycle = async () => false;
+  automaticGuardStore.pocsForProject = async () => [];
   await assert.rejects(
     automaticGuardStore.createCycle("automatic-off", { cycleType: "pulse", automatic: true }),
     /automatic 30-day feedback is turned off/i

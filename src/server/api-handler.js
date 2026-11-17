@@ -15,6 +15,9 @@ const { prepareCsatEmail } = require("../lib/csat-email-policy");
 const { handleBirthdayRequest } = require("../lib/birthday-service");
 const { captureBirthdayInbound } = require("../lib/birthday-inbound");
 const { ZohoAnalytics, ZohoError } = require("../lib/zoho-analytics");
+const { feedbackRecipients } = require("../lib/whatsapp-recipients");
+const { handleBroadcastRequest } = require("../lib/broadcast-service");
+const { captureBroadcastInbound } = require("../lib/broadcast-inbound");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -2829,11 +2832,12 @@ const APP_PERMISSION_KEYS = [
   "dashboard", "project_workspace", "directory", "project_performance", "manage_records",
   "manage_pocs", "manage_internal_pocs", "manage_catalogues", "messaging_controls", "bulk_sends",
   "manage_project_users", "add_projects", "edit_project_performance", "manage_project_services",
-  "birthday_centre", "birthday_manage", "birthday_reminders", "birthday_cleanup", "zoho_push", "zoho_connection_check"
+  "birthday_centre", "birthday_manage", "birthday_reminders", "birthday_cleanup", "zoho_push", "zoho_connection_check",
+  "broadcast_view", "broadcast_send", "broadcast_reply"
 ];
 
 const ROLE_PERMISSION_DEFAULTS = {
-  admin: Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_") && !key.startsWith("zoho_")])),
+  admin: Object.fromEntries(APP_PERMISSION_KEYS.map((key) => [key, !key.startsWith("birthday_") && !key.startsWith("zoho_") && !key.startsWith("broadcast_")])),
   project_user: {
     dashboard: false,
     project_workspace: false,
@@ -5050,7 +5054,7 @@ async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clien
     automatic,
     ...(Array.isArray(clientPocIds) ? { clientPocIds } : {})
   });
-  const { cycle, sessions, project, pocs } = result;
+  const { cycle, sessions, project, pocs, skippedPocs = [] } = result;
 
   const dispatched = [];
   for (const session of sessions) {
@@ -5070,7 +5074,7 @@ async function startCycle({ store, projectKey, cycleType, baseUrl, reason, clien
     dispatched.push({ session, poc, resumeUrl });
   }
 
-  return { cycle, project, dispatched };
+  return { cycle, project, dispatched, skippedPocs };
 }
 
 async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null) {
@@ -5100,10 +5104,12 @@ async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null
     if (await store.hasOpenCycle(projectSummary.id, cycleType)) reasons.push("this cycle type is already open");
 
     const allPocs = await store.pocsForProject(projectSummary.id, { activeOnly: false });
-    const invalidPocs = allPocs.filter((poc) => !poc.active || !String(poc.contactWhatsapp || "").replace(/\D/g, ""));
+    const recipientCheck = await feedbackRecipients(store, allPocs);
+    const invalidPocs = recipientCheck.skipped.filter(poc => !poc.reason.startsWith('Active Feedback'));
     const eligiblePocs = [];
-    const conflicts = [];
-    const reachablePocs = reasons.length ? [] : allPocs.filter((item) => item.active && String(item.contactWhatsapp || "").replace(/\D/g, ""));
+    const conflicts = recipientCheck.skipped.filter(poc => poc.reason.startsWith('Active Feedback'))
+      .map(poc => ({ pocId: poc.id, pocName: poc.name, phone: poc.whatsapp, reason: `active session: ${poc.reason}` }));
+    const reachablePocs = reasons.length ? [] : recipientCheck.eligible;
     for (const poc of reachablePocs) {
       const phone = String(poc.contactWhatsapp).replace(/\D/g, "");
       if (reservedPhones.has(phone)) {
@@ -5137,7 +5143,8 @@ async function buildBulkSendPreview(store, cycleType, requestedProjectIds = null
       clusterName: projectSummary.clusterName,
       eligible: reasons.length === 0,
       eligiblePocs: eligiblePocs.map((poc) => ({ id: poc.id, name: poc.name, whatsapp: poc.contactWhatsapp })),
-      invalidPocs: invalidPocs.map((poc) => ({ id: poc.id, name: poc.name, reason: poc.active ? "WhatsApp missing" : "inactive" })),
+      allPocIds: allPocs.map((poc) => poc.id),
+      invalidPocs: invalidPocs.map((poc) => ({ id: poc.id, name: poc.name, reason: poc.reason })),
       conflicts,
       reasons
     });
@@ -5393,7 +5400,7 @@ async function handleApiRequest(request) {
     if (appAccess.role === "project_user" && !projectUserRouteAllowed(appAccess, method, pathname)) {
       return error(403, "Your role can only access Project Performance");
     }
-    if (appAccess.role === "admin" && !/^\/api\/birthdays(?:\/|$)/.test(pathname)) {
+    if (appAccess.role === "admin" && !/^\/api\/(?:birthdays|broadcasts)(?:\/|$)/.test(pathname)) {
       const requiredPermission = adminRoutePermission(method, pathname);
       const dashboardForWorkspace = pathname === "/api/dashboard" && hasAppPermission(appAccess, "project_workspace");
       const directoryForManage = (pathname === "/api/admin/directory" || /^\/api\/admin\/clients\/[^/]+$/.test(pathname)) && [
@@ -5415,6 +5422,9 @@ async function handleApiRequest(request) {
   // CSAT state machine, inbound routing, feedback records or scheduler.
   if (/^\/api\/(?:automation\/)?birthdays(?:\/|$)/.test(pathname)) {
     return handleBirthdayRequest({ store, access: appAccess, request, pathname, method, body, searchParams, baseUrl });
+  }
+  if (/^\/api\/(?:automation\/)?broadcasts(?:\/|$)/.test(pathname)) {
+    return handleBroadcastRequest({ store, access: appAccess, request, pathname, method, body, searchParams });
   }
 
   // ---- Retired v1 routes: fail with direction, not a bare 404.
@@ -6101,17 +6111,10 @@ async function handleApiRequest(request) {
     if (clientPocIds && clientPocIds.length > 100) return error(400, "At most 100 client POCs can be selected at once");
 
     if (clientPocIds) {
-      const projectPocsById = new Map((project.pocs || []).map((poc) => [poc.id, poc]));
+      const projectPocs = await store.pocsForProject(project.id, { activeOnly: false, includeRemoved: true });
+      const projectPocsById = new Map(projectPocs.map((poc) => [poc.id, poc]));
       const invalidPocId = clientPocIds.find((id) => !projectPocsById.has(id));
       if (invalidPocId) return error(400, "One or more selected POCs do not belong to this project");
-      const unavailable = clientPocIds
-        .map((id) => projectPocsById.get(id))
-        .filter((poc) => !poc.active || !String(poc.contactWhatsapp || "").replace(/\D/g, ""));
-      if (unavailable.length) {
-        return error(400, "Every selected POC must be active and have a WhatsApp number", {
-          unavailablePocs: unavailable.map((poc) => ({ id: poc.id, name: poc.name }))
-        });
-      }
     }
 
     // Guard against two open cycles of the same type for one project.
@@ -6136,7 +6139,7 @@ async function handleApiRequest(request) {
       });
       return json(201, started);
     } catch (cycleError) {
-      return error(400, "Could not start feedback cycle", cycleError.message);
+      return error(400, "Could not start feedback cycle", { reason: cycleError.message, skippedPocs: cycleError.skippedPocs || [] });
     }
   }
 
@@ -6531,6 +6534,12 @@ async function handleApiRequest(request) {
     if (!body.from) return error(400, "WhatsApp sender (from) is required");
 
     const buttonSessionId = quickCheckinSessionId(body);
+    try {
+      const broadcastReply = await captureBroadcastInbound({ store, body });
+      if (broadcastReply) return json(200, broadcastReply);
+    } catch (routingError) {
+      return error(routingError.status || 503, "Broadcast reply could not be recorded", "No automated reply was sent. Retry the provider delivery after checking database availability.");
+    }
     const routing = typeof store.getWhatsappRoutingContext === "function"
       ? await store.getWhatsappRoutingContext(body.from)
       : null;
@@ -6878,7 +6887,7 @@ async function handleApiRequest(request) {
         }));
       } catch (cycleError) {
         // A project with no reachable POC must not abort the whole run.
-        const skippedTarget = { projectKey: target.projectKey, cycleType: target.cycleType, reason: cycleError.message };
+        const skippedTarget = { projectKey: target.projectKey, cycleType: target.cycleType, reason: cycleError.message, skippedPocs: cycleError.skippedPocs || [] };
         skipped.push(skippedTarget);
         if (typeof store.recordAutomationEvent === "function") {
           try {
@@ -6923,7 +6932,7 @@ async function handleApiRequest(request) {
           automatic: true
         }));
       } catch (cycleError) {
-        const skippedTarget = { projectKey: target.projectKey, cycleType: "quick_checkin", reason: cycleError.message };
+        const skippedTarget = { projectKey: target.projectKey, cycleType: "quick_checkin", reason: cycleError.message, skippedPocs: cycleError.skippedPocs || [] };
         skipped.push(skippedTarget);
         if (typeof store.recordAutomationEvent === "function") {
           try {
@@ -7550,7 +7559,7 @@ async function handleApiRequest(request) {
           cycleType,
           baseUrl,
           reason: "manage_bulk_send",
-          clientPocIds: row.eligiblePocs.map((poc) => poc.id)
+          clientPocIds: row.allPocIds
         }));
       } catch (sendError) {
         skipped.push({ ...row, eligible: false, reasons: [sendError.message] });

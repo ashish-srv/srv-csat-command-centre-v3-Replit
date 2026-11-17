@@ -1,6 +1,7 @@
 const { statusFromScore } = require("./analysis");
 const { IDLE_RATING_MS, ownsPendingRatingReminder } = require("./idle-rating-prompt");
 const { observationIdentity, observationRecords, fullIssueDetail, issueHeading, feedbackRecordTopic } = require("./feedback-records");
+const { feedbackRecipients } = require("./whatsapp-recipients");
 
 const MAX_REMINDERS = 3;
 const REMINDER_INTERVAL_HOURS = 24;
@@ -300,6 +301,7 @@ function toProject(row, extra = {}) {
 
 function toCycle(row) {
   return {
+    skippedPocs: row.skipped_pocs || [],
     scheduleKey: row.schedule_key || null,
     id: row.id,
     projectId: row.project_id,
@@ -1118,38 +1120,22 @@ class SupabaseStore {
     if (selectionProvided && !requestedPocIds.length) {
       throw new Error("Select at least one client POC for this feedback cycle");
     }
-    const projectPocsById = new Map(project.pocs.map((poc) => [poc.id, poc]));
+    const allProjectPocs = typeof this.pocsForProject === 'function'
+      ? await this.pocsForProject(project.id, { activeOnly: false, includeRemoved: selectionProvided }) : project.pocs;
+    const projectPocsById = new Map(allProjectPocs.map((poc) => [poc.id, poc]));
     const unknownPocId = requestedPocIds.find((id) => !projectPocsById.has(id));
     if (unknownPocId) throw new Error("A selected client POC does not belong to this project");
 
     const requestedPocIdSet = new Set(requestedPocIds);
     const selectedPocs = selectionProvided
-      ? project.pocs.filter((poc) => requestedPocIdSet.has(poc.id))
-      : project.pocs;
-    const unavailablePocs = selectedPocs.filter((poc) => !poc.active || !digits(poc.contactWhatsapp));
-    if (unavailablePocs.length) {
-      throw new Error(`Selected POC${unavailablePocs.length === 1 ? "" : "s"} cannot receive WhatsApp feedback: ${unavailablePocs.map((poc) => poc.name).join(", ")}`);
-    }
-    const pocs = selectedPocs.filter((poc) => poc.active && digits(poc.contactWhatsapp));
+      ? allProjectPocs.filter((poc) => requestedPocIdSet.has(poc.id))
+      : allProjectPocs;
+    const { eligible: pocs, skipped: skippedPocs } = await feedbackRecipients(this, selectedPocs);
     if (!pocs.length) {
-      throw new Error(`Project ${projectKey} has no active POC with a WhatsApp number`);
-    }
-
-    // A WhatsApp number may belong to several clients and projects, but it may
-    // have only one open conversation at a time. This keeps free-text replies
-    // unambiguous for monthly, project-end and quick check-in sessions alike.
-    for (const poc of pocs) {
-      const routing = await this.getWhatsappRoutingContext(poc.contactWhatsapp);
-      const activeSessions = routing.status === "ambiguous"
-        ? routing.candidates.map((candidate) => candidate.session)
-        : routing.status === "active" ? [routing.session] : [];
-      if (activeSessions.length) {
-        const blockingSession = activeSessions[0];
-        const blockingProject = blockingSession?.projectId
-          ? await this.getProjectById(blockingSession.projectId)
-          : null;
-        throw new Error(`${poc.name} already has an active feedback request${blockingProject ? ` on ${blockingProject.name}` : " on another project"}. Finish or stop it before starting this cycle.`);
-      }
+      const details = skippedPocs.map(poc => `${poc.name}: ${poc.reason}`).join('; ');
+      const failure = new Error(`Project ${projectKey} has no active POC available for WhatsApp feedback${details ? `. ${details}` : ''}`);
+      failure.skippedPocs = skippedPocs;
+      throw failure;
     }
 
     const now = new Date();
@@ -1162,6 +1148,7 @@ class SupabaseStore {
         status: "open",
         started_at: now.toISOString(),
         poc_total: pocs.length,
+        skipped_pocs: skippedPocs,
         poc_responded: 0,
         weight_responded: 0
       }]
@@ -1228,7 +1215,7 @@ class SupabaseStore {
       });
     }
 
-    return { cycle, sessions, project, pocs };
+    return { cycle, sessions, project, pocs, skippedPocs };
   }
 
   async addMessage(sessionId, message) {

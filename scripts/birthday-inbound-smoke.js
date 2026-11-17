@@ -105,7 +105,7 @@ async function main(){
   BirthdayRepository.prototype.saveBirthdayReply=async()=>({id:id(900),classification:'birthday'});
   const storePath=require.resolve('../src/lib/store');require(storePath);
   const originalStore=require.cache[storePath].exports;
-  require.cache[storePath].exports={createStore:()=>({pool:{},getWhatsappRoutingContext:async()=>({status:'latest'}),hasProviderMessage:async()=>false})};
+  require.cache[storePath].exports={createStore:()=>({pool:{query:async()=>({rows:[]})},getWhatsappRoutingContext:async()=>({status:'latest'}),hasProviderMessage:async()=>false})};
   process.env.N8N_WEBHOOK_SECRET='isolated-birthday-inbound-secret-123456';
   try{
     const {handleApiRequest}=require('../src/server/api-handler');

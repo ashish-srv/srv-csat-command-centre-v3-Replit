@@ -172,6 +172,7 @@ async function run() {
       const project = { id: "p", key: "project", name: "Project", pocs: [poc], feedbackIntervalDays: 30 };
       f.provider.getProject = async () => project;
       f.provider.getProjectById = async () => project;
+      f.provider.pocsForProject = async () => [poc];
       f.provider.hasAnyCycle = async () => false;
       f.provider.getPocsByWhatsapp = async () => [poc];
       f.provider.addMessage = async () => ({});
@@ -182,7 +183,8 @@ async function run() {
         if (table === "projects") { writes.push({ table, ...copy(options) }); return []; }
         return originalRequest(table, options);
       };
-      await assert.rejects(f.provider.createCycle(project.key, { cycleType }), /active feedback request/);
+      await assert.rejects(f.provider.createCycle(project.key, { cycleType }), error =>
+        error.skippedPocs?.[0]?.id === poc.id && /Active Feedback in Progress/.test(error.skippedPocs[0].reason));
       assert.equal(writes.length, 0);
       f.rows[0].conversation_state.quickCheckinWindowExpiresAt = new Date(Date.now() - 1).toISOString();
       const result = await f.provider.createCycle(project.key, { cycleType });

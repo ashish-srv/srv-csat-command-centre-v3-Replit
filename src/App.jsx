@@ -7,6 +7,7 @@ import ProjectPerformance from "./components/ProjectPerformance.jsx";
 import Directory from "./components/Directory.jsx";
 import Manage from "./components/Manage.jsx";
 import BirthdayCentre from "./components/BirthdayCentre.jsx";
+import WhatsAppBroadcasts from "./components/WhatsAppBroadcasts.jsx";
 import { BrandLogo } from "./components/Ui.jsx";
 import { formatDateTime } from "./format";
 import { canOpenManage, hasPermission } from "./permissions";
@@ -18,6 +19,7 @@ function getRoute() {
   if (path === "/directory") return "directory";
   if (path === "/manage") return "manage";
   if (path === "/birthdays") return "birthdays";
+  if (path === "/broadcasts") return "broadcasts";
   return "dashboard";
 }
 
@@ -188,9 +190,10 @@ export default function App({ onLogout, currentUser = null }) {
     directory: hasPermission(currentUser, "directory"),
     performance: hasPermission(currentUser, "project_performance"),
     manage: canOpenManage(currentUser),
-    birthdays: currentUser?.role !== "project_user" && hasPermission(currentUser, "birthday_centre")
+    birthdays: currentUser?.role !== "project_user" && hasPermission(currentUser, "birthday_centre"),
+    broadcasts: currentUser?.role !== "project_user" && hasPermission(currentUser, "broadcast_view")
   }), [currentUser]);
-  const firstAllowedRoute = Object.keys(routeAccess).find((key) => routeAccess[key]) || "performance";
+  const firstAllowedRoute = Object.keys(routeAccess).find((key) => routeAccess[key]) || null;
   const activeRoute = routeAccess[route] ? route : firstAllowedRoute;
   const showAttentionRail = routeAccess.dashboard;
   const needsDashboardData = routeAccess.dashboard || routeAccess.project;
@@ -213,12 +216,12 @@ export default function App({ onLogout, currentUser = null }) {
 
   useEffect(() => {
     const initialRoute = getRoute();
-    if (!routeAccess[initialRoute]) navigate(firstAllowedRoute === "performance" ? "/project-performance" : `/${firstAllowedRoute}`);
+    if (firstAllowedRoute && !routeAccess[initialRoute]) navigate(firstAllowedRoute === "performance" ? "/project-performance" : `/${firstAllowedRoute}`);
     if (needsDashboardData) loadDashboard();
     const listener = () => {
       const nextRoute = getRoute();
       if (!routeAccess[nextRoute]) {
-        navigate(firstAllowedRoute === "performance" ? "/project-performance" : `/${firstAllowedRoute}`);
+        if (firstAllowedRoute) navigate(firstAllowedRoute === "performance" ? "/project-performance" : `/${firstAllowedRoute}`);
         return;
       }
       setRoute(nextRoute);
@@ -262,7 +265,7 @@ export default function App({ onLogout, currentUser = null }) {
       /> : null}
 
       <main className="workspace">
-        <nav className="tabbar">
+        <nav className="tabbar" aria-label="Application Pages">
           {routeAccess.dashboard ? <button
             type="button"
             className={`tab ${activeRoute === "dashboard" ? "active" : ""}`}
@@ -299,6 +302,7 @@ export default function App({ onLogout, currentUser = null }) {
             Manage
           </button> : null}
           {routeAccess.birthdays ? <button type="button" className={`tab ${activeRoute === "birthdays" ? "active" : ""}`} onClick={() => navigate("/birthdays")}>Birthday Centre</button> : null}
+          {routeAccess.broadcasts ? <button type="button" className={`tab ${activeRoute === "broadcasts" ? "active" : ""}`} onClick={() => navigate("/broadcasts")}>WhatsApp Broadcasts</button> : null}
           <span className="tabbar-spacer" aria-hidden="true" />
           <button type="button" className="tab logout-tab" onClick={onLogout}>
             <LogOut size={16} aria-hidden="true" />
@@ -313,7 +317,10 @@ export default function App({ onLogout, currentUser = null }) {
           </div>
         ) : null}
 
-        {error ? (
+        {!activeRoute ? <div className="access-denied-card" role="status">
+          <h1>No Application Pages Assigned</h1>
+          <p>Your account is active, but no application pages are enabled. Please contact your Super Admin to arrange access.</p>
+        </div> : activeRoute === "broadcasts" ? <WorkspaceErrorBoundary key="broadcasts"><WhatsAppBroadcasts currentUser={currentUser} /></WorkspaceErrorBoundary> : error && ["dashboard", "project"].includes(activeRoute) ? (
           <div className="error-block">
             <strong>Could not load data</strong>
             <p>{error.message}</p>

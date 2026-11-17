@@ -1,5 +1,6 @@
 const { Pool } = require("pg");
 const { SupabaseStore } = require("./supabase-store");
+const { whatsappNumber } = require("./whatsapp-recipients");
 
 const TABLES = new Set([
   "app_settings", "automation_events", "client_pocs", "clients", "clusters", "departments",
@@ -12,6 +13,7 @@ const TABLES = new Set([
 ]);
 
 const JSON_COLUMNS = {
+  feedback_cycles: new Set(["skipped_pocs"]),
   app_settings: new Set(["setting_value"]),
   automation_events: new Set(["payload"]),
   feedback_sessions: new Set(["conversation_state", "predicted_signals"]),
@@ -201,6 +203,51 @@ class PostgresStore extends SupabaseStore {
   constructor(options = {}) {
     super({ skipEnv: true });
     this.pool = options.pool || getSharedPool();
+  }
+
+  async whatsappSendInProgress(phone) {
+    try {
+      const result = await this.pool.query(`select 1 from public.whatsapp_broadcast_recipients
+        where phone=$1 and status='sending' and claimed_at>now()-interval '5 minutes'
+        union all select 1 from public.whatsapp_broadcast_messages m
+        join public.whatsapp_broadcast_recipients r on r.id=m.recipient_id
+        where r.phone=$1 and m.side='srv' and m.status='sending' and m.claimed_at>now()-interval '5 minutes' limit 1`, [phone]);
+      return result.rows.length > 0;
+    } catch (error) {
+      if (error.code === '42P01') return false;
+      throw error;
+    }
+  }
+
+  async whatsappContactOptedOut(phone) {
+    try {
+      return (await this.pool.query('select opted_out from public.whatsapp_messaging_preferences where phone=$1', [phone])).rows[0]?.opted_out === true;
+    } catch (error) {
+      if (error.code === '42P01') return false;
+      throw error;
+    }
+  }
+
+  async createCycle(projectKey, options = {}) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const transaction = new PostgresStore({ pool: client });
+      const project = await transaction.getProject(projectKey);
+      if (!project) throw new Error(`Project ${projectKey} not found`);
+      await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))', [`feedback-project:${project.id}`]);
+      const phones = [...new Set(project.pocs.map(poc => whatsappNumber(poc.contactWhatsapp)).filter(Boolean))].sort();
+      for (const phone of phones) await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))', [`whatsapp:${phone}`]);
+      if (await transaction.hasOpenCycle(project.id, options.cycleType || 'pulse')) throw new Error('An open cycle of this type already exists for the project');
+      const result = await SupabaseStore.prototype.createCycle.call(transaction, projectKey, options);
+      await client.query('commit');
+      return result;
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async saveProjectPocBatch(projectId, prepared, removedIds) {
