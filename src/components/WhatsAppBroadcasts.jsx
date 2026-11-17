@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { apiGet, apiPost } from '../api';
+import { apiGet, apiPost, apiWriteWithAdminPin } from '../api';
 import { hasPermission } from '../permissions';
 import { Button, LoadingBlock } from './Ui.jsx';
 import { MultiSelect, SingleSelect, FilterBar, DateRange } from './Filters.jsx';
@@ -49,6 +49,9 @@ export default function WhatsAppBroadcasts({ currentUser }) {
   const [replySearch, setReplySearch] = useState('');
   const [replyRange, setReplyRange] = useState({ from: '', to: '', basis: 'completed' });
   const [registered, setRegistered] = useState({ name: '', language: 'en', body: '', approvedConfirmed: false });
+  const [cleanup, setCleanup] = useState(null);
+  const [cleanupPassword, setCleanupPassword] = useState('');
+  const [cleanupConfirmation, setCleanupConfirmation] = useState('');
   const requests = useRef({ page: 0, campaign: 0, chat: 0 });
   const sendRequest = useRef('');
   const replyRequest = useRef('');
@@ -112,6 +115,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
     try { await action(); } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
+  function askCleanup(value) { setCleanup(value); setCleanupPassword(''); setCleanupConfirmation(''); }
   if (!data) return error ? <div className="error-block" role="alert">{error}<Button onClick={load}>Try Again</Button></div> : <LoadingBlock label="Loading WhatsApp Broadcasts" />;
   const directory = data.directory;
   const template = data.templates.find(row => row.id === templateId);
@@ -207,12 +211,13 @@ export default function WhatsAppBroadcasts({ currentUser }) {
     </details> : null}
 
     <details id="broadcast-history" className="broadcast-panel" open><summary>Broadcast History</summary><div className="broadcast-panel-body">
-      <div className="broadcast-scroll"><table><thead><tr><th>Broadcast Title</th><th>Created</th><th>Recipients</th><th>Accepted / Sent</th><th>Replies</th><th>Skipped</th><th>Failed</th><th /></tr></thead><tbody>
+      <p>Accepted or Sent means WhatsApp is processing the message. Delivered and Read confirm receipt. A missing confirmation is not a confirmed failure.</p>
+      <div className="broadcast-scroll"><table><thead><tr><th>Broadcast Title</th><th>Created</th><th>Recipients</th><th>Delivered (incl. Read)</th><th>Read</th><th>Awaiting Confirmation</th><th>Replies</th><th>Skipped</th><th>Failed</th><th /></tr></thead><tbody>
         {data.campaigns.map(campaign => <tr key={campaign.id} className={campaign.id === campaignId ? 'broadcast-selected' : ''}>
-          <td><strong>{campaign.title}</strong><small>{campaign.created_by}</small></td><td>{formatDateTime(campaign.created_at)}</td><td>{campaign.total}</td><td>{campaign.accepted}</td><td>{campaign.replied}</td><td>{campaign.skipped}</td><td>{campaign.failed}</td>
-          <td><Button onClick={() => { setCampaignId(campaign.id); section('broadcast-replies'); }}>Open</Button></td>
+          <td><strong>{campaign.title}</strong><small>{campaign.created_by}</small></td><td>{formatDateTime(campaign.created_at)}</td><td>{campaign.total}</td><td>{campaign.delivered ?? 0}</td><td>{campaign.read ?? 0}</td><td>{campaign.unconfirmed ?? 0}</td><td>{campaign.replied}</td><td>{campaign.skipped}</td><td>{campaign.failed}</td>
+          <td><Button onClick={() => { setCampaignId(campaign.id); section('broadcast-replies'); }}>Open</Button>{isSuper ? <Button disabled={busy} onClick={() => perform(async () => { const info = await apiGet(`/api/broadcasts/history/${campaign.id}`); askCleanup({ kind: 'history', ...info }); })}>Delete History</Button> : null}</td>
         </tr>)}
-        {!data.campaigns.length ? <tr><td colSpan={8}>No broadcasts yet.</td></tr> : null}
+        {!data.campaigns.length ? <tr><td colSpan={10}>No broadcasts yet.</td></tr> : null}
       </tbody></table></div>
       <div className="broadcast-actions"><Button disabled={!offset || busy} onClick={() => setOffset(value => Math.max(0, value - 50))}>Newer</Button><Button disabled={!data.hasMore || busy} onClick={() => setOffset(value => value + 50)}>Older</Button></div>
     </div></details>
@@ -230,7 +235,15 @@ export default function WhatsAppBroadcasts({ currentUser }) {
           {matchingReplies.map(row => <tr key={row.id} className={recipientId === row.id ? 'broadcast-selected' : ''}>
             <td>{[...new Set(row.associations.map(poc => poc.name))].join(', ')}<small>{row.phone || 'Number Unavailable'}</small><small>{row.title}</small><div className="broadcast-recipient-actions"><Button onClick={() => { setRecipientId(row.id); window.requestAnimationFrame(() => section('broadcast-conversation')); }}>Open Conversation</Button></div></td>
             <td>{row.associations.map(poc => <small key={poc.id}>{poc.clientName} → {poc.projectName}{poc.reason ? ` · ${poc.reason}` : ''}</small>)}</td>
-            <td><span className={`broadcast-state ${row.status}`}>{labels[row.status]}</span>{row.reason ? <small>{row.reason}</small> : null}</td>
+            <td><span className={`broadcast-state ${row.status}`}>{labels[row.status]}</span>{row.reason ? <small>{row.reason}</small> : null}
+              {row.delivery_at ? <small>Updated: {formatDateTime(row.delivery_at)}</small> : null}
+              {row.error_code === '131049' && row.status === 'failed' ? <small>Meta limited marketing delivery to this recipient. {row.retry_after ? `Retry no earlier than ${formatDateTime(row.retry_after)}.` : 'Check the failure time before retrying.'} A later retry may still fail.</small> : null}
+              {row.status === 'failed' && canSend && !row.deleted_at ? <Button disabled={busy || Boolean(row.retry_recipient_id) || Boolean(row.retry_after && Date.parse(row.retry_after) > Date.now()) || !data.messaging.enabled || !data.senderConfigured} onClick={() => perform(async () => {
+                if (!window.confirm(`Retry this failed announcement only for ${row.associations.map(poc => poc.name).join(', ')} (${row.phone})? Confirm their messaging permission is still valid. The original message and template will be reused.`)) return;
+                const result = await apiPost(`/api/broadcasts/recipients/${row.id}/retry`, { requestId: window.crypto.randomUUID(), consentConfirmed: true });
+                setCampaignId(result.campaign.id); setNotice(`Retry queued as a separate attempt.${result.senderTriggered ? '' : ' Sender wake-up was not confirmed; check the scheduled worker.'}`); await load();
+              })}>{row.retry_recipient_id ? 'Retry Already Created' : 'Retry Failed Recipient'}</Button> : null}
+            </td>
             <td className="broadcast-reply-preview">{row.latest_reply || '—'}</td><td>{row.latest_reply_at ? formatDateTime(row.latest_reply_at) : '—'}</td>
             <td>{{ awaiting_response: 'Awaiting Our Response', responded: 'Responded', no_reply: 'No Reply' }[replyStatus(row)]}</td>
           </tr>)}
@@ -244,7 +257,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
           <h4>{[...new Set(conversation.recipient.associations.map(poc => poc.name))].join(', ')} · {conversation.recipient.phone}</h4>
           {conversation.optedOut ? <div className="broadcast-warning"><p>This recipient opted out. Future proactive WhatsApp sends are paused.</p>{canSend ? <details><summary>Record Renewed Permission</summary><label>How and When the Client Renewed Permission<input value={renewedPermission} maxLength={1000} onChange={event => setRenewedPermission(event.target.value)} /></label><Button disabled={busy || renewedPermission.trim().length < 10} onClick={() => perform(async () => { if (!window.confirm('Confirm the client agreed to receive WhatsApp messages again?')) return; await apiPost(`/api/broadcasts/recipients/${recipientId}/permission`, { note: renewedPermission, consentConfirmed: true }); await loadConversation(recipientId); setNotice('Renewed WhatsApp permission recorded.'); })}>Confirm Renewed Permission</Button></details> : null}</div> : null}
           <div className="broadcast-chat" role="region" aria-label="Selected POC broadcast conversation" tabIndex={0}>
-            <article className="broadcast-bubble srv"><strong>SRV Media</strong><p>{renderMessage(conversation.recipient)}</p><small>{formatDateTime(conversation.recipient.sent_at || conversation.recipient.claimed_at)} · {labels[conversation.recipient.status]}</small></article>
+            <article className="broadcast-bubble srv"><strong>SRV Media</strong><p>{conversation.recipient.deleted_at ? 'Earlier announcement and chat content were removed. New replies appear below.' : renderMessage(conversation.recipient)}</p><small>{formatDateTime(conversation.recipient.sent_at || conversation.recipient.claimed_at)} · {labels[conversation.recipient.status]}</small></article>
             {conversation.messages.map(message => <article key={message.id} className={`broadcast-bubble ${message.side}`}><strong>{message.side === 'client' ? 'Client' : 'SRV Media'}</strong><p>{message.body}</p><small>{formatDateTime(message.provider_at || message.created_at)}{message.side === 'srv' ? ` · ${labels[message.status] || message.status}` : ''}</small>{message.error ? <small>{message.error}</small> : null}</article>)}
           </div>
           {conversation.feedbackOwnsReplies ? <p className="broadcast-warning">A newer feedback session owns subsequent replies. Open its Project Workspace conversation to respond.</p> : !conversation.replyWindowOpen ? <p>The 24-hour WhatsApp reply window is closed. An approved template is required to contact this recipient.</p> : null}
@@ -260,6 +273,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
     </div></details>
 
     {isSuper ? <details id="broadcast-templates" className="broadcast-panel"><summary>Approved Announcement Templates</summary><div className="broadcast-panel-body">
+      <div className="broadcast-scroll"><table><thead><tr><th>Template</th><th>Language</th><th>Actions</th></tr></thead><tbody>{data.templates.map(row => <tr key={row.id}><td>{row.name}</td><td>{row.language}</td><td><Button disabled={busy} onClick={() => { setRegistered({ name: row.name, language: row.language, body: row.body, approvedConfirmed: false }); }}>Edit</Button><Button disabled={busy} onClick={() => askCleanup({ kind: 'templates', id: row.id, title: row.name })}>Remove from App</Button></td></tr>)}</tbody></table></div>
       <p>Register the exact text-only template approved in Meta WhatsApp Manager. Numbered fields such as {'{{1}}'} will be personalised in Create Broadcast.</p>
       <form onSubmit={event => { event.preventDefault(); perform(async () => { await apiPost('/api/broadcasts/templates', registered); setRegistered({ name: '', language: 'en', body: '', approvedConfirmed: false }); setNotice('Approved template registered.'); await load(); }); }}>
         <div className="broadcast-fields"><label>Meta Template Name<input required value={registered.name} onChange={event => setRegistered(old => ({ ...old, name: event.target.value }))} placeholder="srv_general_announcement" /></label><label>Language Code<input required value={registered.language} onChange={event => setRegistered(old => ({ ...old, language: event.target.value }))} /></label></div>
@@ -268,6 +282,18 @@ export default function WhatsAppBroadcasts({ currentUser }) {
         <button type="submit" className="button primary" disabled={busy}>Save Approved Template</button>
       </form>
     </div></details> : null}
+    {cleanup ? <div className="broadcast-modal-backdrop"><form className="broadcast-modal" role="dialog" aria-modal="true" aria-labelledby="broadcast-cleanup-title" onSubmit={event => { event.preventDefault(); perform(async () => {
+      await apiWriteWithAdminPin(`/api/broadcasts/${cleanup.kind}/${cleanup.id}`, { confirmation: cleanupConfirmation }, 'DELETE', cleanupPassword);
+      const wasHistory = cleanup.kind === 'history';
+      if (wasHistory) { setCampaignId(''); setRecipientId(''); setConversation(null); }
+      else if (templateId === cleanup.id) { setTemplateId(''); setParameters([]); changed(); }
+      setCleanup(null); setCleanupPassword(''); setCleanupConfirmation(''); setNotice(wasHistory ? 'Announcement and existing chat content removed. Late replies will still appear in Broadcast Replies.' : 'Template removed from the app. The Meta template and past announcements remain available.');
+      await load(); await loadCampaign(wasHistory ? '' : campaignId);
+    }); }}><h2 id="broadcast-cleanup-title">{cleanup.kind === 'history' ? 'Delete Announcement History' : 'Remove Template from App'}</h2><strong>{cleanup.title}</strong>
+      {cleanup.kind === 'history' ? <><p>{cleanup.recipients} recipient records · {cleanup.messages} chat messages</p><p>This removes existing announcement and chat content permanently. Minimal delivery and routing records remain so late replies stay in Broadcast Replies. Nothing is deleted from the clients’ WhatsApp chats.</p></> : <p>This removes the template from future broadcast selection. It does not delete the template in Meta or change announcements already created.</p>}
+      <label>Type DELETE<input autoFocus autoComplete="off" value={cleanupConfirmation} onChange={event => setCleanupConfirmation(event.target.value)} /></label><label>Manage Password<input type="password" autoComplete="new-password" value={cleanupPassword} onChange={event => setCleanupPassword(event.target.value)} /></label>
+      <div className="broadcast-actions"><button type="submit" className="button primary" disabled={busy || cleanupConfirmation !== 'DELETE' || !cleanupPassword}>Confirm Removal</button><Button disabled={busy} onClick={() => { setCleanup(null); setCleanupPassword(''); }}>Cancel</Button></div>
+    </form></div> : null}
   </div>;
 }
 

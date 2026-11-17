@@ -39,7 +39,7 @@
     "test:postgres": "node scripts/postgres-store-smoke.js && npm run test:zoho",
     "test:db-import": "node scripts/supabase-import-smoke.js",
     "test:quick": "node scripts/quick-checkin-smoke.js",
-    "test:broadcasts": "node scripts/broadcast-smoke.js && node scripts/broadcast-ui-smoke.js"
+    "test:broadcasts": "node scripts/broadcast-smoke.js && node scripts/broadcast-delivery-smoke.js && node scripts/broadcast-ui-smoke.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

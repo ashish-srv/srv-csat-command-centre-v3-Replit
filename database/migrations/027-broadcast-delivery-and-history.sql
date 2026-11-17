@@ -1,0 +1,13 @@
+begin;
+alter table public.whatsapp_broadcasts add column if not exists deleted_at timestamptz;
+alter table public.whatsapp_broadcasts add column if not exists deleted_by text;
+alter table public.whatsapp_broadcast_messages add column if not exists deleted_at timestamptz;
+alter table public.whatsapp_broadcast_recipients add column if not exists error_code text;
+alter table public.whatsapp_broadcast_recipients add column if not exists delivery_at timestamptz;
+alter table public.whatsapp_broadcast_recipients add column if not exists retry_after timestamptz;
+alter table public.whatsapp_broadcast_recipients add column if not exists retry_source_id uuid references public.whatsapp_broadcast_recipients(id);
+create unique index if not exists whatsapp_broadcast_retry_source on public.whatsapp_broadcast_recipients(retry_source_id) where retry_source_id is not null;
+alter table public.whatsapp_broadcast_delivery_events add column if not exists error_code text;
+alter table public.whatsapp_broadcast_delivery_events add column if not exists delivery_at timestamptz;
+alter table public.whatsapp_broadcast_delivery_events add column if not exists retry_after timestamptz;
+commit;

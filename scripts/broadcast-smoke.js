@@ -252,14 +252,20 @@ async function main() {
     assert.ok(transactionLog.some(row=>row.sql==='rollback'));assert.ok(!transactionLog.some(row=>row.sql==='commit'));
   } finally {PostgresStore.prototype.getProject=savedProjectMethod;PostgresStore.prototype.hasOpenCycle=savedOpenMethod;SupabaseStore.prototype.createCycle=savedCreate;}
 
-  // Workflow contract: existing CSAT calls/credentials are retained. Only the
-  // status branch is added; the broadcast Meta sender has no blind retries.
+  // Workflow contract: existing CSAT nodes/calls/credentials are retained.
+  // Receipts must finish before acknowledgement; ordinary text still follows
+  // the same client gate and CSAT engine. The sender has no blind retries.
   const original=JSON.parse(fs.readFileSync('n8n/workflows/01 - CSAT v5 - WhatsApp Inbound Router (Birthday Reply Isolation).json'));
   const updated=JSON.parse(fs.readFileSync('n8n/workflows/01 - CSAT v6 - WhatsApp Inbound Router (Broadcast Priority).json'));
   for(const before of original.nodes) assert.deepEqual(updated.nodes.find(node=>node.name===before.name),before);
   for(const [name,connections] of Object.entries(original.connections)) {
+    if(name==='Config') continue;
     connections.main.forEach((targets,index)=>targets.forEach(target=>assert.ok(updated.connections[name].main[index].some(candidate=>candidate.node===target.node && candidate.index===target.index),'original CSAT routing connections are preserved')));
   }
+  assert.deepEqual(updated.connections.Config.main[0].map(edge=>edge.node),['Is Delivery Status?']);
+  assert.equal(updated.connections['Is Delivery Status?'].main[1][0].node,'Is Client Text Message?');
+  assert.equal(updated.connections['Record Broadcast Delivery Status'].main[0][0].node,'Restore Incoming Event');
+  assert.equal(updated.connections['Restore Incoming Event'].main[0][0].node,'Is Client Text Message?');
   const webhook={body:{entry:[{changes:[{value:{messages:[{type:'text'}]}},{value:{statuses:[{id:'one',status:'sent'}]}}]},{changes:[{value:{statuses:[{id:'two',status:'delivered'},{id:'three',status:'read'}]}}]}]}};
   const evaluate=expression=>vm.runInNewContext('('+expression.slice(3,-2)+')',{$:()=>({first:()=>({json:webhook})})});
   assert.equal(evaluate(updated.nodes.find(node=>node.name==='Is Delivery Status?').parameters.conditions.conditions[0].leftValue),true);

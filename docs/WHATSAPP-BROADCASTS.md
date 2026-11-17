@@ -28,6 +28,65 @@ client/project associations recorded in the preview and history.
    parameters and no header, attachment or button components. Meta approval is
    completed in WhatsApp Manager before registration in this application.
 
+### Delivery-receipt fix (17 November 2026)
+
+For an existing installation, deploy the application and run `npm run db:migrate`.
+New migration `027-broadcast-delivery-and-history.sql` adds failure codes/times,
+retry links and history-removal markers. It does not modify CSAT tables, ratings,
+sessions or conversation state. Existing migration files are unchanged.
+
+Update **both** the shared Visitor 03 router and CSAT Workflow 1, then publish the
+updated versions. Keep the Meta callback pointing to the shared Visitor router.
+The configured import files in `outputs` preserve the supplied URLs, credential
+references, signature verification, visitor approval and OTP-cancellation paths:
+
+- `SRV Visitor 03 - Shared Router - Delivery Receipts Fixed.json`
+- `1. CSAT v6 - WhatsApp Inbound Message Router (Birthday and Broadcast Isolation).json`
+
+Replace the existing workflows rather than enabling additional listeners with
+the same webhook paths. Workflow 16 needs no change for this fix. No new secrets
+are required; cleanup uses the existing `ADMIN_PIN` Manage password.
+
+The shared router forwards status-only batches separately from client messages.
+CSAT Workflow 1 saves receipts before returning HTTP success. Ordinary text still
+uses the existing CSAT nodes and request body. Failed receipt writes propagate
+back to the shared router so Meta can retry. Duplicate and out-of-order receipts
+cannot regress Read/Delivered to Sent/Failed.
+
+Old dropped receipts are not automatically recovered. The optional, manual-only
+`One-time - Restore Known Broadcast Delivery Receipts.json` file in `outputs`
+contains the six status events supplied for the 17 November 17:51 IST test. Run
+it once after deploying/migrating, then Refresh Status. It only posts receipts to
+the app; it contains no WhatsApp send node. It cannot reconstruct missing events
+that were never supplied.
+
+The reusable `scripts/upgrade-broadcast-workflows.js` accepts `visitor|csat`, an
+input JSON path and an output JSON path. It fails on an unexpected splitter
+version. Configured exports and backups stay in ignored `outputs`, not Git.
+
+### Retries and removal
+
+- History counts Delivered (including Read), Read, Awaiting Confirmation and
+  Failed separately. A provider acceptance is not a delivery confirmation.
+- A confirmed Failed recipient has a manual **Retry Failed Recipient** button.
+  Meta error `131049` enforces at least 24 hours from its failure timestamp.
+  Retrying later does not guarantee delivery. No automatic resends are added.
+- A retry creates a separate announcement attempt for that one recipient, using
+  the original approved template/text/parameters. The database permits one retry
+  child per failed attempt. A later failure can be retried from that new attempt.
+  Current cluster access, template availability, opt-out, valid contact and active
+  feedback are checked again. If a delayed success arrives before dispatch, the
+  pending retry is skipped. Accepted, Sent, Unknown, Delivered and Read records
+  cannot be retried through this action.
+- Super Admin can **Remove from App** under Approved Templates. This removes the
+  template registration, not the Meta template or historical announcement snapshots.
+- Super Admin can **Delete History** with recipient/message counts shown first,
+  explicit DELETE confirmation and the Manage password. Existing announcement and
+  message content is erased. Minimal routing/provider IDs, timestamps, opt-outs
+  and delivery metadata remain so late replies cannot spill into CSAT. New replies
+  to removed history reappear in Broadcast Replies. Clients' WhatsApp chats are
+  unaffected. Pending sends/replies must finish before cleanup.
+
 ## Access and sending
 
 Super Admin has access. Existing/new Admin and Project User accounts receive no
@@ -103,6 +162,14 @@ The broadcast tests use fixture recipients, provider responses and browser event
 They cover routing priority, duplicate deliveries, shared numbers, cluster/role
 permissions, filter behaviour, preview, queueing and the three feedback types.
 The existing conversation regression suites exercise the feedback handlers.
+
+`scripts/broadcast-delivery-smoke.js` covers shared-router receipt batches,
+visitor/OTP controls, retry cooldown, permissions and cleanup. For disposable
+PostgreSQL integration verification, install `@electric-sql/pglite` outside the
+application dependencies and pass its directory to
+`node scripts/broadcast-database-smoke.js <package-directory>`. This test never
+uses `DATABASE_URL`; it applies migrations 026/027 to an in-memory database and
+tests early receipts, retry uniqueness, history removal and late reply routing.
 
 ## Page layout and changing access
 

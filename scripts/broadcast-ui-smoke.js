@@ -75,6 +75,39 @@ async function main() {
   viewer.window.setInterval=()=>1;viewer.window.clearInterval=()=>{};await viewer.settle();
   assert.ok(!viewer.find(node=>node.props.children==='Create Broadcast'));
   assert.ok(!viewer.find(node=>node.props.id==='broadcast-templates'));
+  assert.ok(!viewer.find(node=>node.props.children==='Delete History'));
+
+  // Failed-only retries, cooldown and explicit password-protected removal.
+  const failed={...recipient,id:id(62),status:'failed',error_code:'131049',retry_after:new Date(Date.now()+86400000).toISOString(),reason:'Meta 131049: marketing limit'};
+  const unknown={...recipient,id:id(63),status:'unknown'};
+  const maintenanceWrites=[];
+  const maintenanceRead=async url=>url.includes('/history/')?{id:id(51),title:'Announcement',recipients:3,messages:4}
+    :url.includes('/inbox')||url===`/api/broadcasts/${id(51)}`?{recipients:[recipient,failed,unknown]}:data;
+  const maintenanceApi={apiGet:maintenanceRead,apiPost:async(url,body)=>{maintenanceWrites.push({url,body});return {campaign:{id:id(51)},senderTriggered:true};},
+    apiWriteWithAdminPin:async(url,body,method,pin)=>{maintenanceWrites.push({url,body,method,pin});return {removed:true};}};
+  const m=new ComponentHarness('src/components/WhatsAppBroadcasts.jsx',{currentUser:{role:'super_admin'}},'/broadcasts',maintenanceRead,null,{modules:{'../permissions':permissions,'../api':maintenanceApi}});
+  m.window.setInterval=()=>1;m.window.clearInterval=()=>{};m.window.crypto=crypto;m.window.confirm=()=>true;await m.settle();
+  assert.equal(elements(m.tree,node=>node.props.children==='Retry Failed Recipient').length,1,'delivered and unconfirmed rows have no retry action');
+  assert.equal(m.find(node=>node.props.children==='Retry Failed Recipient').props.disabled,true);
+  failed.retry_after=new Date(Date.now()-1000).toISOString();
+  await m.find(node=>node.props.children==='Refresh Status').props.onClick();await m.settle();
+  assert.equal(m.find(node=>node.props.children==='Retry Failed Recipient').props.disabled,false);
+  await m.find(node=>node.props.children==='Retry Failed Recipient').props.onClick();await m.settle();
+  assert.equal(maintenanceWrites[0].url,`/api/broadcasts/recipients/${id(62)}/retry`);
+  assert.equal(maintenanceWrites[0].body.consentConfirmed,true);
+  await m.find(node=>node.props.children==='Delete History').props.onClick();await m.settle();
+  assert.ok(m.find(node=>node.props.role==='dialog'));
+  assert.equal(m.find(node=>node.props.children==='Confirm Removal').props.disabled,true);
+  labelInput(m,'Type DELETE').props.onChange({target:{value:'DELETE'}});await m.settle();
+  labelInput(m,'Manage Password').props.onChange({target:{value:'fixture-password'}});await m.settle();
+  assert.equal(m.find(node=>node.props.children==='Confirm Removal').props.disabled,false);
+  m.find(node=>node.type==='form' && node.props.role==='dialog').props.onSubmit({preventDefault:()=>{}});await m.settle();
+  assert.equal(maintenanceWrites.at(-1).method,'DELETE');assert.equal(maintenanceWrites.at(-1).pin,'fixture-password');
+  assert.equal(maintenanceWrites.at(-1).url,`/api/broadcasts/history/${id(51)}`);
+  assert.ok(!m.find(node=>node.props.role==='dialog'));
+  m.find(node=>node.props.children==='Remove from App').props.onClick();await m.settle();
+  assert.equal(labelInput(m,'Manage Password').props.value,'','the password is cleared after cleanup');
+  m.find(node=>node.props.children==='Cancel').props.onClick();await m.settle();
 
   // Exercise actual API authentication, role checks and saved permissions.
   process.env.APP_LOGIN_PASSWORD='broadcast-fixture';

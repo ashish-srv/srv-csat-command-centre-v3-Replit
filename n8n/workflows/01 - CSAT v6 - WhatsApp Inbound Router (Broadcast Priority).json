@@ -1,5 +1,5 @@
 {
-  "name": "1. CSAT v6 - WhatsApp Inbound Router (Broadcast Priority)",
+  "name": "1. CSAT v6 - WhatsApp Inbound Message Router (Birthday and Broadcast Isolation)",
   "nodes": [
     {
       "parameters": {
@@ -331,6 +331,19 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 1500
+    },
+    {
+      "id": "9ff9e7a8-a9dd-4dbd-9dbf-42ad06ef5ad5",
+      "name": "Restore Incoming Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        368
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: $('Config').first().json }];"
+      }
     }
   ],
   "pinData": {},
@@ -349,11 +362,6 @@
     "Config": {
       "main": [
         [
-          {
-            "node": "Is Client Text Message?",
-            "type": "main",
-            "index": 0
-          },
           {
             "node": "Is Delivery Status?",
             "type": "main",
@@ -440,7 +448,35 @@
             "index": 0
           }
         ],
-        []
+        [
+          {
+            "node": "Is Client Text Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Broadcast Delivery Status": {
+      "main": [
+        [
+          {
+            "node": "Restore Incoming Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Incoming Event": {
+      "main": [
+        [
+          {
+            "node": "Is Client Text Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },

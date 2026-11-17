@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const { BroadcastRepository } = require('./broadcast-repository');
 const { whatsappNumber, recipientReason } = require('./whatsapp-recipients');
 const { emitAutomation } = require('./n8n');
+const { deliveryEvent, retryBlock } = require('./broadcast-delivery');
 
 const uuid = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value));
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
@@ -18,6 +19,15 @@ function automationAuth(headers) {
   const expected = process.env.N8N_WEBHOOK_SECRET || '';
   const received = Buffer.from(String(actual)), secret = Buffer.from(expected);
   if (!expected || expected === 'replace-with-shared-secret' || received.length !== secret.length || !crypto.timingSafeEqual(received, secret)) fail('Unauthorised broadcast automation.', 401);
+}
+
+function cleanupAuth(access, headers, body) {
+  if (access.role !== 'super_admin') fail('Only Super Admin can remove broadcast templates or history.', 403);
+  const expected = Buffer.from(process.env.ADMIN_PIN || '');
+  const supplied = Buffer.from(String(Object.entries(headers || {}).find(([key]) => key.toLowerCase() === 'x-admin-pin')?.[1] || ''));
+  if (!expected.length) fail('Manage password is not configured (ADMIN_PIN).', 503);
+  if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) fail('Incorrect Manage password.', 403);
+  if (body.confirmation !== 'DELETE') fail('Type DELETE to confirm removal.');
 }
 
 function validDate(value) {
@@ -179,8 +189,8 @@ async function handleBroadcastRequest({ store, access, request, pathname, method
       if (method === 'POST' && pathname === '/api/automation/broadcasts/status') {
         if (!Array.isArray(body.statuses) || body.statuses.length > 100) fail('Supply up to 100 delivery updates.');
         for (const event of body.statuses) {
-          if (!event.id || String(event.id).length > 300 || !['sent','delivered','read','failed'].includes(event.status)) continue;
-          await repo.delivery({ id: String(event.id), status: event.status, reason: event.status === 'failed' ? String(event.errors?.[0]?.title || event.errors?.[0]?.message || 'WhatsApp delivery failed').slice(0, 500) : '' });
+          const parsed = deliveryEvent(event);
+          if (parsed) await repo.delivery(parsed);
         }
         return json(200, { saved: true });
       }
@@ -194,6 +204,20 @@ async function handleBroadcastRequest({ store, access, request, pathname, method
       fail('Unknown broadcast automation route.', 404);
     }
     const clusters = clustersFor(access);
+    const removal = /^\/api\/broadcasts\/(templates|history)\/([^/]+)$/.exec(pathname);
+    if (removal && uuid(removal[2])) {
+      if (access.role !== 'super_admin') fail('Only Super Admin can remove broadcast templates or history.', 403);
+      if (method === 'GET' && removal[1] === 'history') {
+        const info = await repo.historyInfo(removal[2]);
+        if (!info) fail('Announcement not found.', 404);
+        return json(200, info);
+      }
+      if (method === 'DELETE') {
+        cleanupAuth(access, request.headers, body);
+        if (removal[1] === 'templates') return json(200, { removed: await repo.removeTemplate(removal[2]) });
+        return json(200, { removed: await repo.removeHistory(removal[2], actorFor(access)) });
+      }
+    }
     if (method === 'GET' && pathname === '/api/broadcasts/inbox') {
       const offset = Number(searchParams.get('offset') || 0);
       const from = searchParams.get('from') || '', to = searchParams.get('to') || '';
@@ -244,10 +268,33 @@ async function handleBroadcastRequest({ store, access, request, pathname, method
       if (!recipients.length) fail('Broadcast not found in your assigned clusters.', 404);
       return json(200, { recipients: recipients.map(row => ({ ...row, message: row.message_body ?? renderTemplate(row.template, row.parameters, row.associations) })) });
     }
-    const messages = /^\/api\/broadcasts\/recipients\/([^/]+)\/(messages|reply|permission)$/.exec(pathname);
+    const messages = /^\/api\/broadcasts\/recipients\/([^/]+)\/(messages|reply|permission|retry)$/.exec(pathname);
     if (messages && uuid(messages[1])) {
       const recipient = await repo.recipient(messages[1], clusters);
       if (!recipient || !canReadHistory(recipient, clusters)) fail('Broadcast recipient not found in your assigned clusters.', 404);
+      if (method === 'POST' && messages[2] === 'retry') {
+        permission(access, 'broadcast_send');
+        if (!uuid(body.requestId) || body.consentConfirmed !== true) fail('Confirm the retry and provide its request ID.');
+        const blocked = retryBlock(recipient);
+        if (blocked) fail(blocked, 409);
+        if (!(await store.getMessagingStatus()).enabled) fail('WhatsApp messaging is paused.', 409);
+        if (!process.env.N8N_BROADCAST_WEBHOOK) fail('Configure the broadcast sender first.', 503);
+        const active = (await repo.templates()).some(template => template.active && template.name === recipient.template.name && template.language === recipient.template.language && template.body === recipient.template.body);
+        if (!active) fail('The original approved template was removed or changed. Create a new announcement and preview the current template.', 409);
+        const directory = await store.getDirectory();
+        if (clusters && recipient.associations.some(association => {
+          const current = directory.clientPocs.find(poc => poc.id === association.id);
+          return current && !clusters.includes(current.clusterId);
+        })) fail('A recipient now belongs to a cluster outside your access. Ask Super Admin to review the retry.', 403);
+        const eligible = await checkQueuedRecipient(recipient, store, directory);
+        if (eligible) fail(eligible, 409);
+        const title = `Retry · ${recipient.title}`.slice(0,160);
+        const hash = crypto.createHash('sha256').update(JSON.stringify({ retrySourceId: recipient.id })).digest('hex');
+        const created = await repo.create({ title, template: recipient.template, parameters: recipient.parameters, retrySourceId: recipient.id, requestId: body.requestId, hash },
+          [{ phone: recipient.phone, associations: recipient.associations, message: recipient.message_body, parameterValues: recipient.parameter_values, reason: '' }], actorFor(access));
+        const trigger = await emitAutomation('broadcast_queue_ready', { campaignId: created.campaign.id });
+        return json(201, { campaign: created.campaign, senderTriggered: trigger.status === 'sent' });
+      }
       if (method === 'POST' && messages[2] === 'permission') {
         permission(access, 'broadcast_send');
         if (!whatsappNumber(recipient.phone)) fail('A valid WhatsApp number is required.');
@@ -280,7 +327,7 @@ async function handleBroadcastRequest({ store, access, request, pathname, method
     }
     fail('Unknown broadcast route.', 404);
   } catch (error) {
-    if (error.code === '42P01') return json(503, { error: 'Run the WhatsApp Broadcasts database migration before opening this tab.' });
+    if (['42P01','42703'].includes(error.code)) return json(503, { error: 'Run the WhatsApp Broadcasts database migrations before opening this tab.' });
     console.error('[broadcast]', error.status ? error.message : 'Request failed', error.code || '');
     return json(error.status || 500, { error: error.status ? error.message : 'Broadcast request failed. Check server logs.' });
   }

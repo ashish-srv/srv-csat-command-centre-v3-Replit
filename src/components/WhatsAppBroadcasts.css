@@ -3,3 +3,7 @@
 .broadcast-centre,.broadcast-panel-body,.broadcast-fields>*{min-width:0}.broadcast-centre h3,.broadcast-centre header{overflow-wrap:anywhere}.broadcast-scroll{max-height:min(460px,60vh)}.broadcast-chat{max-height:min(520px,65vh)}.broadcast-template-text{max-height:min(260px,35vh)}.broadcast-centre textarea{min-height:90px;max-height:220px;resize:vertical;overflow:auto}
 
 .broadcast-recipient-actions{margin-top:8px}
+.broadcast-modal-backdrop { position: fixed; inset: 0; z-index: 1200; background: #15182088; display: grid; place-items: center; padding: 20px; }
+.broadcast-modal { background: white; border: 1px solid #d9deea; border-radius: 14px; padding: 24px; width: min(560px, 100%); max-height: 85vh; overflow-y: auto; box-shadow: 0 16px 60px #15182033; }
+.broadcast-modal h2 { color: #9c203b; margin-top: 0; }
+.broadcast-modal label { display: grid; gap: 6px; margin: 14px 0; }
