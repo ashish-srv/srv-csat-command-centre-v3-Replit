@@ -42,6 +42,17 @@ function expandedParameters(parameters, associations) {
       : parameter.source === 'client_name' ? unique('clientName') : unique('projectName'));
 }
 
+function feedbackMessagingBlock(session) {
+  const state = session?.conversationState || {};
+  const stoppedByAdmin = state.stoppedByAdmin === true || state.closureReason === 'stopped_by_admin';
+  // The feedback store also uses status=opted_out for an administrative stop.
+  if (state.optedOut || state.state === 'opted_out' || (session?.status === 'opted_out' && !stoppedByAdmin)) {
+    return 'Client Opted Out During Feedback';
+  }
+  if (state.handoffReason === 'wrong_person') return 'WhatsApp Number Marked as Wrong Person';
+  return '';
+}
+
 function renderTemplate(template, parameters, associations) {
   const values = expandedParameters(parameters, associations);
   return template.body.replace(/\{\{(\d+)\}\}/g, (_, number) => values[Number(number) - 1] || '');
@@ -63,8 +74,7 @@ async function audience(store, pocs) {
       if (typeof store.whatsappContactOptedOut === 'function' && await store.whatsappContactOptedOut(row.phone)) row.reason = 'WhatsApp Messaging Opt-Out';
       const routing = await store.getWhatsappRoutingContext(row.phone);
       if (['active','ambiguous'].includes(routing.status)) row.reason = 'Active Feedback in Progress';
-      const last = routing.session?.conversationState || {};
-      if (!row.reason && (routing.session?.status === 'opted_out' || last.optedOut || last.handoffReason === 'wrong_person')) row.reason = 'Messaging Opted Out or Wrong Person';
+      if (!row.reason) row.reason = feedbackMessagingBlock(routing.session);
     }
   }
   return [...groups.values()];
@@ -114,8 +124,8 @@ async function checkQueuedRecipient(row, transactionStore, directory) {
   if (await transactionStore.whatsappContactOptedOut(row.phone)) return 'WhatsApp Messaging Opt-Out';
   const routing = await transactionStore.getWhatsappRoutingContext(row.phone);
   if (['active','ambiguous'].includes(routing.status)) return 'Active Feedback in Progress';
-  const state = routing.session?.conversationState || {};
-  if (routing.session?.status === 'opted_out' || state.optedOut || state.handoffReason === 'wrong_person') return 'Messaging Opted Out or Wrong Person';
+  const feedbackBlock = feedbackMessagingBlock(routing.session);
+  if (feedbackBlock) return feedbackBlock;
   if (await transactionStore.whatsappSendInProgress(row.phone)) return 'Broadcast Sending in Progress';
   return '';
 }

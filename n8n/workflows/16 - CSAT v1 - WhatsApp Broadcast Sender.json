@@ -195,13 +195,19 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ (()=>{const j=$('Split Broadcast Jobs').item.json;return j.kind==='reply'?{messaging_product:'whatsapp',to:j.to,type:'text',text:{body:j.text}}:{messaging_product:'whatsapp',to:j.to,type:'template',template:{name:j.template.name,language:{code:j.template.language},...(j.parameters.length?{components:[{type:'body',parameters:j.parameters.map(text=>({type:'text',text}))}]}:{})}};})() }}",
+        "jsonBody": "={{ (() => {\n  const job = $('Split Broadcast Jobs').item.json;\n  if (job.kind === 'reply') {\n    return {\n      messaging_product: 'whatsapp',\n      to: job.to,\n      type: 'text',\n      text: { body: job.text }\n    };\n  }\n  const template = {\n    name: job.template.name,\n    language: { code: job.template.language }\n  };\n  if (job.parameters.length) {\n    template.components = [{\n      type: 'body',\n      parameters: job.parameters.map(text => ({ type: 'text', text }))\n    }];\n  }\n  return { messaging_product: 'whatsapp', to: job.to, type: 'template', template };\n})() }}",
         "options": {
           "timeout": 20000,
           "batching": {
             "batch": {
               "batchSize": 1,
               "batchInterval": 250
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
             }
           }
         }
@@ -225,7 +231,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const job=$('Split Broadcast Jobs').item.json;const id=$json.messages?.[0]?.id;const code=$json.error?.code;return {json:{id:job.id,kind:job.kind,status:id?'accepted':code?'failed':'unknown',providerMessageId:id||'',reason:id?'Accepted by WhatsApp. Delivery confirmation is pending.':String($json.error?.message||$json.message||'No sender confirmation. Check the sender before retrying.').slice(0,1000)}};"
+        "jsCode": "const job = $('Split Broadcast Jobs').item.json;\nlet response = $json.body ?? $json;\nif (typeof response === 'string') {\n  try { response = JSON.parse(response); } catch { response = null; }\n}\nconst httpStatus = Number($json.statusCode || 0);\nconst providerId = response?.messages?.[0]?.id;\nconst error = response?.error ?? $json.error;\nlet status = 'unknown';\nlet reason = 'No sender confirmation. Check the sender before retrying.';\nif (typeof providerId === 'string' && providerId && (!httpStatus || (httpStatus >= 200 && httpStatus < 300))) {\n  status = 'accepted';\n  reason = 'Accepted by WhatsApp. Delivery confirmation is pending.';\n} else {\n  const code = Number(error?.code || 0);\n  const rejected = httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408;\n  if (rejected || (!httpStatus && code)) status = 'failed';\n  const errorText = typeof error === 'string' ? error : error?.error_data?.details || error?.message || $json.message;\n  const prefix = [httpStatus ? 'HTTP ' + httpStatus : '', code ? 'Meta ' + code : ''].filter(Boolean).join(' / ');\n  reason = [prefix, typeof errorText === 'string' ? errorText : ''].filter(Boolean).join(': ') || reason;\n  reason = reason.replace(/\\bBearer\\s+[A-Za-z0-9._~+\\/-]+/gi, 'Bearer [redacted]');\n}\nreturn { json: { id: job.id, kind: job.kind, status, providerMessageId: status === 'accepted' ? providerId : '', reason: reason.slice(0, 1000) } };"
       }
     },
     {

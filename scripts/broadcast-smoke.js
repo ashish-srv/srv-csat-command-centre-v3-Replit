@@ -7,7 +7,7 @@ const { BroadcastRepository, statusRank } = require('../src/lib/broadcast-reposi
 const { PostgresStore } = require('../src/lib/postgres-store');
 const { SupabaseStore } = require('../src/lib/supabase-store');
 const { captureBroadcastInbound } = require('../src/lib/broadcast-inbound');
-const { handleBroadcastRequest, audience, expandedParameters, renderTemplate, parameterCount } = require('../src/lib/broadcast-service');
+const { handleBroadcastRequest, audience, checkQueuedRecipient, expandedParameters, renderTemplate, parameterCount } = require('../src/lib/broadcast-service');
 
 const id = value => `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`;
 const superAdmin = { role: 'super_admin', email: 'super@example.com' };
@@ -80,6 +80,48 @@ async function main() {
   const grouped = await audience(store, pocs.slice(0,5));
   assert.equal(grouped.filter(row => !row.reason).length, 2, 'shared client/project identities receive one message');
   assert.equal(grouped.find(row => row.phone === '919876543210').associations.length, 2);
+
+  const feedbackStore = new SupabaseStore({ skipEnv: true });
+  feedbackStore.recomputeCycle = async () => {};
+  const stoppedSessions = [];
+  for (const cycleType of ['pulse', 'project_end', 'quick_checkin']) {
+    let row = { id: id(82), status: 'started', project_id: pocs[0].projectId, cycle_id: id(81),
+      client_poc_id: pocs[0].id, started_at: '2026-11-17T04:00:00Z', feedback_cycles: { cycle_type: cycleType },
+      conversation_state: { state: cycleType === 'quick_checkin' ? 'quick_checkin_choice' : 'waiting_for_overall_rating' } };
+    feedbackStore.getPocsByWhatsapp = async () => [pocs[0]];
+    feedbackStore.request = async (_, options) => {
+      if (options.method === 'PATCH') row = { ...row, ...options.body };
+      return [row];
+    };
+    assert.equal((await feedbackStore.getWhatsappRoutingContext(pocs[0].contactWhatsapp)).status, 'active');
+    let stopped = await feedbackStore.stopSessionForCycle(row.id);
+    if (cycleType !== 'quick_checkin') stopped = await feedbackStore.applyStoppedSessionAnalysis(row.id, {});
+    assert.equal(stopped.status, 'opted_out', `${cycleType}: Admin stop uses the legacy database status`);
+    const routing = await feedbackStore.getWhatsappRoutingContext(pocs[0].contactWhatsapp);
+    assert.equal(routing.status, 'latest', `${cycleType}: the stopped session is no longer active`);
+    stoppedSessions.push({ session: routing.session, reason: '' });
+  }
+  const stoppedQuickCheckin = stoppedSessions[2].session;
+  const outcomes = [
+    ...stoppedSessions,
+    { session: { status: 'opted_out', conversationState: { closureReason: 'stopped_by_admin' } }, reason: '' },
+    { session: { ...stoppedQuickCheckin, conversationState: { ...stoppedQuickCheckin.conversationState, optedOut: true } }, reason: 'Client Opted Out During Feedback' },
+    { session: { status: 'opted_out' }, reason: 'Client Opted Out During Feedback' },
+    { session: { status: 'needs_attention', conversationState: { handoffReason: 'wrong_person' } }, reason: 'WhatsApp Number Marked as Wrong Person' },
+    { session: stoppedQuickCheckin, optedOut: true, reason: 'WhatsApp Messaging Opt-Out' },
+    { session: { status: 'started' }, routingStatus: 'active', reason: 'Active Feedback in Progress' }
+  ];
+  for (const { session, optedOut = false, routingStatus = 'latest', reason } of outcomes) {
+    const storeForNumber = {
+      getWhatsappRoutingContext: async () => ({ status: routingStatus, session }),
+      whatsappContactOptedOut: async () => optedOut,
+      whatsappSendInProgress: async () => false
+    };
+    const [recipient] = await audience(storeForNumber, [pocs[0]]);
+    assert.equal(recipient.reason, reason, 'Preview correctly distinguishes the cause');
+    assert.equal(await checkQueuedRecipient(recipient, storeForNumber, directory), reason, 'The final send check uses the same rule');
+  }
+
   assert.equal(parameterCount('Hi {{1}}. {{1}} {{2}}'), 2);
   assert.throws(() => parameterCount('Hi {{2}}'), /consecutively/);
   const parameters = [{ source: 'poc_name', text: '' }, { source: 'text', text: 'Office announcement' }];
@@ -227,12 +269,40 @@ async function main() {
   assert.equal(workflow.active,false);
   const meta=workflow.nodes.find(node=>node.name==='Send Broadcast WhatsApp');
   assert.ok(!meta.retryOnFail);
-  const expression=meta.parameters.jsonBody.slice(3,-2);
-  for(const job of [{kind:'template',to:'447700900124',template:{name:'approved',language:'en'},parameters:[]},{kind:'reply',to:'447700900124',text:'Manual reply'}]) {
-    const payload=vm.runInNewContext(expression,{$:()=>({item:{json:job}})});
-    assert.equal(payload.to,job.to);assert.equal(payload.type,job.kind==='reply'?'text':'template');
-    if(job.kind==='template') assert.ok(!payload.template.components);
-  }
+  assert.equal(meta.parameters.options.response.response.fullResponse, true);
+  assert.equal(meta.parameters.options.response.response.neverError, true);
+  const capture = workflow.nodes.find(node => node.name === 'Capture Broadcast Send Result');
+  const report = output => vm.runInNewContext('(function(){' + capture.parameters.jsCode + '})()', {
+    $json: output, $: () => ({ item: { json: { id: id(91), kind: 'template' } } })
+  }).json;
+  assert.equal(report({ statusCode: 200, body: { messages: [{ id: 'wamid.Accepted' }] } }).providerMessageId, 'wamid.Accepted');
+  const rejected = report({ statusCode: 400, body: { error: { code: 132001, message: 'Template unavailable', error_data: { details: 'No English translation' } } } });
+  assert.equal(rejected.status, 'failed');
+  assert.equal(rejected.reason, 'HTTP 400 / Meta 132001: No English translation');
+  assert.equal(report({ error: 'connect ETIMEDOUT' }).status, 'unknown');
+  assert.match(report({ error: 'connect ETIMEDOUT' }).reason, /ETIMEDOUT/);
+  assert.equal(report({ statusCode: 502, body: 'Gateway error' }).status, 'unknown');
+  const expression = meta.parameters.jsonBody;
+  // n8n's expression splitter closes at the first unescaped double brace.
+  const closingDelimiter = expression.indexOf('}}', expression.indexOf('{{') + 2);
+  assert.equal(closingDelimiter, expression.length - 2, 'Payload construction must not close the n8n expression early');
+  const payloadFor = job => vm.runInNewContext(expression.slice(3, closingDelimiter), {
+    $: () => ({ item: { json: job } })
+  });
+  const templateJob = { kind: 'template', to: '447700900124', template: { name: 'approved', language: 'en' }, parameters: [] };
+  const noVariables = payloadFor(templateJob);
+  assert.equal(noVariables.to, templateJob.to);
+  assert.equal(noVariables.type, 'template');
+  assert.equal(noVariables.template.name, 'approved');
+  assert.equal(noVariables.template.language.code, 'en');
+  assert.ok(!noVariables.template.components);
+  const values = ['Sample Name', 'https://example.test/article-one', 'https://example.test/article-two'];
+  const withVariables = payloadFor({ ...templateJob, parameters: values });
+  assert.deepEqual(Array.from(withVariables.template.components[0].parameters, parameter => parameter.text), values);
+  const reply = payloadFor({ kind: 'reply', to: templateJob.to, text: 'Manual reply' });
+  assert.equal(reply.to, templateJob.to);
+  assert.equal(reply.type, 'text');
+  assert.equal(reply.text.body, 'Manual reply');
   console.log('Broadcast and recipient regressions passed: permissions, cluster scope, shared-number deduplication, all three feedback types, skip counts, template preview, routing priority, duplicate deliveries and workflow contracts.');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
