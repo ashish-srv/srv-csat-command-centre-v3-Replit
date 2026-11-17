@@ -16,7 +16,9 @@ function replyStatus(row) {
 function section(id) {
   const node = document.getElementById(id);
   if (!node) return;
-  if (node.tagName === 'DETAILS') node.open = true;
+  for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+    if (ancestor.tagName === 'DETAILS') ancestor.open = true;
+  }
   node.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -146,6 +148,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
       {canSend ? <Button onClick={() => section('broadcast-create')}>Create Broadcast</Button> : null}
       <Button onClick={() => section('broadcast-history')}>Broadcast History</Button>
       <Button onClick={() => section('broadcast-replies')}>Broadcast Replies</Button>
+      <Button onClick={() => section('broadcast-conversation')}>Conversation Window</Button>
       {isSuper ? <Button onClick={() => section('broadcast-templates')}>Approved Templates</Button> : null}
       <Button disabled={busy} onClick={() => perform(async () => { await load(); await loadCampaign(campaignId); if (recipientId) await loadConversation(recipientId); })}>Refresh Status</Button>
     </nav>
@@ -160,7 +163,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
       <summary>Create Broadcast</summary>
       <div className="broadcast-panel-body">
         <div className="broadcast-fields">
-          <label>Campaign Name<input value={title} maxLength={160} onChange={event => { setTitle(event.target.value); changed(); }} /></label>
+          <label>Broadcast Title<input value={title} maxLength={160} onChange={event => { setTitle(event.target.value); changed(); }} /></label>
           <SingleSelect label="Approved Announcement Template" value={templateId} options={data.templates.filter(row => row.active).map(row => ({ value: row.id, label: `${row.name} · ${row.language}` }))} onChange={id => { setTemplateId(id); setParameters(Array.from({ length: fieldCount(data.templates.find(row => row.id === id)) }, () => ({ source: 'text', text: '' }))); changed(); }} />
         </div>
         {template ? <p className="broadcast-template-text">{template.body}</p> : <p>Select an approved template. Super Admin can register templates in Approved Templates below.</p>}
@@ -177,9 +180,9 @@ export default function WhatsAppBroadcasts({ currentUser }) {
         <label>Search Clients, Projects, POCs or Numbers<input value={search} onChange={event => { setSearch(event.target.value); changed(); }} /></label>
         <div className="broadcast-actions"><Button onClick={() => { setSelected(visible.map(row => row.id)); changed(); }}>Select All Matching POCs</Button><Button onClick={() => { setSelected([]); changed(); }}>Clear Selection</Button><span>{selectedVisible.length} selected within {visible.length} matching POC records</span></div>
         <div className="broadcast-scroll" role="region" aria-label="Recipients grouped by client and project" tabIndex={0}>
-          <table><thead><tr><th>Select</th><th>POC</th><th>WhatsApp Number</th><th>Contact Status</th></tr></thead><tbody>
+          <table><thead><tr><th>Select</th><th>POC</th><th>WhatsApp Number</th><th>Salutation</th><th>Contact Status</th></tr></thead><tbody>
             {groups.map(group => <ReactGroup key={group.projectId} group={group} selected={selected} onChange={ids => { setSelected(ids); changed(); }} />)}
-            {!groups.length ? <tr><td colSpan={4}>No POCs match these filters.</td></tr> : null}
+            {!groups.length ? <tr><td colSpan={5}>No POCs match these filters.</td></tr> : null}
           </tbody></table>
         </div>
         <Button disabled={busy || !template || !selectedVisible.length || !title.trim()} onClick={() => perform(async () => { const value = await apiPost('/api/broadcasts/preview', input); setPreview(value); setConsent(false); })}>Preview Broadcast</Button>
@@ -204,7 +207,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
     </details> : null}
 
     <details id="broadcast-history" className="broadcast-panel" open><summary>Broadcast History</summary><div className="broadcast-panel-body">
-      <div className="broadcast-scroll"><table><thead><tr><th>Campaign</th><th>Created</th><th>Recipients</th><th>Accepted / Sent</th><th>Replies</th><th>Skipped</th><th>Failed</th><th /></tr></thead><tbody>
+      <div className="broadcast-scroll"><table><thead><tr><th>Broadcast Title</th><th>Created</th><th>Recipients</th><th>Accepted / Sent</th><th>Replies</th><th>Skipped</th><th>Failed</th><th /></tr></thead><tbody>
         {data.campaigns.map(campaign => <tr key={campaign.id} className={campaign.id === campaignId ? 'broadcast-selected' : ''}>
           <td><strong>{campaign.title}</strong><small>{campaign.created_by}</small></td><td>{formatDateTime(campaign.created_at)}</td><td>{campaign.total}</td><td>{campaign.accepted}</td><td>{campaign.replied}</td><td>{campaign.skipped}</td><td>{campaign.failed}</td>
           <td><Button onClick={() => { setCampaignId(campaign.id); section('broadcast-replies'); }}>Open</Button></td>
@@ -223,22 +226,22 @@ export default function WhatsAppBroadcasts({ currentUser }) {
           <DateRange range={replyRange} onChange={value => { setReplyRange(value); setInboxOffset(0); }} />
         </FilterBar>
         <label>Search Recipients or Latest Reply<input value={replySearch} onChange={event => { setReplySearch(event.target.value); setInboxOffset(0); }} /></label>
-        <div className="broadcast-scroll"><table><thead><tr><th>POC / Number</th><th>Clients / Projects</th><th>Delivery</th><th>Latest Reply</th><th>Reply Time</th><th>Response Status</th><th /></tr></thead><tbody>
+        <div className="broadcast-scroll"><table><thead><tr><th>POC / Number</th><th>Clients / Projects</th><th>Delivery</th><th>Latest Reply</th><th>Reply Time</th><th>Response Status</th></tr></thead><tbody>
           {matchingReplies.map(row => <tr key={row.id} className={recipientId === row.id ? 'broadcast-selected' : ''}>
-            <td>{[...new Set(row.associations.map(poc => poc.name))].join(', ')}<small>{row.phone || 'Number Unavailable'}</small><small>{row.title}</small></td>
+            <td>{[...new Set(row.associations.map(poc => poc.name))].join(', ')}<small>{row.phone || 'Number Unavailable'}</small><small>{row.title}</small><div className="broadcast-recipient-actions"><Button onClick={() => { setRecipientId(row.id); window.requestAnimationFrame(() => section('broadcast-conversation')); }}>Open Conversation</Button></div></td>
             <td>{row.associations.map(poc => <small key={poc.id}>{poc.clientName} → {poc.projectName}{poc.reason ? ` · ${poc.reason}` : ''}</small>)}</td>
             <td><span className={`broadcast-state ${row.status}`}>{labels[row.status]}</span>{row.reason ? <small>{row.reason}</small> : null}</td>
             <td className="broadcast-reply-preview">{row.latest_reply || '—'}</td><td>{row.latest_reply_at ? formatDateTime(row.latest_reply_at) : '—'}</td>
             <td>{{ awaiting_response: 'Awaiting Our Response', responded: 'Responded', no_reply: 'No Reply' }[replyStatus(row)]}</td>
-            <td><Button onClick={() => { setRecipientId(row.id); window.requestAnimationFrame(() => section('broadcast-conversation')); }}>Conversation</Button></td>
           </tr>)}
-          {!matchingReplies.length ? <tr><td colSpan={7}>No recipients match these filters.</td></tr> : null}
+          {!matchingReplies.length ? <tr><td colSpan={6}>No recipients match these filters.</td></tr> : null}
         </tbody></table></div>
         {!campaignId ? <div className="broadcast-actions"><Button disabled={!inboxOffset} onClick={() => setInboxOffset(value => Math.max(0, value - 100))}>Newer Replies</Button><Button disabled={!inboxHasMore} onClick={() => setInboxOffset(value => value + 100)}>Older Replies</Button></div> : null}
       </>
-      {recipientId ? <div id="broadcast-conversation" className="broadcast-conversation">
-        {!conversation ? <LoadingBlock label="Loading broadcast conversation" /> : <>
-          <h3>{[...new Set(conversation.recipient.associations.map(poc => poc.name))].join(', ')} · {conversation.recipient.phone}</h3>
+      <div id="broadcast-conversation" className="broadcast-conversation">
+        <h3>Conversation Window</h3>
+        {!recipientId ? <p>Select Open Conversation beside a POC above to read their replies and send a message.</p> : !conversation ? <LoadingBlock label="Loading broadcast conversation" /> : <>
+          <h4>{[...new Set(conversation.recipient.associations.map(poc => poc.name))].join(', ')} · {conversation.recipient.phone}</h4>
           {conversation.optedOut ? <div className="broadcast-warning"><p>This recipient opted out. Future proactive WhatsApp sends are paused.</p>{canSend ? <details><summary>Record Renewed Permission</summary><label>How and When the Client Renewed Permission<input value={renewedPermission} maxLength={1000} onChange={event => setRenewedPermission(event.target.value)} /></label><Button disabled={busy || renewedPermission.trim().length < 10} onClick={() => perform(async () => { if (!window.confirm('Confirm the client agreed to receive WhatsApp messages again?')) return; await apiPost(`/api/broadcasts/recipients/${recipientId}/permission`, { note: renewedPermission, consentConfirmed: true }); await loadConversation(recipientId); setNotice('Renewed WhatsApp permission recorded.'); })}>Confirm Renewed Permission</Button></details> : null}</div> : null}
           <div className="broadcast-chat" role="region" aria-label="Selected POC broadcast conversation" tabIndex={0}>
             <article className="broadcast-bubble srv"><strong>SRV Media</strong><p>{renderMessage(conversation.recipient)}</p><small>{formatDateTime(conversation.recipient.sent_at || conversation.recipient.claimed_at)} · {labels[conversation.recipient.status]}</small></article>
@@ -253,7 +256,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
               await loadConversation(recipientId); await loadCampaign(campaignId);
             })}>Send WhatsApp Reply</Button></div> : null}
         </>}
-      </div> : null}
+      </div>
     </div></details>
 
     {isSuper ? <details id="broadcast-templates" className="broadcast-panel"><summary>Approved Announcement Templates</summary><div className="broadcast-panel-body">
@@ -271,8 +274,8 @@ export default function WhatsAppBroadcasts({ currentUser }) {
 function ReactGroup({ group, selected, onChange }) {
   const checked = group.pocs.every(poc => selected.includes(poc.id));
   return <>
-    <tr className="broadcast-group"><td><input type="checkbox" aria-label={`Select ${group.clientName} ${group.projectName}`} checked={checked} onChange={event => onChange(event.target.checked ? [...new Set([...selected, ...group.pocs.map(poc => poc.id)])] : selected.filter(id => !group.pocs.some(poc => poc.id === id)))} /></td><th colSpan={3}>{group.clientName} → {group.projectName}</th></tr>
-    {group.pocs.map(poc => <tr key={poc.id}><td><input type="checkbox" aria-label={`Select ${poc.name} for ${poc.projectName}`} checked={selected.includes(poc.id)} onChange={event => onChange(event.target.checked ? [...selected, poc.id] : selected.filter(id => id !== poc.id))} /></td><td>{poc.name}</td><td>{poc.contactWhatsapp || 'Missing'}</td><td>{poc.active ? 'Active' : 'Inactive'}</td></tr>)}
+    <tr className="broadcast-group"><td><input type="checkbox" aria-label={`Select ${group.clientName} ${group.projectName}`} checked={checked} onChange={event => onChange(event.target.checked ? [...new Set([...selected, ...group.pocs.map(poc => poc.id)])] : selected.filter(id => !group.pocs.some(poc => poc.id === id)))} /></td><th colSpan={4}>{group.clientName} → {group.projectName}</th></tr>
+    {group.pocs.map(poc => <tr key={poc.id}><td><input type="checkbox" aria-label={`Select ${poc.name} for ${poc.projectName}`} checked={selected.includes(poc.id)} onChange={event => onChange(event.target.checked ? [...selected, poc.id] : selected.filter(id => id !== poc.id))} /></td><td>{poc.name}</td><td>{poc.contactWhatsapp || 'Missing'}</td><td>{poc.salutation || '—'}</td><td>{poc.active ? 'Active' : 'Inactive'}</td></tr>)}
   </>;
 }
 

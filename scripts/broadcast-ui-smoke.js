@@ -8,7 +8,7 @@ const { ComponentHarness, elements } = require('./workspace-navigation-smoke');
 const id = number => `00000000-0000-4000-8000-${String(number).padStart(12,'0')}`;
 const permissions = { hasPermission: (user, key) => user.role === 'super_admin' || user.permissions?.[key] === true, canOpenManage: () => false };
 const people = [
-  { id:id(11), name:'Zoe', active:true, contactWhatsapp:'919876543210', clientId:id(31), clientName:'A Client', projectId:id(21), projectName:'First Project', clusterId:id(1) },
+  { id:id(11), name:'Zoe', salutation:"Zoe Ma'am", active:true, contactWhatsapp:'919876543210', clientId:id(31), clientName:'A Client', projectId:id(21), projectName:'First Project', clusterId:id(1) },
   { id:id(12), name:'Anna', active:true, contactWhatsapp:'447700900124', clientId:id(32), clientName:'B Client', projectId:id(22), projectName:'Second Project', clusterId:id(1) },
   { id:id(13), name:'Zoe', active:true, contactWhatsapp:'919876543210', clientId:id(32), clientName:'B Client', projectId:id(22), projectName:'Second Project', clusterId:id(1) }
 ];
@@ -36,9 +36,18 @@ async function main() {
   h.window.setInterval=()=>1;h.window.clearInterval=()=>{};h.window.crypto=crypto;h.window.confirm=()=>true;
   await h.settle();
   assert.ok(h.calls.some(url=>url.startsWith('/api/broadcasts/inbox')), 'reply inbox loads across broadcasts by default');
+  const recipientTable=h.find(node=>node.props['aria-label']==='Recipients grouped by client and project');
+  assert.deepEqual(elements(recipientTable,node=>node.type==='th').map(node=>node.props.children),['Select','POC','WhatsApp Number','Salutation','Contact Status']);
+  assert.ok(h.find(node=>node.props.id==='broadcast-conversation'),'the conversation window is visible before choosing a recipient');
+  h.find(node=>node.props.children==='Conversation Window').props.onClick();await h.settle();
+  assert.ok(h.scrolls.includes('broadcast-conversation'));
+  const group=new ComponentHarness('src/components/WhatsAppBroadcasts.jsx',{group:{clientName:'A Client',projectName:'First Project',pocs:people.slice(0,2)},selected:[],onChange:()=>{}},'/broadcasts',read,'ReactGroup');
+  await group.settle();
+  assert.ok(group.find(node=>node.type==='td' && node.props.children===people[0].salutation));
+  assert.ok(group.find(node=>node.type==='td' && node.props.children==='—'),'a missing salutation does not invent an honorific');
   const groups=elements(h.tree,node=>typeof node.type==='function' && node.type.name==='ReactGroup');
   assert.deepEqual(groups.map(node=>node.props.group.clientName),['A Client','B Client'],'grouping follows clients/projects, not global POC name order');
-  labelInput(h,'Campaign Name').props.onChange({target:{value:'Client announcement'}});await h.settle();
+  labelInput(h,'Broadcast Title').props.onChange({target:{value:'Client announcement'}});await h.settle();
   h.find(node=>node.props.label==='Approved Announcement Template').props.onChange(template.id);await h.settle();
   h.find(node=>node.props.label==='Template Field 1').props.onChange('poc_name');await h.settle();
   labelInput(h,'Field Value').props.onChange({target:{value:'General announcement'}});await h.settle();
@@ -50,7 +59,8 @@ async function main() {
   elements(consent,node=>node.type==='input')[0].props.onChange({target:{checked:true}});await h.settle();
   await h.find(node=>node.props.children==='Send Broadcast').props.onClick();await h.settle();
   assert.equal(writes[1].url,'/api/broadcasts/send');assert.equal(writes[1].body.consentConfirmed,true);assert.match(writes[1].body.requestId,/^[0-9a-f-]{36}$/);
-  h.find(node=>node.props.children==='Conversation').props.onClick();await h.settle();
+  h.find(node=>node.props.children==='Open Conversation').props.onClick();await h.settle();
+  assert.ok(h.scrolls.includes('broadcast-conversation'),'opening a conversation scrolls to the labelled chat window');
   assert.ok(h.find(node=>node.props.className==='broadcast-chat'));
   assert.ok(h.find(node=>node.type==='p' && node.props.children===recipient.latest_reply),'latest client reply appears in chat');
   const textarea=h.find(node=>node.type==='textarea' && node.props.maxLength===4096);
@@ -96,6 +106,7 @@ async function main() {
   assert.equal((await http(users[1])).statusCode,403,'existing Admins require an explicit broadcast grant');
   users[1].permissions={broadcast_view:true};
   const granted=await http(users[1]);assert.equal(granted.statusCode,200,granted.body);
+  assert.equal(JSON.parse(granted.body).directory.clientPocs.find(poc=>poc.id===people[0].id).salutation,people[0].salutation,'the scoped API supplies the configured salutation');
   assert.equal((await http(users[1],{},'/api/broadcasts/send','POST')).statusCode,403);
   assert.equal((await http(users[2])).statusCode,403,'Project Users cannot enable broadcasts through a crafted permission');
   users[1].permissions={};assert.equal((await http(users[1])).statusCode,403,'revocation takes effect for an existing login');

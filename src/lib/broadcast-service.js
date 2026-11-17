@@ -80,7 +80,7 @@ function canReadHistory(recipient, clusters) {
 
 async function prepare(store, access, input, repo) {
   const title = String(input.title || '').trim();
-  if (!title || title.length > 160) fail('Enter a campaign name of up to 160 characters.');
+  if (!title || title.length > 160) fail('Enter a broadcast title of up to 160 characters.');
   const template = (await repo.templates()).find(row => row.id === input.templateId && row.active);
   if (!template) fail('Select an active approved announcement template.');
   const count = parameterCount(template.body);
@@ -202,7 +202,7 @@ async function handleBroadcastRequest({ store, access, request, pathname, method
         directory: { clusters: directory.clusters.filter(row => !clusters || clusters.includes(row.id)),
           clients: directory.clients.filter(row => !clusters || clusters.includes(row.clusterId)),
           projects: directory.projects.filter(row => projectIds.has(row.id)),
-          clientPocs: pocs.map(poc => ({ id: poc.id, name: poc.name, active: poc.active, contactWhatsapp: poc.contactWhatsapp,
+          clientPocs: pocs.map(poc => ({ id: poc.id, name: poc.name, active: poc.active, contactWhatsapp: poc.contactWhatsapp, salutation: poc.salutation || '',
             clientId: poc.clientId, clientName: poc.clientName, projectId: poc.projectId, projectName: poc.projectName, clusterId: poc.clusterId })) },
         messaging: await store.getMessagingStatus(), senderConfigured: Boolean(process.env.N8N_BROADCAST_WEBHOOK) });
     }
