@@ -99,6 +99,9 @@ function reportStyles() {
     .consolidated table { table-layout: fixed; }
     .consolidated th:last-child { width: 42%; }
     .consolidated .chat-session h3 { font-size: 12px; overflow-wrap: anywhere; }
+    .broadcast-report .report-head { border-top-color: #b52336; }
+    .broadcast-report h1 { color: #991c29; }
+    .broadcast-report .chat-session h3 { white-space: pre-line; overflow-wrap: anywhere; }
     .section-empty { padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 6px 16px; color: #536179; }
     .section-empty strong { color: #243149; }
     @media print {
@@ -124,6 +127,9 @@ function reportStyles() {
       .cycle-group, .poc-group { margin: 10px; }
       .client-heading, .project-heading, .cycle-heading, .poc-heading, .section-head { break-after: avoid; }
       .chat-message { break-inside: auto; }
+      .broadcast-report .chat-message { break-inside: avoid; }
+      .broadcast-report .chat-session { break-inside: avoid; }
+      .broadcast-report .chat-session h3 { break-inside: avoid; break-after: avoid; }
       .chat-session { padding: 10px; }
       .consolidated .section { margin-top: 8px; }
       .consolidated .section-head { padding: 8px 10px; }
@@ -188,7 +194,7 @@ export function reportToHtml(report, { autoPrint = false } = {}) {
     </div>
   `).join("");
   const renderSection = (section) => {
-    const columns = section.columns || [];
+    const columns = section.htmlColumns || section.columns || [];
     const rows = section.rows || [];
     if (report.consolidated && !section.chatSessions && !rows.length) return `<section class="section section-empty"><strong>${escapeHtml(section.title)}</strong><span>${escapeHtml(section.emptyText || 'No records saved.')}</span></section>`;
     return `
@@ -224,13 +230,13 @@ export function reportToHtml(report, { autoPrint = false } = {}) {
   return `<!doctype html>
     <html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${escapeHtml(report.title || "CSAT report")}</title><style>${reportStyles()}</style></head>
-    <body class="${report.consolidated ? 'consolidated' : ''}"><main class="report">
+    <body class="${report.consolidated ? 'consolidated' : report.broadcast ? 'broadcast-report' : ''}"><main class="report">
       <div class="report-actions"><button type="button" onclick="window.print()">Print / Save as PDF</button></div>
       <header class="report-head">
         <h1>${escapeHtml(report.title || "CSAT report")}</h1>
         ${report.subtitle ? `<p class="subtitle">${escapeHtml(report.subtitle)}</p>` : ""}
         ${report.consolidated ? `<div class="report-dates"><p><span>Report Date (IST)</span>${escapeHtml(reportDate)}</p><p><span>Reporting Period (Cycle Start Dates)</span>${escapeHtml(report.reportingPeriod || 'All Dates')}</p></div>` : ''}
-        <p class="generated">Generated ${escapeHtml(generated.toLocaleString("en-IN"))}</p>
+        <p class="generated">Generated ${escapeHtml(generated.toLocaleString("en-IN", report.timeZone ? { timeZone: report.timeZone } : undefined))}${report.timeZoneLabel ? ` (${escapeHtml(report.timeZoneLabel)})` : ''}</p>
         ${filters ? `<div class="filters">${filters}</div>` : ""}
         ${metrics ? `<div class="metrics">${metrics}</div>` : ""}
       </header>
@@ -300,8 +306,8 @@ export async function buildExcelReport(report) {
   summary.mergeCells("A2:F2");
   summary.getCell("A2").value = report.subtitle || "";
   summary.getCell("A2").font = { name: "Verdana", size: 10, italic: true, color: { argb: "FF536179" } };
-  summary.getCell("A3").value = "Generated";
-  summary.getCell("B3").value = report.generatedAt ? new Date(report.generatedAt) : new Date();
+  summary.getCell("A3").value = report.timeZoneLabel ? `Generated (${report.timeZoneLabel})` : 'Generated';
+  summary.getCell("B3").value = report.generatedAtExcel || (report.generatedAt ? new Date(report.generatedAt) : new Date());
   summary.getCell("B3").numFmt = "dd-mmm-yyyy hh:mm";
   if (report.consolidated) {
     const generated = report.generatedAt ? new Date(report.generatedAt) : new Date();
@@ -338,7 +344,7 @@ export async function buildExcelReport(report) {
   }
 
   if ((report.metrics || []).length) {
-    summary.getCell(`A${rowNumber}`).value = "Key scores and counts";
+    summary.getCell(`A${rowNumber}`).value = report.metricsTitle || 'Key scores and counts';
     summary.getCell(`A${rowNumber}`).font = { name: "Verdana", bold: true, color: { argb: "FF1F5ED6" } };
     rowNumber += 1;
     const metricHeader = summary.getRow(rowNumber);

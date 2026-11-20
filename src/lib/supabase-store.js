@@ -3797,6 +3797,33 @@ class SupabaseStore {
     };
   }
 
+  async resumeFeedbackTemplate(sessionId, sessionType = 'quick_checkin') {
+    if (!['quick_checkin','pulse','project_end'].includes(sessionType)) return null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const rows = await this.request('feedback_sessions', { query: `id=eq.${encodeURIComponent(sessionId)}&select=*&limit=1` });
+      if (!rows[0]) return null;
+      const row = rows[0], state = row.conversation_state || {};
+      const session = toSession(row, { cycleType: sessionType });
+      const expiry = state.state === 'closing_grace' ? state.closingGraceExpiresAt
+        : sessionType === 'quick_checkin' ? state.state === 'quick_checkin_window' ? state.quickCheckinWindowExpiresAt : row.reminder_due_at : null;
+      // Require a genuine live window/session. Never revive a concurrent stop.
+      if (state.stoppedByAdmin || state.optedOut || row.status === 'opted_out'
+        || ['completed','handed_off','opted_out'].includes(state.state)
+        || (!sessionHasOpenResponseWindow(session) && sessionIsTerminal(session))
+        || Date.parse(expiry) <= Date.now()) return null;
+      const now = new Date().toISOString();
+      const updated = await this.request('feedback_sessions', {
+        method: 'PATCH',
+        query: `id=eq.${encodeURIComponent(sessionId)}&updated_at=${row.updated_at ? `eq.${encodeURIComponent(row.updated_at)}` : 'is.null'}`,
+        body: { conversation_state: { ...state, templateResumedAt: now,
+          ...(sessionType === 'quick_checkin' && (!state.state || state.state === 'quick_checkin_choice') ? { state: 'quick_checkin_detail' } : {}) },
+          last_client_response_at: now }
+      });
+      if (updated.length) return toSession(updated[0], { cycleType: sessionType });
+    }
+    return null;
+  }
+
   /** Persist the deliberately small two-step quick-check-in conversation. */
   async applyQuickCheckinResponse(sessionId, input = {}) {
     const session = await this.getSession(sessionId);

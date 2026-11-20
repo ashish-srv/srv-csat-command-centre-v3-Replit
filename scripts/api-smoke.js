@@ -9705,6 +9705,195 @@ async function scenario(name, fn) {
     }
   });
 
+  await scenario("old quick-check-in buttons resume a newer survey without becoming feedback or ratings", async () => {
+    const original={session:store._session,getSession:store.getSession,routing:store.getWhatsappRoutingContext,pocs:store.getPocsByWhatsapp,fetch:global.fetch,key:process.env.GEMINI_API_KEY,secret:process.env.N8N_WEBHOOK_SECRET,messages:[...calls.messages]};
+    const old={id:'closed-quick-template',cycleId:'old-cycle',projectId:project.id,clientPocId:poc.id,sessionType:'quick_checkin',status:'completed',completionStatus:'completed',startedAt:new Date(Date.now()-86400000*3).toISOString(),conversationState:{state:'completed',quickCheckinOutcome:'no_response'}};
+    const oldSnapshot=JSON.stringify(old);
+    process.env.N8N_WEBHOOK_SECRET='stale-template-fixture-secret';process.env.GEMINI_API_KEY='must-not-call-for-button';
+    let modelCalls=0,sequence=0;
+    global.fetch=async url=>{if(/generativelanguage|openai/i.test(String(url)))modelCalls++;return {ok:true,status:200,json:async()=>({})};};
+    store.getSession=async id=>id===old.id?old:store._session;
+    store.getPocsByWhatsapp=async()=>[poc];
+    store.getWhatsappRoutingContext=async()=>({status:'active',poc,session:store._session});
+    const send=(label,action='SHARE_FEEDBACK')=>rawReq('POST','/api/whatsapp/inbound',{from:poc.contactWhatsapp,text:label,buttonPayload:`QC_${action}:${old.id}`,providerTimestamp:String(Math.floor(Date.now()/1000)),providerMessageId:`wamid.stale.${++sequence}`},{'x-csat-webhook-secret':process.env.N8N_WEBHOOK_SECRET});
+    const cases=[
+      {type:'pulse',state:{},expected:/PPC|Media/,label:'Share feedback'},
+      {type:'project_end',state:{},expected:/project|Directors/i,label:'Share feedback'},
+      {type:'pulse',state:{state:'waiting_for_service_feedback',pendingQuestionType:'service',pendingServiceKey:'website'},expected:/Website|SEO/,label:'Give feedback'},
+      {type:'pulse',state:{state:'waiting_for_service_feedback',pendingQuestionType:'service',pendingServiceKey:'removed-service'},expected:/PPC|Media/,label:'Share feedback',pendingService:'ppc'},
+      {type:'pulse',state:{state:'waiting_for_service_followup',pendingQuestionType:'service_followup',pendingServiceKey:'ppc',mentionedServices:{ppc:{serviceKey:'ppc',serviceName:'PPC / Media',sentiment:'neutral',status:'captured',serviceFollowUpAskCount:1}}},expected:/anything else.*PPC|more.*PPC/i,label:'Continue'},
+      {type:'pulse',state:{state:'waiting_for_overall_rating',pendingQuestionType:'overall_rating',overallRatingAsked:true},expected:/overall.*out of 10|overall.*0 to 10/i,label:'Share feedback'},
+      {type:'project_end',state:{state:'waiting_for_nps',pendingQuestionType:'nps',overallRating:9,npsAsked:true,overallRatingAsked:true},expected:/recommend|network/i,label:'0'},
+      {type:'project_end',state:{state:'waiting_for_more_services',pendingQuestionType:'final_sweep',overallRating:9,npsScore:10},expected:/anything else.*Directors/i,label:'Share feedback'},
+      {type:'pulse',state:{},expected:/PPC|Media/,label:'All good',action:'ALL_GOOD'}
+    ];
+    try {
+      for(const item of cases){
+        calls.messages.length=0;
+        store._session={id:'current-survey',cycleId:'current-cycle',projectId:project.id,clientPocId:poc.id,sessionType:item.type,status:'started',completionStatus:'not_started',startedAt:new Date(Date.now()-86400000).toISOString(),conversationState:JSON.parse(JSON.stringify(item.state))};
+        const notifications=calls.automation.length,modelsBefore=modelCalls;
+        const response=await send(item.label,item.action),payload=JSON.parse(response.body);
+        assert.strictEqual(response.statusCode,201,response.body);assert.strictEqual(payload.session.id,'current-survey');assert.strictEqual(payload.sendToWhatsapp,true);
+        assert.match(payload.whatsappReplyText,item.expected);assert.doesNotMatch(payload.whatsappReplyText,/quick.check.in has closed|passed.*SRV team|someone.*respond/i);
+        assert.ok(payload.whatsappReplyText.includes(project.name),'resumption identifies the project');
+        assert.strictEqual(payload.receivedMessage.body,item.label);assert.strictEqual(payload.receivedMessage.metadata.resumedFromQuickCheckin,old.id);
+        assert.ok(calls.messages.every(message=>message.sessionId==='current-survey'));assert.strictEqual(JSON.stringify(old),oldSnapshot);
+        assert.strictEqual(payload.analysis.csatScore,item.state.overallRating??null);assert.strictEqual(payload.analysis.npsScore,item.state.npsScore??null);
+        assert.strictEqual(modelCalls,modelsBefore,'template taps repeat the pending question without LLM interpretation');
+        assert.strictEqual(calls.automation.slice(notifications).some(event=>['post_completion_message','client_question','manager_alert'].includes(event.eventType)),false);
+        if(item.type==='project_end'&&!item.state.state)assert.strictEqual(payload.session.conversationState.pendingQuestionType,'project_end_review');
+        if(item.pendingService)assert.strictEqual(payload.session.conversationState.pendingServiceKey,item.pendingService);
+        if(item.state.pendingQuestionType==='service_followup')assert.strictEqual(payload.session.conversationState.mentionedServices.ppc.serviceFollowUpAskCount,1);
+        if(sequence===1){
+          const count=calls.messages.length;
+          const duplicate=await rawReq('POST','/api/whatsapp/inbound',{from:poc.contactWhatsapp,text:item.label,buttonPayload:`QC_SHARE_FEEDBACK:${old.id}`,providerMessageId:'wamid.stale.1'},{'x-csat-webhook-secret':process.env.N8N_WEBHOOK_SECRET});
+          assert.strictEqual(JSON.parse(duplicate.body).duplicate,true);assert.strictEqual(calls.messages.length,count);
+        }
+        if(item.state.pendingQuestionType==='overall_rating'){
+          delete process.env.GEMINI_API_KEY;
+          const rating=await rawReq('POST','/api/whatsapp/inbound',{from:poc.contactWhatsapp,text:'8',providerMessageId:`wamid.stale.actual-rating.${sequence}`},{'x-csat-webhook-secret':process.env.N8N_WEBHOOK_SECRET});
+          assert.strictEqual(JSON.parse(rating.body).session.csatScore,8,'the next real reply is handled normally by the current survey');
+          process.env.GEMINI_API_KEY='must-not-call-for-button';
+        }
+      }
+      calls.messages.length=0;
+      const expiry=new Date(Date.now()+60000).toISOString();
+      store._session={id:'current-survey',projectId:project.id,clientPocId:poc.id,sessionType:'project_end',status:'completed',csatScore:9,startedAt:new Date(Date.now()-86400000).toISOString(),conversationState:{state:'closing_grace',closingGraceExpiresAt:expiry,overallRating:9,npsScore:10}};
+      const grace=JSON.parse((await send('Share feedback')).body);
+      assert.strictEqual(grace.session.id,'current-survey');assert.strictEqual(grace.session.csatScore,9);assert.strictEqual(grace.session.conversationState.npsScore,10);assert.strictEqual(grace.session.conversationState.closingGraceExpiresAt,expiry);
+      assert.doesNotMatch(grace.whatsappReplyText,/quick.check.in has closed|how has|how likely|out of 10/i);
+      store._session={...old};store.getWhatsappRoutingContext=async()=>({status:'latest',poc,session:old});
+      const closed=JSON.parse((await send('Share feedback')).body);assert.strictEqual(closed.session.id,old.id);assert.match(closed.whatsappReplyText,/quick.check.in has closed/i);
+      calls.messages.length=0;
+      store._session={id:'current-quick',projectId:project.id,clientPocId:poc.id,sessionType:'quick_checkin',status:'started',startedAt:new Date().toISOString(),conversationState:{state:'quick_checkin_choice'}};
+      store.getWhatsappRoutingContext=async()=>({status:'active',poc,session:store._session});
+      const activeQuick=await rawReq('POST','/api/whatsapp/inbound',{from:poc.contactWhatsapp,text:'Share feedback',buttonPayload:'QC_SHARE_FEEDBACK:current-quick',providerMessageId:'wamid.active.quick'},{'x-csat-webhook-secret':process.env.N8N_WEBHOOK_SECRET});
+      assert.strictEqual(JSON.parse(activeQuick.body).session.id,'current-quick');assert.match(JSON.parse(activeQuick.body).whatsappReplyText,/Please share what needs improvement/i);
+      calls.messages.length=0;
+      store.getWhatsappRoutingContext=async()=>({status:'ambiguous',candidates:[{poc,session:store._session},{poc,session:{...store._session,id:'another'}}]});
+      const ambiguous = JSON.parse((await send('Share feedback')).body);
+      assert.strictEqual(ambiguous.routedTo,'feedback_review');assert.strictEqual(ambiguous.sendToWhatsapp,true);assert.strictEqual(calls.messages.length,0);
+      store.getPocsByWhatsapp=async()=>[];
+      assert.strictEqual(JSON.parse((await send('Share feedback')).body).routedTo,'feedback_review','an unverifiable button is reviewed without entering a survey');
+    } finally {
+      store._session=original.session;store.getSession=original.getSession;global.fetch=original.fetch;
+      if(original.routing)store.getWhatsappRoutingContext=original.routing;else delete store.getWhatsappRoutingContext;
+      if(original.pocs)store.getPocsByWhatsapp=original.pocs;else delete store.getPocsByWhatsapp;
+      for(const [key,value] of [['GEMINI_API_KEY',original.key],['N8N_WEBHOOK_SECRET',original.secret]]){if(value===undefined)delete process.env[key];else process.env[key]=value;}
+      calls.messages.length=0;calls.messages.push(...original.messages);
+    }
+  });
+
+  await scenario('rapid feedback after an old template tap excludes the button wording from feedback capture', async () => {
+    const { clientBurstContext }=require('../src/server/api-handler').conversationFlow;
+    const tap={id:'tap',side:'client',body:'All good',metadata:{resumedFromQuickCheckin:'old-session'}};
+    const actual={id:'actual',side:'client',body:'The reports contain errors.'};
+    const messages=[{id:'before',side:'srv',body:'Previous question'},tap,actual];
+    assert.strictEqual(clientBurstContext(messages,tap).superseded,true);
+    assert.strictEqual(clientBurstContext(messages,actual).text,actual.body);
+    assert.strictEqual(clientBurstContext(messages,actual).previousMessages.find(message=>message.id===tap.id).body,'All good','the original tap remains in the transcript');
+  });
+
+  await scenario('old buttons resume newer quick check-ins without changing feedback, outcomes or window deadlines', async () => {
+    const keys=['getSession','getPocsByWhatsapp','getWhatsappRoutingContext','resumeFeedbackTemplate','_session'];
+    const original=Object.fromEntries(keys.map(key=>[key,store[key]]));
+    const secret=process.env.N8N_WEBHOOK_SECRET;process.env.N8N_WEBHOOK_SECRET='quick-resume-fixture';
+    const old={id:'old-quick-resume',clientPocId:poc.id,projectId:project.id,sessionType:'quick_checkin',status:'completed',startedAt:new Date(Date.now()-86400000*4).toISOString(),conversationState:{state:'completed'}};
+    const deadline=new Date(Date.now()+60000).toISOString();let seq=0;
+    store.getSession=async id=>id===old.id?old:store._session;
+    store.getPocsByWhatsapp=async()=>[poc];
+    store.getWhatsappRoutingContext=async()=>({status:'active',poc,session:store._session});
+    store.resumeFeedbackTemplate=async()=>{
+      const state=store._session.conversationState;
+      store._session={...store._session,conversationState:{...state,state:state.state==='quick_checkin_choice'?'quick_checkin_detail':state.state,templateResumedAt:new Date().toISOString()}};
+      return store._session;
+    };
+    const send=action=>rawReq('POST','/api/whatsapp/inbound',{from:poc.contactWhatsapp,text:action==='ALL_GOOD'?'All good':'Share feedback',buttonPayload:`QC_${action}:${old.id}`,providerMessageId:`wamid.quickresume.${++seq}`},{'x-csat-webhook-secret':process.env.N8N_WEBHOOK_SECRET});
+    try {
+      for(const state of ['quick_checkin_choice','quick_checkin_detail','quick_checkin_window']) for(const action of ['SHARE_FEEDBACK','ALL_GOOD']) {
+        calls.messages.length=0;
+        store._session={id:'new-quick-resume',clientPocId:poc.id,projectId:project.id,sessionType:'quick_checkin',status:'partial',startedAt:new Date(Date.now()-86400000).toISOString(),reminderDueAt:deadline,
+          conversationState:{state,quickCheckinDetail:'Previously recorded point',quickCheckinOutcome:state==='quick_checkin_window'?'feedback_shared':null,...(state==='quick_checkin_window'?{quickCheckinWindowExpiresAt:deadline}:{})}};
+        const before=JSON.parse(JSON.stringify(store._session)), writes=calls.quickCheckinResponses.length, events=calls.automation.length;
+        const response=await send(action), result=JSON.parse(response.body);
+        assert.strictEqual(response.statusCode,201,response.body);assert.strictEqual(result.session.id,'new-quick-resume');
+        assert.match(result.whatsappReplyText,/Please share your feedback/);assert.ok(result.whatsappReplyText.includes(project.name));
+        assert.doesNotMatch(result.whatsappReplyText,/has closed|overall rating|everything is going well/);
+        assert.strictEqual(result.session.reminderDueAt,deadline);
+        assert.strictEqual(result.session.conversationState.quickCheckinWindowExpiresAt,before.conversationState.quickCheckinWindowExpiresAt);
+        assert.strictEqual(result.session.conversationState.quickCheckinDetail,before.conversationState.quickCheckinDetail);
+        assert.strictEqual(result.session.conversationState.quickCheckinOutcome,before.conversationState.quickCheckinOutcome);
+        assert.strictEqual(calls.quickCheckinResponses.length,writes);assert.strictEqual(calls.automation.length,events);
+        assert.strictEqual(result.receivedMessage.metadata.resumedFromQuickCheckin,old.id);
+      }
+      calls.messages.length=0;
+      store._session.conversationState={state:'quick_checkin_choice'};
+      store.resumeFeedbackTemplate=async()=>{store._session.status='completed';store._session.conversationState={state:'completed',stoppedByAdmin:true};return null;};
+      const writes=calls.quickCheckinResponses.length;
+      const stopped=JSON.parse((await send('ALL_GOOD')).body);
+      assert.match(stopped.whatsappReplyText,/has now closed/);assert.strictEqual(calls.quickCheckinResponses.length,writes);
+    } finally {for(const key of keys){if(original[key]===undefined)delete store[key];else store[key]=original[key];}if(secret===undefined)delete process.env.N8N_WEBHOOK_SECRET;else process.env.N8N_WEBHOOK_SECRET=secret;calls.messages.length=0;}
+  });
+
+  await scenario('missing button records are queued visibly, deduplicated across routing changes and respect messaging pause', async () => {
+    const keys=['getSession','getPocsByWhatsapp','getWhatsappRoutingContext','_messagingStatus'];
+    const original=Object.fromEntries(keys.map(key=>[key,store[key]]));
+    const secret=process.env.N8N_WEBHOOK_SECRET;process.env.N8N_WEBHOOK_SECRET='missing-button-fixture';
+    store.getSession=async()=>null;store.getPocsByWhatsapp=async()=>[poc];
+    store.getWhatsappRoutingContext=async()=>({status:'active',poc,session:store._session});
+    const body={from:poc.contactWhatsapp,text:'Share feedback',buttonPayload:'QC_SHARE_FEEDBACK:deleted-session',providerMessageId:'wamid.deleted-button'};
+    const send=input=>rawReq('POST','/api/whatsapp/inbound',input,{'x-csat-webhook-secret':process.env.N8N_WEBHOOK_SECRET});
+    try {
+      const before=JSON.stringify(store._session), messages=calls.messages.length, events=calls.automation.length;
+      const result=JSON.parse((await send(body)).body);
+      assert.strictEqual(result.routedTo,'feedback_review');assert.strictEqual(result.sendToWhatsapp,true);assert.match(result.whatsappReplyText,/saved it for our team to review/);
+      assert.strictEqual(JSON.stringify(store._session),before);assert.strictEqual(calls.messages.length,messages);
+      assert.deepStrictEqual(calls.automation.slice(events).map(event=>event.eventType),['feedback_routing_review']);
+      store.getSession=original.getSession;
+      const repeated=JSON.parse((await send(body)).body);assert.strictEqual(repeated.duplicate,true);assert.strictEqual(repeated.sendToWhatsapp,false);
+      store.getSession=async()=>null;store._messagingStatus={enabled:false};
+      const paused=JSON.parse((await send({...body,providerMessageId:'wamid.deleted-paused'})).body);
+      assert.strictEqual(paused.routedTo,'feedback_review');assert.strictEqual(paused.sendToWhatsapp,false);
+    } finally {for(const key of keys){if(original[key]===undefined)delete store[key];else store[key]=original[key];}if(secret===undefined)delete process.env.N8N_WEBHOOK_SECRET;else process.env.N8N_WEBHOOK_SECRET=secret;}
+  });
+
+  await scenario('verified project context selects and retains the matching session across all three feedback types', async () => {
+    const keys=['getSession','getPocsByWhatsapp','getWhatsappRoutingContext','resumeFeedbackTemplate','_session'];
+    const original=Object.fromEntries(keys.map(key=>[key,store[key]]));
+    const secret=process.env.N8N_WEBHOOK_SECRET,key=process.env.GEMINI_API_KEY;
+    process.env.N8N_WEBHOOK_SECRET='project-routing-fixture';delete process.env.GEMINI_API_KEY;
+    const old={id:'old-project-button',clientPocId:poc.id,projectId:project.id,sessionType:'quick_checkin',status:'completed',startedAt:new Date(Date.now()-86400000*4).toISOString(),conversationState:{state:'completed'}};
+    const otherPoc={...poc,id:'other-poc',projectId:'other-project'};
+    const other={id:'other-open-session',clientPocId:otherPoc.id,projectId:otherPoc.projectId,sessionType:'pulse',status:'started',startedAt:new Date(Date.now()-86400000).toISOString(),conversationState:{}};
+    const unchanged=JSON.stringify(other);let seq=0;
+    store.getSession=async id=>id===old.id?old:id===other.id?other:store._session;
+    store.getPocsByWhatsapp=async()=>[poc,otherPoc];
+    store.getWhatsappRoutingContext=async()=>({status:'ambiguous',candidates:[{poc:otherPoc,session:other},{poc,session:store._session}]});
+    store.resumeFeedbackTemplate=async()=>{
+      store._session.conversationState={...store._session.conversationState,templateResumedAt:new Date().toISOString(),state:'quick_checkin_detail'};
+      return store._session;
+    };
+    const send=body=>rawReq('POST','/api/whatsapp/inbound',{from:poc.contactWhatsapp,providerMessageId:`wamid.project-select.${++seq}`,...body},{'x-csat-webhook-secret':process.env.N8N_WEBHOOK_SECRET});
+    try {
+      for(const type of ['pulse','project_end','quick_checkin']) {
+        calls.messages.length=0;
+        store._session={id:'selected-session',clientPocId:poc.id,projectId:project.id,sessionType:type,status:'started',startedAt:new Date(Date.now()-86400000*2).toISOString(),reminderDueAt:new Date(Date.now()+60000).toISOString(),
+          conversationState:type==='quick_checkin'?{state:'quick_checkin_choice'}:{state:'waiting_for_overall_rating',pendingQuestionType:'overall_rating',overallRatingAsked:true}};
+        const tap=JSON.parse((await send({text:'Share feedback',buttonPayload:`QC_SHARE_FEEDBACK:${old.id}`})).body);
+        assert.equal(tap.session.id,'selected-session');assert.ok(tap.whatsappReplyText.includes(project.name));
+        assert.ok(tap.session.conversationState.templateResumedAt);
+        const reply=JSON.parse((await send({text:type==='quick_checkin'?'nothing else':'8'})).body);
+        assert.equal(reply.session.id,'selected-session');assert.notEqual(reply.routedTo,'feedback_review');
+        if(type!=='quick_checkin')assert.equal(reply.session.csatScore,8);
+        assert.equal(JSON.stringify(other),unchanged);assert.ok(calls.messages.every(message=>message.sessionId==='selected-session'));
+      }
+    } finally {
+      for(const name of keys){if(original[name]===undefined)delete store[name];else store[name]=original[name];}
+      for(const [name,value] of [['N8N_WEBHOOK_SECRET',secret],['GEMINI_API_KEY',key]]){if(value===undefined)delete process.env[name];else process.env[name]=value;}
+      calls.messages.length=0;
+    }
+  });
+
   let failed = 0;
   for (const [status, name, message] of results) {
     if (status === "FAIL") failed += 1;

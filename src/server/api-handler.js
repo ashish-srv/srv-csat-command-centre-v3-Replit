@@ -18,6 +18,8 @@ const { ZohoAnalytics, ZohoError } = require("../lib/zoho-analytics");
 const { feedbackRecipients } = require("../lib/whatsapp-recipients");
 const { handleBroadcastRequest } = require("../lib/broadcast-service");
 const { captureBroadcastInbound } = require("../lib/broadcast-inbound");
+const { quickCheckinClosed, newerSurveyForClosedQuickCheckin, resumedFeedbackIntro, preferredResumedFeedback } = require("../lib/feedback-template-routing");
+const { EVENT: ROUTING_REVIEW_EVENT, reviewDedupeKey, canReviewFeedbackRouting, recordFeedbackRoutingReview, pendingFeedbackRoutingReviews } = require("../lib/feedback-routing-review");
 
 const WHATSAPP_CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const INACTIVE_FINAL_SWEEP_MS = 6 * 60 * 60 * 1000;
@@ -1617,7 +1619,7 @@ function latestExplicitOverallRating(messages, overallRatingAsked) {
       }
       continue;
     }
-    if (message.side !== "client") continue;
+    if (message.side !== "client" || message.metadata?.resumedFromQuickCheckin) continue;
     // Recommendation/NPS corrections form a separate score stream. Check
     // this before the generic word "rating": "change recommend rating to 9"
     // contains both, but must never be allowed to rewrite CSAT.
@@ -3079,6 +3081,7 @@ function adminRoutePermission(method, pathname) {
   if (method === "POST" && pathname === "/api/project-performance/zoho/push") return "zoho_push";
   if (method === "POST" && pathname === "/api/project-performance/zoho/connection-check") return "zoho_connection_check";
   if (pathname === "/api/dashboard") return "dashboard";
+  if (/^\/api\/feedback-routing-reviews\//.test(pathname)) return "dashboard";
   if (method === "PUT" && /^\/api\/projects\/[^/]+\/automation-settings$/.test(pathname)) return "messaging_controls";
   if (method === "POST" && pathname === "/api/project-performance/projects") return "add_projects";
   if (method === "POST" && /^\/api\/project-performance\/projects\/[^/]+\/service-change-requests$/.test(pathname)) return "project_performance";
@@ -3887,7 +3890,7 @@ function clientBurstContext(messages = [], currentMessage = null) {
     }
   }
   const burst = messages.slice(lastSrvIndex + 1, currentIndex + 1)
-    .filter((message) => message.side === "client");
+    .filter((message) => message.side === "client" && !message.metadata?.resumedFromQuickCheckin);
   return {
     superseded: false,
     text: burst.map((message) => String(message.body || "").trim()).filter(Boolean).join("\n"),
@@ -3904,7 +3907,49 @@ function supersededTurnResponse(session, clientMessage) {
   });
 }
 
-async function handleTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil }) {
+function resumeSurveyFromOldTemplate(session, project, poc, text) {
+  const state = getConversationState({ ...session, conversationState: JSON.parse(JSON.stringify(session.conversationState || {})) });
+  // A survey that finished while the tap was being processed keeps its normal
+  // acknowledgement/window handling. A button cannot reopen completed feedback.
+  if (state.state === STATES.CLOSING_GRACE || [STATES.COMPLETED,STATES.OPTED_OUT,STATES.HANDED_OFF].includes(state.state)) {
+    const acknowledgement = processWhatsAppReply({ session: { ...session, conversationState: state }, project, poc, text: 'okay' });
+    if (acknowledgement.nextMessage) acknowledgement.nextMessage.body = `For ${String(project.name || 'your project').replace(/\s+/g, ' ')}: ${acknowledgement.nextMessage.body}`;
+    acknowledgement.control = { ...acknowledgement.control, allowAiRephrase: false, skipAnalysisWrite: true, suppressTerminalNotifications: true };
+    return acknowledgement;
+  }
+  const pending = pendingQuestionTypeFor(state);
+  const service = project.services?.find(item => item.serviceKey === state.pendingServiceKey);
+  const hasPending = ['service','issue_reason','service_followup','project_end_review','service_scope','overall_rating','nps','final_sweep','appreciation','observation_reason','observation_followup','general_issue_detail','rating_feedback','feedback_continuation'].includes(pending)
+    && (!['service','issue_reason','service_followup'].includes(pending) || Boolean(service));
+  const action = hasPending
+    ? { type: pending, serviceKey: state.pendingServiceKey, name: service?.name,
+      topic: state.pendingObservation?.topic, ratingType: state.ratingFeedbackPause?.ratingType, offerChoice: true }
+    : requiredConversationAction(buildChecklist(state, project), state);
+  if (action.type === 'close') {
+    const closing = processWhatsAppReply({ session: { ...session, conversationState: state }, project, poc, text: 'okay' });
+    closing.control = { ...closing.control, allowAiRephrase: false, suppressTerminalNotifications: true };
+    return closing;
+  }
+  let question = baseFallbackForAction(action, state, project, {}, { questionOnly: true });
+  if (!question) question = 'Please share anything else you would like the Directors to know.';
+  question = `${resumedFeedbackIntro(project, session)} ${question}`;
+  // Repeating an existing question does not consume another follow-up or mark
+  // its answer complete. Only a genuinely unasked opening needs question markers.
+  if (!hasPending && action.type !== 'close') {
+    const recorded = recordRequiredQuestion(state, project, action);
+    setStateForRequiredAction(state, action, recorded);
+  }
+  state.deferredAt = null;
+  state.repeatCount = 0;
+  state.resumptionPromptedAt = new Date().toISOString();
+  state.templateResumedAt = state.resumptionPromptedAt;
+  return { conversationState: state, analysis: buildAnalysis(state, project, poc, text, state.guardrailHits || []),
+    nextMessage: { speaker: 'SRV Media MD Office', side: 'srv', body: question,
+      metadata: { source: 'whatsapp_state_machine', state: state.state, resumedFromOldTemplate: true } },
+    control: { allowAiRephrase: false, sendReply: true, resumed: true, suppressTerminalNotifications: true } };
+}
+
+async function handleTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil, resumedFromQuickCheckin = null }) {
   const turnStartedAt = Date.now();
   // --- G1: Meta retries webhooks. The same provider message id must never
   // be processed twice, or one complaint becomes two issues.
@@ -3931,7 +3976,8 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     providerMessageId,
     metadata: {
       source: channel === "whatsapp" ? "whatsapp" : "web_test",
-      from: body.from || null
+      from: body.from || null,
+      ...(resumedFromQuickCheckin ? { resumedFromQuickCheckin, buttonPayload: body.buttonPayload || body.buttonId || null } : {})
     }
   };
   const clientMessage = providerMessageId && typeof store.addInboundMessage === "function"
@@ -3972,10 +4018,16 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   // named a service, was silently marked as having been asked for the reason,
   // and went straight to the rating.
   const latestSrvMessage = [...previousMessages].reverse().find((message) => message.side === "srv");
+  if (resumedFromQuickCheckin && session.conversationState?.state === STATES.CLOSING_GRACE
+    && typeof store.resumeFeedbackTemplate === 'function') {
+    session = await store.resumeFeedbackTemplate(session.id, session.sessionType) || await store.getSession(session.id) || session;
+  }
   const manualContext = Boolean(latestSrvMessage?.metadata?.manualOutbound);
   if (manualContext) session = applyManualQuestionContext(session, latestSrvMessage);
   const stateBefore = JSON.parse(JSON.stringify(session.conversationState || {}));
-  let turn = processWhatsAppReply({ session, project, poc, text, manualContext });
+  let turn = resumedFromQuickCheckin
+    ? resumeSurveyFromOldTemplate(session, project, poc, text)
+    : processWhatsAppReply({ session, project, poc, text, manualContext });
   const transcript = previousMessages.concat(clientMessage);
 
   // The rules did not understand this reply — "Mo", "Not", "I want to say more".
@@ -3991,9 +4043,9 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
     && !factFreeControlReply(text)
     && !turn.control?.optOut
     && !turn.control?.handoff;
-  if (turn.needsInterpretation
+  if (!resumedFromQuickCheckin && (turn.needsInterpretation
     || needsNarrativeInterpretation
-    || (manualContext && !turn.control?.optOut && !turn.control?.handoff)) {
+    || (manualContext && !turn.control?.optOut && !turn.control?.handoff))) {
     const lastQuestion = latestSrvMessage;
     const read = await interpretReply({
       project,
@@ -4599,7 +4651,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
   // Reconcile rapid replies before deciding whether terminal analysis is
   // needed. This lets a stale middle message ("sorry, mistake") see the later
   // "Take 8" and prevents it from writing the session back to partial.
-  if (!control.skipAnalysisWrite
+  if (!resumedFromQuickCheckin && !control.skipAnalysisWrite
     && turn.conversationState.overallRatingAsked
     && typeof store.getMessagesForSession === "function") {
     const liveMessages = await store.getMessagesForSession(session.id);
@@ -4844,7 +4896,7 @@ async function handleTurn({ store, session, project, poc, body, text, baseUrl, c
 
   const resumeUrl = buildResumeUrl(baseUrl, project, updatedSession);
   const pendingQuestions = turn.conversationState.offTopicQuestions || [];
-  const clientRequestHandoff = !control.notify && !control.forceManagerAlert
+  const clientRequestHandoff = !resumedFromQuickCheckin && !control.notify && !control.forceManagerAlert
     ? await notifyClientRequest(store, { project, poc, session: updatedSession,
       text, messageId: clientMessage.id, baseUrl, facts: latestReplyFacts || interpretation,
       offTopic: Boolean(control.collectOffTopic) }) : null;
@@ -5433,7 +5485,12 @@ async function handleApiRequest(request) {
   }
 
   if (method === "GET" && pathname === "/api/dashboard") {
-    const [dashboard, messaging] = await Promise.all([store.getDashboard(), messagingStatus(store)]);
+    const [dashboard, messaging, pendingRoutingReviews] = await Promise.all([store.getDashboard(), messagingStatus(store), pendingFeedbackRoutingReviews(store)]);
+    const routingReviews = pendingRoutingReviews.filter(row => canReviewFeedbackRouting(row, appAccess, dashboard.projects || [])).map(row => ({
+      id: row.id, createdAt: row.created_at, from: row.payload.from, pocName: row.payload.pocName,
+      clientText: row.payload.clientText, reason: row.payload.reasonText, replyText: row.payload.replyText,
+      projects: (dashboard.projects || []).filter(project => (row.payload.projectIds || []).includes(project.id)).map(project => ({ id: project.id, key: project.key, name: project.name }))
+    }));
     // getDashboard returns open issues as raw Supabase rows. Normalise them and
     // attach the project they belong to so the UI never has to guess.
     const projectsById = new Map((dashboard.projects || []).map((item) => [item.id, item]));
@@ -5572,7 +5629,16 @@ async function handleApiRequest(request) {
       if (!Number.isFinite(rightDue)) return -1;
       return leftDue - rightDue;
     });
-    return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule, messaging });
+    return json(200, { ...dashboard, openIssues, openCycles, cycles, feedbackSchedule, messaging, routingReviews });
+  }
+
+  const routingReviewMatch = pathname.match(/^\/api\/feedback-routing-reviews\/([^/]+)\/resolve$/);
+  if (method === 'POST' && routingReviewMatch) {
+    const rows = await store.request('automation_events', { query: `id=eq.${encodeURIComponent(routingReviewMatch[1])}&event_type=eq.${ROUTING_REVIEW_EVENT}&select=*&limit=1` });
+    const row = rows[0];
+    if (!row || !canReviewFeedbackRouting(row, appAccess, await store.listProjects())) return error(404, 'Feedback routing review not found');
+    await store.completeAutomationEvent(row.id, { status: 'reviewed', payload: { ...row.payload, reviewedAt: new Date().toISOString(), reviewedBy: appAccess.email || appAccess.name || 'Super Admin' } });
+    return json(200, { reviewed: true });
   }
 
   if (method === "POST" && ["/api/project-performance/zoho/connection-check", "/api/project-performance/zoho/push"].includes(pathname)) {
@@ -6534,13 +6600,17 @@ async function handleApiRequest(request) {
     if (!body.from) return error(400, "WhatsApp sender (from) is required");
 
     const buttonSessionId = quickCheckinSessionId(body);
+    if (body.providerMessageId && typeof store.getAutomationEventByDedupeKey === 'function'
+      && await store.getAutomationEventByDedupeKey(reviewDedupeKey(body))) {
+      return json(200, { duplicate: true, sendToWhatsapp: false, routedTo: 'feedback_review' });
+    }
     try {
       const broadcastReply = await captureBroadcastInbound({ store, body });
       if (broadcastReply) return json(200, broadcastReply);
     } catch (routingError) {
       return error(routingError.status || 503, "Broadcast reply could not be recorded", "No automated reply was sent. Retry the provider delivery after checking database availability.");
     }
-    const routing = typeof store.getWhatsappRoutingContext === "function"
+    let routing = typeof store.getWhatsappRoutingContext === "function"
       ? await store.getWhatsappRoutingContext(body.from)
       : null;
 
@@ -6553,8 +6623,19 @@ async function handleApiRequest(request) {
       return error(routingError.status || 503, "Birthday reply could not be safely recorded", "No automated response was sent. Retry this provider delivery after checking database availability.");
     }
 
+    // Only a verified earlier template resumption can disambiguate subsequent
+    // plain-text replies. A newer feedback invitation takes precedence again.
+    if (!buttonSessionId && routing?.status === 'ambiguous') {
+      const selected = preferredResumedFeedback(routing.candidates || [], body);
+      if (selected) routing = { status: 'active', ...selected };
+    }
+    const routingReview = async (reason, phonePocs) => json(200, await recordFeedbackRoutingReview(
+      store, body, reason, phonePocs || await store.getPocsByWhatsapp(body.from), await whatsappMessagingEnabled(store)
+    ));
+
     let poc = null;
     let session = null;
+    let resumedFromQuickCheckin = null;
     if (buttonSessionId) {
       session = await store.getSession(buttonSessionId);
       const phonePocs = typeof store.getPocsByWhatsapp === "function"
@@ -6562,7 +6643,14 @@ async function handleApiRequest(request) {
         : [];
       poc = phonePocs.find((item) => item.id === session?.clientPocId) || null;
       if (!session || session.sessionType !== "quick_checkin" || !poc) {
-        return error(400, "This quick check-in button does not match the sender or an active quick check-in");
+        return routingReview('unavailable_button', phonePocs);
+      }
+      const newer = newerSurveyForClosedQuickCheckin(session, routing, body);
+      if (newer) {
+        resumedFromQuickCheckin = session.id;
+        ({ session, poc } = newer);
+      } else if (quickCheckinClosed(session) && routing?.status === 'ambiguous') {
+        return routingReview('ambiguous_projects', phonePocs);
       }
     } else if (routing?.status === "ambiguous") {
       const detailCandidates = (routing.candidates || []).filter((candidate) =>
@@ -6576,7 +6664,7 @@ async function handleApiRequest(request) {
         );
         ({ poc, session } = detailCandidates[0]);
       } else {
-        return error(409, "This WhatsApp number has more than one active feedback session", "Use the button for the relevant project. If feedback details were requested, reply immediately after choosing Share feedback.");
+        return routingReview('ambiguous_projects');
       }
     } else {
       poc = routing ? routing.poc : await store.getPocByWhatsapp(body.from);
@@ -6599,12 +6687,12 @@ async function handleApiRequest(request) {
     if (session.sessionType === "quick_checkin") {
       return handleQuickCheckinTurn({
         store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
-        waitUntil: request.waitUntil
+        waitUntil: request.waitUntil, resumedFromQuickCheckin
       });
     }
     return handleTurn({
       store, session, project, poc, body, text, baseUrl, channel: "whatsapp",
-      waitUntil: request.waitUntil
+      waitUntil: request.waitUntil, resumedFromQuickCheckin
     });
   }
 
@@ -8890,7 +8978,7 @@ function quickCheckinFeedbackAcknowledgement(poc, interpretation, windowText, pr
   return `${additional ? `Thank you for the additional detail, ${name}.` : `Thank you for bringing these concerns to our attention, ${name}.`} I have specifically noted: ${numbered}.${request ? ` ${request}` : ""}${appreciationText} Your feedback has been recorded for confidential management review. ${windowText}`;
 }
 
-async function handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil }) {
+async function handleQuickCheckinTurn({ store, session, project, poc, body, text, baseUrl, channel, waitUntil, resumedFromQuickCheckin = null }) {
   const providerMessageId = body.providerMessageId || null;
   if (providerMessageId && await store.hasProviderMessage(providerMessageId)) {
     return json(200, { duplicate: true, sendToWhatsapp: false, sessionId: session.id });
@@ -8904,13 +8992,37 @@ async function handleQuickCheckinTurn({ store, session, project, poc, body, text
     metadata: {
       source: channel === "whatsapp" ? "whatsapp" : "web_test",
       from: body.from || null,
-      buttonPayload: body.buttonPayload || body.buttonId || null
+      buttonPayload: body.buttonPayload || body.buttonId || null,
+      ...(resumedFromQuickCheckin ? { resumedFromQuickCheckin } : {})
     }
   };
   const clientMessage = providerMessageId && typeof store.addInboundMessage === "function"
     ? await store.addInboundMessage(session.id, inbound)
     : await store.addMessage(session.id, inbound);
   if (!clientMessage) return json(200, { duplicate: true, sendToWhatsapp: false, sessionId: session.id });
+
+  if (resumedFromQuickCheckin) {
+    // Re-read after recording the tap. Resumption is a control operation, never
+    // an All good answer or a new ten-minute window, even with an old ALL_GOOD button.
+    const current = await store.getSession(session.id) || session;
+    if (!quickCheckinClosed(current)) {
+      const resumed = await store.resumeFeedbackTemplate(current.id, 'quick_checkin') || await store.getSession(current.id) || current;
+      if (!quickCheckinClosed(resumed)) {
+        const inWindow = resumed.conversationState?.state === 'quick_checkin_window';
+        const replyText = `${resumedFeedbackIntro(project, resumed)} Please share your feedback or anything you would like management to know.${inWindow ? ' The original 10-minute window remains open.' : ''}`;
+        const assistantMessage = await store.addMessage(current.id, { speaker: "SRV Media Directors' Office", side: 'srv', body: replyText,
+          metadata: { source: 'quick_checkin', resumedFromOldTemplate: true } });
+        return json(201, { session: resumed, project, poc, receivedMessage: clientMessage, nextMessage: assistantMessage,
+          whatsappReplyText: replyText, sendToWhatsapp: true, state: resumed.conversationState.state });
+      }
+    }
+    // A queued control tap can race closure. Acknowledge without reopening,
+    // interpreting ALL_GOOD, creating a concern, or claiming a handoff was sent.
+    const closed = await store.getSession(current.id) || current;
+    const replyText = `The feedback request for ${String(project.name || 'your project').replace(/\s+/g, ' ')} has now closed. Please contact your SRV representative if you would like to share anything further.`;
+    const assistantMessage = await store.addMessage(current.id, { speaker: "SRV Media Directors' Office", side: 'srv', body: replyText, metadata: { source: 'quick_checkin', resumedFromOldTemplate: true } });
+    return json(201, { session: closed, project, poc, receivedMessage: clientMessage, nextMessage: assistantMessage, whatsappReplyText: replyText, sendToWhatsapp: true, state: closed.conversationState?.state });
+  }
 
   const button = quickCheckinButton(body);
   const state = session.conversationState || {};

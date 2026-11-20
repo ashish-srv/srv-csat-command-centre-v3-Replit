@@ -114,6 +114,39 @@ class BroadcastRepository {
       join public.whatsapp_broadcasts b on b.id=r.broadcast_id where ${visibleSql} and r.id=$2`, [clusters, id])).rows[0];
   }
 
+  async exportRows(clusters, filters) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin isolation level repeatable read read only');
+      const recipients = (await client.query(`select r.*,b.title,b.template,b.parameters,b.created_at as broadcast_created_at,b.created_by,b.deleted_at,
+        (select body from public.whatsapp_broadcast_messages m where m.recipient_id=r.id and m.side='client' and m.deleted_at is null
+          order by coalesce(m.provider_at,m.created_at) desc,m.id desc limit 1) as latest_reply
+        from public.whatsapp_broadcast_recipients r join public.whatsapp_broadcasts b on b.id=r.broadcast_id
+        where ${visibleSql} and (b.deleted_at is null or ($9='replies' and r.latest_reply_at>b.deleted_at))
+        and ($2::uuid is null or r.broadcast_id=$2)
+        and (cardinality($3::text[])=0 or case when r.latest_reply_at is null then 'no_reply'
+          when r.last_staff_reply_at is null or r.latest_reply_at>r.last_staff_reply_at then 'awaiting_response' else 'responded' end=any($3::text[]))
+        and (cardinality($4::text[])=0 or r.status=any($4::text[]))
+        and ($5::date is null or (r.latest_reply_at at time zone 'Asia/Kolkata')::date >= $5::date)
+        and ($6::date is null or (r.latest_reply_at at time zone 'Asia/Kolkata')::date <= $6::date)
+        and ($7='' or case when $2::uuid is not null then position(lower($7) in lower(concat_ws(' ',r.phone,
+          (select body from public.whatsapp_broadcast_messages m where m.recipient_id=r.id and m.side='client' and m.deleted_at is null order by coalesce(m.provider_at,m.created_at) desc,m.id desc limit 1),
+          (select string_agg(concat_ws(' ',a->>'name',a->>'clientName',a->>'projectName'),' ') from jsonb_array_elements(r.associations) a))))>0
+          else r.associations::text ilike $8 or r.phone ilike $8 or exists(select 1 from public.whatsapp_broadcast_messages m
+            where m.recipient_id=r.id and m.side='client' and m.deleted_at is null and m.body ilike $8) end)
+        order by b.created_at desc,b.id,r.id limit 10001`,
+      [clusters, filters.campaignId || null, filters.replies, filters.statuses, filters.from || null, filters.to || null, filters.search, `%${filters.search}%`, filters.section])).rows;
+      if (recipients.length > 10000) throw Object.assign(new Error('Too many recipients for one report. Select a broadcast or narrow the filters.'), { status: 400 });
+      const messages = recipients.length ? (await client.query(`select m.* from public.whatsapp_broadcast_messages m
+        where m.recipient_id=any($1::uuid[]) and m.deleted_at is null
+        order by coalesce(m.provider_at,m.created_at),m.id limit 50001`, [recipients.map(row => row.id)])).rows : [];
+      if (messages.length > 50000) throw Object.assign(new Error('Too many conversation messages for one report. Select a broadcast or narrow the filters.'), { status: 400 });
+      await client.query('commit');
+      return { recipients, messages };
+    } catch (error) { await client.query('rollback'); throw error; }
+    finally { client.release(); }
+  }
+
   async messages(recipientId) {
     return (await this.pool.query(`select * from (select * from public.whatsapp_broadcast_messages where recipient_id=$1 and deleted_at is null
       order by coalesce(provider_at,created_at) desc,id desc limit 1000) m order by coalesce(provider_at,created_at),id`, [recipientId])).rows;

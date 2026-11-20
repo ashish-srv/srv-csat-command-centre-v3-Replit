@@ -9,6 +9,7 @@ import {
 import { Button, EmptyState, LoadingBlock, MetricCard, Panel, StatusPill } from "./Ui.jsx";
 import ReportDownloads from "./ReportDownloads.jsx";
 import ConsolidatedFeedbackExport from "./ConsolidatedFeedbackExport.jsx";
+import FeedbackRoutingReviews from "./FeedbackRoutingReviews.jsx";
 import { hasPermission } from "../permissions";
 
 const RISK_OPTIONS = ["High", "Watch", "Low", "Not scored"];
@@ -190,7 +191,7 @@ export default function Dashboard({ dashboard, locationTick = 0, onReload, onOpe
   useEffect(() => {
     if (!dashboard || attentionNavigationRef.current === locationTick) return;
     const section = new URLSearchParams(window.location.search).get("section");
-    if (!["dashboard-open-issues", "dashboard-open-cycles", "dashboard-overdue-issues"].includes(section)) return;
+    if (!["dashboard-open-issues", "dashboard-open-cycles", "dashboard-overdue-issues", "dashboard-routing-reviews"].includes(section)) return;
     setOnlyOverdueIssues(section === "dashboard-overdue-issues");
     // Rail totals cover every project. A stale client/date selection must not
     // hide the items the user just asked to see.
@@ -720,6 +721,7 @@ export default function Dashboard({ dashboard, locationTick = 0, onReload, onOpe
 
       {reportError ? <div className="report-export-error" role="alert">{reportError}</div> : null}
       <ConsolidatedFeedbackExport projects={allProjects} />
+      <FeedbackRoutingReviews reviews={dashboard?.routingReviews} onReload={onReload} onOpenProject={onOpenProject} />
 
       <nav className="dashboard-section-nav" aria-label="Dashboard sections">
         <button type="button" onClick={() => showSection("dashboard-projects")}>Projects</button>

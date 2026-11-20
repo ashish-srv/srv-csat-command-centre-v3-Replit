@@ -7,3 +7,14 @@
 .broadcast-modal { background: white; border: 1px solid #d9deea; border-radius: 14px; padding: 24px; width: min(560px, 100%); max-height: 85vh; overflow-y: auto; box-shadow: 0 16px 60px #15182033; }
 .broadcast-modal h2 { color: #9c203b; margin-top: 0; }
 .broadcast-modal label { display: grid; gap: 6px; margin: 14px 0; }
+.broadcast-centre .filter-bar { align-items: flex-end; gap: 14px; }
+.broadcast-centre .filter-field.date-range { flex: 1 1 350px; min-width: 0; max-width: 440px; }
+.broadcast-centre .date-range-inputs { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr) auto; height: auto; min-height: 42px; gap: 8px; padding: 3px 8px; }
+.broadcast-centre .date-range-inputs input[type=date] { width: 100%; min-width: 0; height: 34px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 13px; }
+.broadcast-centre .date-range-inputs .date-clear { width: 28px; height: 28px; padding: 4px; align-items: center; justify-content: center; }
+.broadcast-centre .date-range-inputs .date-dash { white-space: nowrap; }
+.broadcast-filter-help { font-size: 12px; color: #556174; margin: 10px 0 14px; }
+.broadcast-report-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border: 1px solid #e1d5df; background: #fbf7fa; border-radius: 9px; margin: 14px 0; }
+.broadcast-report-toolbar p { flex: 1 1 260px; margin: 0; font-size: 12px; color: #556174; line-height: 1.6; }
+.broadcast-report-toolbar .report-downloads { flex-wrap: wrap; }
+@media (max-width: 420px) { .broadcast-centre .filter-field.date-range { flex-basis: 100%; } .broadcast-centre .date-range-inputs { gap: 4px; padding-inline: 5px; } .broadcast-centre .date-range-inputs input[type=date] { font-size: 12px; } }

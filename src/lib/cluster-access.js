@@ -99,6 +99,10 @@ async function authorizeClusterRequest(store, access, method, pathname, body = {
     '/api/admin/projects', '/api/admin/projects/bulk', '/api/admin/projects/bulk-status', '/api/admin/project-setups', '/api/admin/clients', '/api/admin/internal-pocs', '/api/admin/services', '/api/admin/pocs', '/api/admin/client-pocs', '/api/project-performance/projects', '/api/admin/pocs/bulk-control',
     '/api/admin/project-automation/preview', '/api/admin/project-automation/bulk', '/api/admin/bulk-feedback/preview', '/api/admin/bulk-feedback/send'].includes(pathname);
   let match;
+  if (/^\/api\/feedback-routing-reviews\/[^/]+\/resolve$/.test(pathname) && method === 'POST') {
+    // The handler checks every candidate project against scoped listProjects.
+    known = true;
+  }
   if ((match = /^\/api\/projects\/([^/]+)(?:\/(?:workspace|automation-settings|request-feedback|issues))?$/.exec(pathname))) {
     known = true; await projectByKey(decodeURIComponent(match[1]));
   } else if ((match = /^\/api\/(sessions|cycles|issues)\/([^/]+)(?:\/(?:messages|sessions|manual-whatsapp-message|score|stop|reminder|no-response|close|reopen|progress))?$/.exec(pathname))) {

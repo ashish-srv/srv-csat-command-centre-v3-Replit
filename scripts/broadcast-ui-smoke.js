@@ -27,7 +27,7 @@ const labelInput = (h,label) => elements(h.find(node=>node.type==='label' && nod
 
 async function main() {
   const writes=[];
-  const h=new ComponentHarness('src/components/WhatsAppBroadcasts.jsx',{currentUser:{role:'super_admin'}},'/broadcasts',read,null,{modules:{'../permissions':permissions},write:async(url,body)=>{
+  const h=new ComponentHarness('src/components/WhatsAppBroadcasts.jsx',{currentUser:{role:'super_admin'}},'/broadcasts',read,null,{modules:{'../permissions':permissions,'../lib/broadcast-report':{buildBroadcastReport:value=>value}},write:async(url,body)=>{
     writes.push({url,body});
     if(url.endsWith('/preview')) return {uniqueRecipients:1,recipients:[{phone:'919876543210',associations:[people[0]],reason:'',message:'Hi Zoe. General announcement'}]};
     if(url.endsWith('/send')) return {campaign:{id:id(51)},queued:1,skipped:0,senderTriggered:true};
@@ -70,6 +70,17 @@ async function main() {
   feedbackOwnsReplies=true;
   await h.find(node=>node.props.children==='Refresh Status').props.onClick();await h.settle();
   assert.equal(h.find(node=>node.props.children==='Send WhatsApp Reply').props.disabled,true,'a newer feedback session prevents replying through the old broadcast composer');
+  h.find(node=>node.props.label==='Delivery Status').props.onChange(['skipped']);await h.settle();
+  h.find(node=>node.props.label==='Reply Status').props.onChange(['no_reply']);await h.settle();
+  h.find(node=>node.type==='DateRange').props.onChange({from:'2026-11-01',to:'2026-11-20',basis:'completed'});await h.settle();
+  labelInput(h,'Search Recipients or Latest Reply').props.onChange({target:{value:'Client A'}});await h.settle();
+  await h.find(node=>node.props.reportLabel==='Broadcast Replies and Delivery').props.getReport();
+  const exportQuery=new URLSearchParams(h.calls.at(-1).split('?')[1]);
+  assert.equal(exportQuery.get('section'),'replies');assert.equal(exportQuery.get('campaignId'),id(51));assert.equal(exportQuery.get('statuses'),'skipped');assert.equal(exportQuery.get('replies'),'no_reply');assert.equal(exportQuery.get('from'),'2026-11-01');assert.equal(exportQuery.get('search'),'Client A');
+  await h.find(node=>node.props.reportLabel==='Broadcast History').props.getReport();
+  assert.equal(h.calls.at(-1),'/api/broadcasts/export?section=history','history exports all pages without the reply filters');
+  elements(h.tree,node=>node.type==='FilterBar').at(-1).props.onReset();await h.settle();
+  assert.equal(h.find(node=>node.type==='DateRange').props.range.from,'');assert.equal(h.find(node=>node.type==='DateRange').props.range.to,'');
 
   const viewer=new ComponentHarness('src/components/WhatsAppBroadcasts.jsx',{currentUser:{role:'admin',permissions:{broadcast_view:true}}},'/broadcasts',read,null,{modules:{'../permissions':permissions}});
   viewer.window.setInterval=()=>1;viewer.window.clearInterval=()=>{};await viewer.settle();

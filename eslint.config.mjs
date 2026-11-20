@@ -8,6 +8,7 @@ import react from "eslint-plugin-react";
  * declarations lost to an aborted edit), so `npm run check` now runs this.
  */
 export default [
+  { ignores: ['outputs/**', '.local/**', 'dist/**', '.cache/**'] },
   {
     files: ["src/**/*.{js,jsx}", "scripts/**/*.js", "server.local.js", "netlify/**/*.js"],
     languageOptions: {

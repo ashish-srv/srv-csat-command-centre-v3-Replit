@@ -3,7 +3,7 @@ import { FileSpreadsheet, FileText, Printer } from "lucide-react";
 import { downloadExcelReport, downloadHtmlReport, openPdfReport } from "../lib/report-export";
 import { Button } from "./Ui.jsx";
 
-export default function ReportDownloads({ getReport, fileName, onError }) {
+export default function ReportDownloads({ getReport, fileName, onError, reportLabel = 'CSAT' }) {
   const [busy, setBusy] = useState("");
 
   async function run(format) {
@@ -14,7 +14,10 @@ export default function ReportDownloads({ getReport, fileName, onError }) {
         onError?.("Allow pop-ups for this site, then try the PDF report again.");
         return;
       }
-      printWindow.document.write("<p style='font:14px Arial;padding:24px'>Preparing your CSAT report…</p>");
+      const message = printWindow.document.createElement('p');
+      message.style.cssText = 'font:14px Arial;padding:24px';
+      message.textContent = `Preparing your ${reportLabel} report…`;
+      printWindow.document.body.appendChild(message);
     }
     setBusy(format);
     try {
@@ -31,7 +34,7 @@ export default function ReportDownloads({ getReport, fileName, onError }) {
   }
 
   return (
-    <div className="report-downloads" aria-label="Download CSAT report">
+    <div className="report-downloads" aria-label={`Download ${reportLabel} report`}>
       <span>Download report</span>
       <Button icon={Printer} onClick={() => run("pdf")} disabled={Boolean(busy)}>
         {busy === "pdf" ? "Preparing…" : "PDF"}

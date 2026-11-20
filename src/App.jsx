@@ -105,6 +105,7 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject, onOpenDa
         <button type="button" className="rail-icon watch" title={`${awaiting.length} cycles awaiting reply`} aria-label="Go to Open Cycles" onClick={() => onOpenDashboard("dashboard-open-cycles")}><Clock size={16} aria-hidden="true" /></button>
         <button type="button" className="rail-icon weak" title={`${highRisk.length} projects at high risk`} aria-label="View high-risk projects" disabled={!highRisk.length} onClick={openHighRisk}><TrendingDown size={16} aria-hidden="true" /></button>
         <span className="rail-icon" title={`${latestActivity.length} recent client replies`}><History size={16} aria-hidden="true" /></span>
+        {dashboard?.routingReviews?.length ? <button type="button" className="rail-icon watch" title={`${dashboard.routingReviews.length} feedback messages need routing review`} onClick={() => onOpenDashboard('dashboard-routing-reviews')} aria-label="Go to Feedback Routing Reviews"><AlertTriangle size={16} aria-hidden="true" /></button> : null}
       </aside>
     );
   }
@@ -125,6 +126,7 @@ function AttentionRail({ collapsed, onToggle, dashboard, onOpenProject, onOpenDa
       </div>
 
       <p className="rail-label">Needs attention</p>
+      {dashboard?.routingReviews?.length ? <button type="button" className="rail-stat watch" onClick={() => onOpenDashboard('dashboard-routing-reviews')}><strong>{dashboard.routingReviews.length}</strong><span>Feedback routing needs review</span></button> : null}
       <button type="button" className="rail-stat watch" aria-label="Go to Open Issues" onClick={() => onOpenDashboard("dashboard-open-issues")}>
         <strong>{dashboard?.openIssues?.length || 0}</strong><span>Total Open Issues</span>
       </button>

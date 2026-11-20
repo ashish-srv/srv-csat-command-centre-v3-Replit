@@ -19,7 +19,14 @@ const admin = { id: 'admin', email: 'admin@srvmedia.com', role: 'admin', active:
 const external = { id: 'external', email: 'approved@gmail.com', role: 'project_user', active: true, externalLoginAllowed: true, internalPocId: 'ia' };
 const users = [admin, external, { id: 'super', email: 'super@srvmedia.com', role: 'super_admin', active: true }];
 let writes = 0;
+const reviewRows = [['a',['pa']],['b',['pb']],['both',['pa','pb']],['unknown',[]]].map(([id,projectIds]) => ({id,event_type:'feedback_routing_review',status:'pending',payload:{projectIds,pocName:'Test',clientText:'Share feedback'}}));
 const store = {
+  request: async (table, options) => {
+    assert.equal(table,'automation_events');
+    const id=new URLSearchParams(options.query).get('id')?.slice(3);
+    return reviewRows.filter(row=>id?row.id===id:row.status==='pending');
+  },
+  completeAutomationEvent: async (id,event) => Object.assign(reviewRows.find(row=>row.id===id),event),
   getAppUserByEmail: async email => users.find(user => user.email === email),
   listAppUsers: async () => users,
   getDirectory: async () => directory,
@@ -51,6 +58,14 @@ async function main() {
   let checks = 0;
   const check = (value, expected) => { assert.deepEqual(value, expected); checks++; };
   const cookie = cookieFor(admin.email);
+  check(JSON.parse((await request('GET','/api/dashboard',cookie)).body).routingReviews.map(row=>row.id),['a']);
+  check((await request('POST','/api/feedback-routing-reviews/both/resolve',cookie)).statusCode,404);
+  check((await request('POST','/api/feedback-routing-reviews/unknown/resolve',cookie)).statusCode,404);
+  check((await request('POST','/api/feedback-routing-reviews/a/resolve',cookieFor(external.email,''))).statusCode,403);
+  check((await request('POST','/api/feedback-routing-reviews/a/resolve',cookie)).statusCode,200);
+  check(reviewRows[0].status,'reviewed');
+  check(JSON.parse((await request('GET','/api/dashboard',cookie)).body).routingReviews,[]);
+  check(JSON.parse((await request('GET','/api/dashboard',cookieFor('super@srvmedia.com'))).body).routingReviews.length,3);
   for (const route of ['/api/dashboard', '/api/project-performance', '/api/admin/directory']) {
     const result = await request('GET', route, cookie);
     check(result.statusCode, 200);

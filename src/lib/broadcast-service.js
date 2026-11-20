@@ -204,6 +204,36 @@ async function handleBroadcastRequest({ store, access, request, pathname, method
       fail('Unknown broadcast automation route.', 404);
     }
     const clusters = clustersFor(access);
+    if (method === 'GET' && pathname === '/api/broadcasts/export') {
+      const section = searchParams.get('section') || 'history';
+      if (!['history','replies'].includes(section)) fail('Select broadcast history or replies for the report.');
+      const campaignId = section === 'replies' ? searchParams.get('campaignId') || '' : '';
+      const from = section === 'replies' ? searchParams.get('from') || '' : '';
+      const to = section === 'replies' ? searchParams.get('to') || '' : '';
+      const replies = section === 'replies' ? (searchParams.get('replies') || '').split(',').filter(Boolean) : [];
+      const statuses = section === 'replies' ? (searchParams.get('statuses') || '').split(',').filter(Boolean) : [];
+      if ((campaignId && !uuid(campaignId)) || !validDate(from) || !validDate(to) || (from && to && from > to)
+        || replies.some(value => !['awaiting_response','responded','no_reply'].includes(value))
+        || statuses.some(value => !['queued','sending','accepted','sent','delivered','read','failed','unknown','skipped'].includes(value))) fail('Choose valid broadcast report filters.');
+      const filters = { section, campaignId, from, to, replies, statuses, search: section === 'replies' ? String(searchParams.get('search') || '').slice(0,250) : '' };
+      const result = await repo.exportRows(clusters, filters);
+      const recipients = result.recipients.filter(row => canReadHistory(row, clusters));
+      const ids = new Set(recipients.map(row => row.id));
+      // Export only display fields. Never expose automation secrets, provider
+      // IDs or recipients/messages outside the viewer's complete cluster scope.
+      return json(200, { section, filters, generatedAt: new Date().toISOString(), recipients: recipients.map(row => ({
+        id: row.id, broadcastId: row.broadcast_id, title: row.title, createdAt: row.broadcast_created_at, createdBy: row.created_by,
+        templateName: row.template?.name || '', language: row.template?.language || '', removedAt: row.deleted_at || null,
+        phone: row.phone || '', associations: row.associations.map(poc => ({ id: poc.id, name: poc.name, clientId: poc.clientId,
+          clientName: poc.clientName, projectId: poc.projectId, projectName: poc.projectName, clusterId: poc.clusterId, reason: poc.reason || '' })),
+        status: row.status, reason: row.reason || '', errorCode: row.error_code || '', deliveryAt: row.delivery_at,
+        retryAfter: row.retry_after, sentAt: row.sent_at, dispatchAt: row.dispatch_at, latestReplyAt: row.latest_reply_at,
+        lastStaffReplyAt: row.last_staff_reply_at, latestReply: row.latest_reply || '', message: row.message_body || ''
+      })), messages: result.messages.filter(row => ids.has(row.recipient_id) && !row.deleted_at).map(row => ({
+        id: row.id, recipientId: row.recipient_id, side: row.side, body: row.body, status: row.status,
+        error: row.error || '', at: row.provider_at || row.created_at
+      })) });
+    }
     const removal = /^\/api\/broadcasts\/(templates|history)\/([^/]+)$/.exec(pathname);
     if (removal && uuid(removal[2])) {
       if (access.role !== 'super_admin') fail('Only Super Admin can remove broadcast templates or history.', 403);

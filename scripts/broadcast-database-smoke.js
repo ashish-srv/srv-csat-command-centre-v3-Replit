@@ -86,6 +86,29 @@ async function main() {
     await repo.finish(immediateRow.id,'template',{status:'failed',reason:'HTTP 400 / Meta 131049: Limited marketing delivery'});
     const rejected=await repo.recipient(immediateRow.id,null);
     assert.equal(rejected.error_code,'131049');assert.ok(Date.parse(rejected.retry_after)>Date.now());
+    // Full report reads ignore history/inbox page limits and the chat viewer's
+    // 1,000-message cap, while applying the identical cluster/date/status rules.
+    await database.query(`insert into public.whatsapp_broadcast_recipients(broadcast_id,phone,associations,status)
+      select $1,'9198000'||lpad(n::text,5,'0'),$2::jsonb,'skipped' from generate_series(1,106) n`,[immediate.campaign.id,JSON.stringify(associations)]);
+    await database.query(`insert into public.whatsapp_broadcast_messages(recipient_id,side,body,status,created_at)
+      select $1,'client','Saved reply '||n,'received','2026-11-19T19:00:00Z'::timestamptz from generate_series(1,1005) n`,[immediateRow.id]);
+    await database.query("update public.whatsapp_broadcast_recipients set latest_reply_at='2026-11-19T19:00:00Z' where id=$1",[immediateRow.id]);
+    const reportFilters={section:'replies',campaignId:immediate.campaign.id,replies:[],statuses:[],from:'',to:'',search:''};
+    let exported=await repo.exportRows([cluster],reportFilters);
+    assert.equal(exported.recipients.length,107);assert.equal(exported.messages.length,1005);
+    exported=await repo.exportRows([cluster],{...reportFilters,statuses:['failed'],from:'2026-11-20',to:'2026-11-20'});
+    assert.equal(exported.recipients.length,1,'dates use the IST reply date, not the UTC calendar date');
+    assert.equal(exported.messages.length,1005);
+    assert.equal((await repo.exportRows([cluster],{...reportFilters,from:'2026-11-19',to:'2026-11-19'})).recipients.length,0);
+    assert.equal((await repo.exportRows([crypto.randomUUID()],reportFilters)).recipients.length,0);
+    assert.equal((await repo.exportRows([cluster],{...reportFilters,campaignId:'',search:'Saved reply 1005'})).recipients.length,1);
+    await database.query(`insert into public.whatsapp_broadcast_messages(recipient_id,side,body,status,created_at) values($1,'client','Newest client reply','received','2026-11-19T19:01:00Z')`,[immediateRow.id]);
+    assert.equal((await repo.exportRows([cluster],{...reportFilters,search:'Saved reply 1005'})).recipients.length,0,'selected broadcast export matches the on-screen latest-reply search');
+    assert.equal((await repo.exportRows([cluster],{...reportFilters,statuses:['skipped'],replies:['no_reply']})).recipients.length,106);
+    const cleared=await repo.exportRows([cluster],{...reportFilters,campaignId:first.campaign.id,section:'history'});
+    assert.equal(cleared.recipients.length,0,'removed history is absent from history downloads');
+    const lateOnly=await repo.exportRows([cluster],{...reportFilters,campaignId:first.campaign.id});
+    assert.equal(lateOnly.messages.length,1);assert.equal(lateOnly.messages[0].body,'New question','only new messages survive cleanup');
     console.log('Embedded PostgreSQL checks passed: additive/idempotent migration, early/late/duplicate receipts, retry uniqueness, scope, cleanup, late reply isolation and newer CSAT priority.');
   } finally { await database.close(); }
 }

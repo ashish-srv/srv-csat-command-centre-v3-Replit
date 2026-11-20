@@ -4,6 +4,8 @@ import { hasPermission } from '../permissions';
 import { Button, LoadingBlock } from './Ui.jsx';
 import { MultiSelect, SingleSelect, FilterBar, DateRange } from './Filters.jsx';
 import { formatDateTime } from '../format';
+import { buildBroadcastReport } from '../lib/broadcast-report';
+import ReportDownloads from './ReportDownloads.jsx';
 import './WhatsAppBroadcasts.css';
 
 const emptyFilters = () => ({ clusters: [], clients: [], projects: [] });
@@ -48,6 +50,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
   const [deliveryFilter, setDeliveryFilter] = useState([]);
   const [replySearch, setReplySearch] = useState('');
   const [replyRange, setReplyRange] = useState({ from: '', to: '', basis: 'completed' });
+  const [dateRevision, setDateRevision] = useState(0);
   const [registered, setRegistered] = useState({ name: '', language: 'en', body: '', approvedConfirmed: false });
   const [cleanup, setCleanup] = useState(null);
   const [cleanupPassword, setCleanupPassword] = useState('');
@@ -116,6 +119,14 @@ export default function WhatsAppBroadcasts({ currentUser }) {
     finally { setBusy(false); }
   }
   function askCleanup(value) { setCleanup(value); setCleanupPassword(''); setCleanupConfirmation(''); }
+  async function exportReport(sectionName) {
+    const query = new URLSearchParams({ section: sectionName });
+    if (sectionName === 'replies') {
+      query.set('campaignId', campaignId); query.set('replies', replyFilter.join(',')); query.set('statuses', deliveryFilter.join(','));
+      query.set('search', replySearch); query.set('from', replyRange.from); query.set('to', replyRange.to);
+    }
+    return buildBroadcastReport(await apiGet(`/api/broadcasts/export?${query}`));
+  }
   if (!data) return error ? <div className="error-block" role="alert">{error}<Button onClick={load}>Try Again</Button></div> : <LoadingBlock label="Loading WhatsApp Broadcasts" />;
   const directory = data.directory;
   const template = data.templates.find(row => row.id === templateId);
@@ -211,6 +222,7 @@ export default function WhatsAppBroadcasts({ currentUser }) {
     </details> : null}
 
     <details id="broadcast-history" className="broadcast-panel" open><summary>Broadcast History</summary><div className="broadcast-panel-body">
+      <div className="broadcast-report-toolbar"><p>Download all accessible announcement history, recipients and conversations across every page. PDF opens Print / Save as PDF.</p><ReportDownloads reportLabel="Broadcast History" getReport={() => exportReport('history')} fileName="WhatsApp_Broadcast_History" onError={setError} /></div>
       <p>Accepted or Sent means WhatsApp is processing the message. Delivered and Read confirm receipt. A missing confirmation is not a confirmed failure.</p>
       <div className="broadcast-scroll"><table><thead><tr><th>Broadcast Title</th><th>Created</th><th>Recipients</th><th>Delivered (incl. Read)</th><th>Read</th><th>Awaiting Confirmation</th><th>Replies</th><th>Skipped</th><th>Failed</th><th /></tr></thead><tbody>
         {data.campaigns.map(campaign => <tr key={campaign.id} className={campaign.id === campaignId ? 'broadcast-selected' : ''}>
@@ -225,12 +237,14 @@ export default function WhatsAppBroadcasts({ currentUser }) {
     <details id="broadcast-replies" className="broadcast-panel" open><summary>Broadcast Replies & Delivery</summary><div className="broadcast-panel-body">
       <SingleSelect label="Broadcast" value={campaignId} placeholder="All Broadcasts" options={data.campaigns.map(row => ({ value: row.id, label: row.title }))} onChange={id => { setCampaignId(id); setInboxOffset(0); }} />
       <>
-        <FilterBar showReset onReset={() => { setReplyFilter([]); setDeliveryFilter([]); setReplySearch(''); setReplyRange({ from: '', to: '', basis: 'completed' }); setInboxOffset(0); }}>
+        <FilterBar showReset onReset={() => { setReplyFilter([]); setDeliveryFilter([]); setReplySearch(''); setReplyRange({ from: '', to: '', basis: 'completed' }); setDateRevision(value => value + 1); setInboxOffset(0); }}>
           <MultiSelect label="Reply Status" selected={replyFilter} options={['awaiting_response','responded','no_reply']} renderOption={value => ({ awaiting_response: 'Awaiting Our Response', responded: 'Responded', no_reply: 'No Reply' }[value])} onChange={value => { setReplyFilter(value); setInboxOffset(0); }} />
           <MultiSelect label="Delivery Status" selected={deliveryFilter} options={Object.keys(labels)} renderOption={value => labels[value]} onChange={value => { setDeliveryFilter(value); setInboxOffset(0); }} />
-          <DateRange range={replyRange} onChange={value => { setReplyRange(value); setInboxOffset(0); }} />
+          <DateRange key={dateRevision} range={replyRange} onChange={value => { setReplyRange(value); setInboxOffset(0); }} />
         </FilterBar>
+        <p className="broadcast-filter-help">Date range filters the latest client reply date (IST). Clear the dates to include recipients who have not replied.</p>
         <label>Search Recipients or Latest Reply<input value={replySearch} onChange={event => { setReplySearch(event.target.value); setInboxOffset(0); }} /></label>
+        <div className="broadcast-report-toolbar"><p>Download all records matching the selected broadcast and filters, including full conversations across every page.</p><ReportDownloads reportLabel="Broadcast Replies and Delivery" getReport={() => exportReport('replies')} fileName="WhatsApp_Broadcast_Replies_Delivery" onError={setError} /></div>
         <div className="broadcast-scroll"><table><thead><tr><th>POC / Number</th><th>Clients / Projects</th><th>Delivery</th><th>Latest Reply</th><th>Reply Time</th><th>Response Status</th></tr></thead><tbody>
           {matchingReplies.map(row => <tr key={row.id} className={recipientId === row.id ? 'broadcast-selected' : ''}>
             <td>{[...new Set(row.associations.map(poc => poc.name))].join(', ')}<small>{row.phone || 'Number Unavailable'}</small><small>{row.title}</small><div className="broadcast-recipient-actions"><Button onClick={() => { setRecipientId(row.id); window.requestAnimationFrame(() => section('broadcast-conversation')); }}>Open Conversation</Button></div></td>
